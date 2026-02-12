@@ -663,6 +663,7 @@ end subroutine merge_tree_fine
 subroutine virtual_tree_fine(ilevel)
   use pm_commons
   use amr_commons
+  use ksection
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -679,6 +680,9 @@ subroutine virtual_tree_fine(ilevel)
   integer,dimension(MPI_STATUS_SIZE,2*ncpu)::statuses
   integer,dimension(2*ncpu)::reqsend,reqrecv
   integer,dimension(ncpu)::sendbuf,recvbuf
+  integer::ntotal_ksec,nrecv_ksec,idx_ksec
+  real(dp),allocatable::sbuf_ksec(:,:),rbuf_ksec(:,:)
+  integer,allocatable::dcpu_ksec(:)
 #endif
   integer,dimension(1:nvector),save::ind_part,ind_list,ind_com
   logical::ok_free,ok_all
@@ -757,7 +761,31 @@ subroutine virtual_tree_fine(ilevel)
   end do
 
   ! Communicate virtual particle number to parent cpu
-  call MPI_ALLTOALL(sendbuf,1,MPI_INTEGER,recvbuf,1,MPI_INTEGER,MPI_COMM_WORLD,info)
+  if(ordering=='ksection') then
+     ntotal_ksec = 0
+     do icpu = 1, ncpu
+        if(sendbuf(icpu) > 0) ntotal_ksec = ntotal_ksec + 1
+     end do
+     allocate(sbuf_ksec(1:2, 1:max(ntotal_ksec,1)))
+     allocate(dcpu_ksec(1:max(ntotal_ksec,1)))
+     idx_ksec = 0
+     do icpu = 1, ncpu
+        if(sendbuf(icpu) > 0) then
+           idx_ksec = idx_ksec + 1
+           dcpu_ksec(idx_ksec) = icpu
+           sbuf_ksec(1, idx_ksec) = dble(myid)
+           sbuf_ksec(2, idx_ksec) = dble(sendbuf(icpu))
+        end if
+     end do
+     call ksection_exchange_dp(sbuf_ksec, ntotal_ksec, dcpu_ksec, 2, rbuf_ksec, nrecv_ksec)
+     recvbuf = 0
+     do idx_ksec = 1, nrecv_ksec
+        recvbuf(nint(rbuf_ksec(1, idx_ksec))) = nint(rbuf_ksec(2, idx_ksec))
+     end do
+     deallocate(sbuf_ksec, dcpu_ksec, rbuf_ksec)
+  else
+     call MPI_ALLTOALL(sendbuf,1,MPI_INTEGER,recvbuf,1,MPI_INTEGER,MPI_COMM_WORLD,info)
+  end if
 
   ! Allocate communication buffer in reception
   do icpu=1,ncpu

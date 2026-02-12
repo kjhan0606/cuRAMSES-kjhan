@@ -363,11 +363,15 @@ end subroutine recursive_multigrid_coarse
 subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
    use amr_commons
    use poisson_commons
+   use ksection
    implicit none
 
 #ifndef WITHOUTMPI
    include "mpif.h"
    integer, dimension (MPI_STATUS_SIZE, ncpu) :: statuses
+   integer :: ntotal_ksec, nrecv_ksec, idx_ksec
+   real(dp), allocatable :: sbuf_ksec(:,:), rbuf_ksec(:,:)
+   integer, allocatable :: dcpu_ksec(:)
 #endif
 
    integer, intent(in) :: ifinelevel
@@ -451,8 +455,32 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
 
 #ifndef WITHOUTMPI
    ! Share number of requests and replies
-   call MPI_ALLTOALL(nreq, 1, MPI_INTEGER, recvbuf, 1, MPI_INTEGER, &
-      & MPI_COMM_WORLD, info)
+   if(ordering=='ksection') then
+      ntotal_ksec = 0
+      do icpu = 1, ncpu
+         if(nreq(icpu) > 0) ntotal_ksec = ntotal_ksec + 1
+      end do
+      allocate(sbuf_ksec(1:2, 1:max(ntotal_ksec,1)))
+      allocate(dcpu_ksec(1:max(ntotal_ksec,1)))
+      idx_ksec = 0
+      do icpu = 1, ncpu
+         if(nreq(icpu) > 0) then
+            idx_ksec = idx_ksec + 1
+            dcpu_ksec(idx_ksec) = icpu
+            sbuf_ksec(1, idx_ksec) = dble(myid)
+            sbuf_ksec(2, idx_ksec) = dble(nreq(icpu))
+         end if
+      end do
+      call ksection_exchange_dp(sbuf_ksec, ntotal_ksec, dcpu_ksec, 2, rbuf_ksec, nrecv_ksec)
+      recvbuf = 0
+      do idx_ksec = 1, nrecv_ksec
+         recvbuf(nint(rbuf_ksec(1, idx_ksec))) = nint(rbuf_ksec(2, idx_ksec))
+      end do
+      deallocate(sbuf_ksec, dcpu_ksec, rbuf_ksec)
+   else
+      call MPI_ALLTOALL(nreq, 1, MPI_INTEGER, recvbuf, 1, MPI_INTEGER, &
+         & MPI_COMM_WORLD, info)
+   end if
 
    ! Allocate inbound comms
    do icpu=1,ncpu
@@ -581,8 +609,31 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
 #ifndef WITHOUTMPI
    ! Share number of requests and replies
    recvbuf2=0
-   call MPI_ALLTOALL(nreq2, 1, MPI_INTEGER, recvbuf2, 1, MPI_INTEGER, &
-      & MPI_COMM_WORLD, info)
+   if(ordering=='ksection') then
+      ntotal_ksec = 0
+      do icpu = 1, ncpu
+         if(nreq2(icpu) > 0) ntotal_ksec = ntotal_ksec + 1
+      end do
+      allocate(sbuf_ksec(1:2, 1:max(ntotal_ksec,1)))
+      allocate(dcpu_ksec(1:max(ntotal_ksec,1)))
+      idx_ksec = 0
+      do icpu = 1, ncpu
+         if(nreq2(icpu) > 0) then
+            idx_ksec = idx_ksec + 1
+            dcpu_ksec(idx_ksec) = icpu
+            sbuf_ksec(1, idx_ksec) = dble(myid)
+            sbuf_ksec(2, idx_ksec) = dble(nreq2(icpu))
+         end if
+      end do
+      call ksection_exchange_dp(sbuf_ksec, ntotal_ksec, dcpu_ksec, 2, rbuf_ksec, nrecv_ksec)
+      do idx_ksec = 1, nrecv_ksec
+         recvbuf2(nint(rbuf_ksec(1, idx_ksec))) = nint(rbuf_ksec(2, idx_ksec))
+      end do
+      deallocate(sbuf_ksec, dcpu_ksec, rbuf_ksec)
+   else
+      call MPI_ALLTOALL(nreq2, 1, MPI_INTEGER, recvbuf2, 1, MPI_INTEGER, &
+         & MPI_COMM_WORLD, info)
+   end if
 
    ! Allocate inbound comms
    do icpu=1,ncpu
