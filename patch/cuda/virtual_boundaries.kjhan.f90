@@ -1277,6 +1277,9 @@ subroutine build_comm(ilevel)
 
 #endif
 
+  ! Update Morton hash table for this level (includes new virtual grids)
+  call morton_hash_rebuild_level(ilevel)
+
 111 format('   Entering build_comm for level ',I2)
 
 end subroutine build_comm

@@ -54,17 +54,19 @@ LIBGRACKLE = -lgrackle -lhdf5 -lz
 LIBS = $(LIBMPI) 
 #############################################################################
 # Sources directories are searched in this exact order
-VPATH = ../patch/cuda:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
+VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
 #############################################################################
 # All objects
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
-	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o 
+	 morton_keys.o morton_hash.o \
+	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o
 
 AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loop.jaehyun.o amr_step.jaehyun.o update_time.o \
          output_amr.kjhan.o flag_utils.kjhan.o physical_boundaries.kjhan.o virtual_boundaries.kjhan.o refine_utils.o nbors_utils.kjhan.o \
          hilbert.o load_balance.kjhan.o title.o sort.o cooling_fine.kjhan.o units.o light_cone.part.o light_cone.hydro2.o light_cone.sink2.o movie_mod.yonghwi_org.o kjhan.o\
-		 output_sphere_hydro.o output_sphere_part.o output_sphere_sink.o
+		 output_sphere_hydro.o output_sphere_part.o output_sphere_sink.o \
+         morton_init.o
 # Particle-Mesh objects
 PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fine.o newdt_fine.kjhan.o particle_tree.kjhan.o \
         add_list.o remove_list.o star_formation.kjhan.o sink_particle.kjhan.o feedback.kjhan3.o \

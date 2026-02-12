@@ -132,6 +132,11 @@ subroutine adaptive_loop
 
      ! Call base level
      call amr_step(levelmin,1)
+
+     ! Rebuild and verify Morton hash tables after all levels updated
+     call morton_hash_rebuild
+     call morton_hash_verify('step')
+
                                call timer('coarse levels','start')
 
      if(levelmin.lt.nlevelmax.and.(.not.static.or.(nstep_coarse_old.eq.nstep_coarse.and.restart_remap)))then

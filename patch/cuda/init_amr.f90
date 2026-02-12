@@ -444,6 +444,11 @@ subroutine init_amr
         read(ilun)bisec_cpubox_min(1:ncpu,1:ndim)
         read(ilun)bisec_cpubox_max(1:ncpu,1:ndim)
      else if(ordering=='ksection') then
+        read(ilun)nksec_levels
+        read(ilun)ksec_kmax
+        read(ilun)ksec_nbinodes
+        read(ilun)ksec_factor(1:nksec_levels)
+        read(ilun)ksec_dir(1:nksec_levels)
         read(ilun)ksec_wall(1:ksec_nbinodes,1:max(ksec_kmax-1,1))
         read(ilun)ksec_next(1:ksec_nbinodes,1:ksec_kmax)
         read(ilun)ksec_indx(1:ksec_nbinodes)
@@ -596,6 +601,9 @@ subroutine init_amr
 
   ! Test ksection exchange subroutines
   if(ordering=='ksection') call test_ksection_exchange()
+
+  ! Build Morton hash tables and verify against nbor/son structure
+  if(nrestart>0) call morton_hash_build_and_verify()
 
 end subroutine init_amr
 
