@@ -1,0 +1,103 @@
+&RUN_PARAMS
+cosmo=.true.
+pic=.true.
+poisson=.true.
+hydro=.true.
+nrestart=0
+nremap=10
+nsubcycle=1,1,1,1,1
+ncontrol=1
+verbose=.true.
+sink=.true.
+sinkprops=.false.
+/
+
+&INIT_PARAMS
+filetype='grafic'
+initfile(1)='~/ics/Degrad_B20_128'
+initfile(2)='~/ics/Extract_B10_256'
+initfile(3)='~/ics/Extract_B05_512'
+/
+
+&AMR_PARAMS
+levelmin=7
+levelmax=16
+nexpand=1,1,1,1,1
+ngridtot=40000000
+nparttot=80000000
+boxlen=1.0
+/
+
+&REFINE_PARAMS
+m_refine=0.,30*8.0,
+sink_refine=.true.
+ivar_refine=-1
+interpol_var=1
+interpol_type=0
+x_refine=30*0.5
+y_refine=30*0.5
+z_refine=30*0.5
+r_refine=0.4,30*0.19
+/
+
+&HYDRO_PARAMS
+gamma=1.6666667
+courant_factor=0.8
+slope_type=1
+pressure_fix=.true.
+scheme='muscl'
+riemann='hllc'
+/
+
+&PHYSICS_PARAMS
+cooling=.true.
+haardt_madau=.true.
+metal=.true.
+eps_star=0.01
+n_star=0.1
+del_star=55.
+T2_star=750.
+g_star=2.d0
+f_w=0.
+f_ek=0.
+eps_sn2=1.
+eps_sn1=1.
+tol=1.d-3
+delayed_cooling = .True.
+omega_b = 0.04
+yieldtablefilename='/home/507460/ramses/trunk/ramses/patch/Horizon5/Atomos/yield_table.asc'
+z_reion=10. ! what is this for?
+Mseed=1d4 ! Initial seed BH mass in Msun
+sink_AGN=.true. ! Activate AGN feedback
+bondi=.true. ! Activate Bondi accretion rate
+drag=.true. ! Activate gas drag force onto BHs
+X_floor=1d-2 ! Eddington ratio threshold between radio and quasar mode
+eAGN_K=1d0 ! Efficiency of the radio mode
+eAGN_T=0.15d0 ! Efficiency of the quasar mode
+TAGN=0.0 ! Temperature increase before energy release in K
+r_gal=50d0 ! Exclusion radius for the formation of new BHs in kpc (was 50kpc)
+T2maxAGN=1d10 ! Maximum temperature increase due to AGN feedback
+boost_acc=2d0 ! Power of the density scaling in the boost factor for gas accretion (Booth & Schaye 2009)
+boost_drag=2d0 ! Power of the density scaling in the boost factor for gas drag force
+vrel_merge=.true. ! Activate relative velocity criterion to merge BHs together
+rmerge=4d0 ! Distance in dx_min units below which BHs are allowed to merge
+spin_bh=.true. ! Activate the BH spin evolution (Dubois et al, 2014). Impact the accretion and feedback in different ways
+mad_jet=.true. ! Activate the MAD jet model (McKinney et al, 2012). Only works with spin_bh=.true.
+/
+
+&POISSON_PARAMS
+epsilon=1.d-4
+/
+
+&BOUNDARY_PARAMS
+nboundary=1
+bound_type=0,0,0,0,0,0
+/
+
+&OUTPUT_PARAMS
+noutput=6
+foutput=10000
+fbackup=10000
+aout=0.0,0.2,0.4,0.6,0.8,1.0
+/
+

@@ -1,0 +1,112 @@
+&RUN_PARAMS
+cosmo=.true.
+pic=.true.
+poisson=.true.
+hydro=.true.
+nrestart=0
+nremap=10
+nsubcycle=2,2,2,2,2
+ncontrol=1
+verbose=.false.
+lightcone=.true.
+sink=.true. ! Activate sink (BH) particles
+sinkprops=.false. ! Dump BH properties at every coarse time step of the simulation
+/
+
+&INIT_PARAMS
+filetype='grafic'
+initfile(1)='IC/level_008'
+initfile(2)='IC/level_009'
+initfile(3)='IC/level_010'
+initfile(4)='IC/level_011'
+
+&OUTPUT_PARAMS
+noutput=10
+aout=0.1,0.2,0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0
+/
+
+&AMR_PARAMS
+levelmin=8
+levelmax=16
+ngridtot=700000000
+nparttot=3500000000
+nexpand=7,7,1,1
+/
+
+&REFINE_PARAMS
+m_refine=11*8.,
+ivar_refine=16
+var_cut_refine=0.01
+mass_cut_refine=2.91038e-11
+interpol_var=1
+interpol_type=0
+sink_refine=.true.
+/
+
+&LIGHTCONE_PARAMS
+zmax_cone=9.0
+levelmin_cone=11
+!Observer1
+elongated_axis_cone1=1   !1:x 2:y 3:z, minus: construct lightcone along opposite direction
+observer_cone1=0.0,0.5,0.5 ! (0-1)
+minboxr_cone1=0.,0.4,0.4
+maxboxr_cone1=1.,0.6,0.6
+!Observer2
+elongated_axis_cone2=-1   !1:x 2:y 3:z minus: construct lightcone along opposite direction
+observer_cone2=0.0,0.5,0.5 ! (0-1)
+minboxr_cone2=0.,0.4,0.4
+maxboxr_cone2=1.,0.6,0.6
+
+/
+
+
+&HYDRO_PARAMS
+gamma=1.6666667
+courant_factor=0.8
+slope_type=1
+scheme='muscl'
+riemann='hllc'
+pressure_fix=.true.
+beta_fix=0.5
+/
+
+&PHYSICS_PARAMS
+cooling=.true.
+haardt_madau=.true.
+metal=.true.
+eps_star=0.1
+del_star=55.
+n_star=1
+T2_star=1d4
+g_star=1.3333
+eps_sn2=1.
+eps_sn1=1.
+tol=0.001
+yieldtablefilename='<ramses>/patch/converged/YTab_Chabrier03_100_K01_WoosleyWeaver95_vdHoekGroenewegen_Iwamoto99.asc'
+f_w=0.
+f_ek=0.
+z_reion=10.
+delayed_cooling=.true.
+t_diss=30.0
+Mseed=1d5 ! Initial seed BH mass in Msun
+sink_AGN=.true. ! Activate AGN feedback
+bondi=.true. ! Activate Bondi accretion rate
+drag=.true. ! Activate gas drag force onto BHs
+X_floor=1d-2 ! Eddington ratio threshold between radio and quasar mode
+eAGN_K=1d0 ! Efficiency of the radio mode
+eAGN_T=0.15d0 ! Efficiency of the quasar mode
+TAGN=0.0 ! Temperature increase before energy release in K
+r_gal=50d0 ! Exclusion radius for the formation of new BHs in kpc
+T2maxAGN=1d10 ! Maximum temperature increase due to AGN feedback
+boost_acc=2d0 ! Power of the density scaling in the boost factor for gas accretion (Booth & Schaye 2009)
+boost_drag=2d0 ! Power of the density scaling in the boost factor for gas drag force
+vrel_merge=.true. ! Activate relative velocity criterion to merge BHs together
+rmerge=4d0 ! Distance in dx_min units below which BHs are allowed to merge
+spin_bh=.true. ! Activate the BH spin evolution (Dubois et al, 2014). Impact the accretion and feedback in different ways.
+mad_jet=.true. ! Activate the MAD jet model (McKinney et al, 2012). Only works with spin_bh=.true.
+/
+
+&POISSON_PARAMS
+epsilon=1.d-5
+cg_levelmin=10
+/

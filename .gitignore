@@ -1,0 +1,16 @@
+# Build artifacts
+bin/*.o
+bin/*.mod
+bin/ramses*
+bin/write_makefile.f90
+
+# Test run outputs
+test_ksection/run_*/output_*
+test_ksection/run_*/log
+test_ksection/run_*/run.log
+test_ksection/run_cosmo_*/output_*
+test_ksection/run_cosmo_*/log
+test_ksection/run_cosmo_*/run.log
+
+# Claude session files
+.claude/

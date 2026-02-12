@@ -1,0 +1,73 @@
+
+New files
+=========
+adaptive_loop.jaehyun.f90
+a.f90
+flag_utils.kjhan.f90
+kjhan.f90
+light_cone.hydro.f90
+light_cone.part.f90
+light_cone.sink.f90
+phi_fine_cg.kisti.f90
+=========
+(37, 8)
+=========
+
+Modified openmp but same basic with main branch
+=========
+courant_fine.kjhan.f90
+force_fine.kjhan.f90
+hydro_flag.kjhan.f90
+newdt_fine.kjhan.f90
+particle_tree.kjhan.f90
+rho_fine.kjhan.f90
+synchro_fine.kjhan.f90
+=========
+(37, 15)
+=========
+
+Unmodified openmp and same basic with main branch
+=========
+add_list.f90
+init_poisson.f90
+init_sink.f90
+init_time.f90
+move_fine.f90
+output_part.f90
+output_sink.f90
+pm_commons.f90
+pm_parameters.f90
+poisson_commons.f90
+=========
+(37, 25)
+=========
+
+Needs converging
+=========
+amr_parameters.jaehyun.f90
+amr_step.f90
+feedback.kjhan.f90
+hydro_parameters.f90
+init_flow_fine.f90
+init_part.f90
+output_amr.kjhan.f90
+read_hydro_params.f90
+read_params.jaehyun.f90
+sink_particle.kjhan.aux.f90
+sink_particle.kjhan.f90
+star_formation.kjhan.f90
+
+Needs converging : - meld
+=========
+meld amr_parameters.jaehyun.f90 ../../gareth_patch/Horizon5-master/amr_parameters.f90
+meld amr_step.f90 ../../gareth_patch/Horizon5-master/amr_step.f90
+meld feedback.kjhan.f90 ../../gareth_patch/Horizon5-master/feedback.f90
+meld hydro_parameters.f90 ../../gareth_patch/Horizon5-master/hydro_parameters.f90
+meld init_flow_fine.f90 ../../gareth_patch/Horizon5-master/init_flow_fine.f90
+meld init_part.f90 ../../gareth_patch/Horizon5-master/init_part.f90
+meld output_amr.kjhan.f90 ../../gareth_patch/Horizon5-master/output_amr.f90
+meld read_hydro_params.f90 ../../gareth_patch/Horizon5-master/read_hydro_params.f90
+meld read_params.jaehyun.f90 ../../gareth_patch/Horizon5-master/read_params.f90
+meld sink_particle.kjhan.aux.f90 ../../gareth_patch/Horizon5-master/sink_particle.f90
+meld sink_particle.kjhan.f90 ../../gareth_patch/Horizon5-master/sink_particle.f90
+meld star_formation.kjhan.f90 ../../gareth_patch/Horizon5-master/star_formation.f90

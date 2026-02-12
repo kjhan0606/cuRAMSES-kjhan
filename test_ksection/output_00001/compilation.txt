@@ -1,0 +1,5 @@
+ compile date = 02/11/26-17:05:41
+ patch dir    = ../patch/Horizon5-master-2
+ remote repo  = 
+ local branch = 
+ last commit  = 

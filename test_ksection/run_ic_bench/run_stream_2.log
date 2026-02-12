@@ -1,0 +1,161 @@
+ _/_/_/       _/_/     _/    _/    _/_/_/   _/_/_/_/    _/_/_/  
+ _/    _/    _/  _/    _/_/_/_/   _/    _/  _/         _/    _/ 
+ _/    _/   _/    _/   _/ _/ _/   _/        _/         _/       
+ _/_/_/     _/_/_/_/   _/    _/     _/_/    _/_/_/       _/_/   
+ _/    _/   _/    _/   _/    _/         _/  _/               _/ 
+ _/    _/   _/    _/   _/    _/   _/    _/  _/         _/    _/ 
+ _/    _/   _/    _/   _/    _/    _/_/_/   _/_/_/_/    _/_/_/  
+                         Version 3.0                            
+        written by Romain Teyssier (University of Zurich)       
+                (c) CEA 1999-2007, UZH 2008-2014                
+  
+ Working with nproc =   12 for ndim = 3
+  
+ IOGROUPSIZECONE=           2
+  
+  
+ compile date = 02/12/26-08:50:53
+ patch dir    = ../patch/Horizon5-master-2
+ remote repo  = 
+ local branch = 
+ last commit  = 
+  
+ Hydro var indices:
+    ichem   =            6
+ K-section decomposition:
+    nksec_levels  =           3
+    ksec_kmax     =           3
+    ksec_nbinodes =          22
+    ksec_factor   =           3           2           2
+    ksec_dir      =           1           2           3
+ ksection_exchange (exclusive) test: PASSED
+ ksection_exchange (overlap point) test: PASSED
+ ksection_exchange (full overlap) test: PASSED
+ ksection_exchange (periodic overlap) test: PASSED
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_delta
+ b
+ Cosmological parameters:
+ aexp= 1.961E-02 H0= 6.766E+01 km s-1 Mpc-1
+ omega_m=  0.311 omega_l=  0.689
+ box size= 1.000E+01 h-1 Mpc
+ Initial conditions for level =   8
+ dx= 3.906E-02 h-1 Mpc
+ n1= 256 n2= 256 n3= 256
+ xoff= 0.000E+00 yoff= 0.000E+00 zoff= 0.000E+00 h-1 Mpc
+ Computing Friedman model
+ Building initial AMR grid
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_delta
+ b
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velbx not fou
+ nd
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velby not fou
+ nd
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velbz not fou
+ nd
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_tempb not fou
+ nd
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00001 no
+ t found
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00002 no
+ t found
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00003 no
+ t found
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00004 no
+ t found
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00005 no
+ t found
+ Initialize corresponding variable to default value
+ File /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_pvar_00006 no
+ t found
+ Initialize corresponding variable to default value
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_poscx
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velcx
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_poscy
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velcy
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_poscz
+ Reading file /gpfs/kjhan/Darwin/Cudaization/MUSIC/ics_ramses/level_008/ic_velcz
+ npart=     1398635 /     6666666  for PE=           6
+ npart=     1409025 /     6666666  for PE=           1
+ npart=     1385842 /     6666666  for PE=           5
+ npart=     1390550 /     6666666  for PE=           7
+ npart=     1409025 /     6666666  for PE=           3
+ npart=     1420327 /     6666666  for PE=           9
+ npart=     1409025 /     6666666  for PE=          11
+ npart=     1376257 /     6666666  for PE=           8
+ npart=     1439586 /     6666666  for PE=           2
+ npart=     1409025 /     6666666  for PE=           4
+ npart=     1490486 /     6666666  for PE=          10
+ npart=     1422509 /     6666666  for PE=          12
+ Used memory:   7.4 Gb
+ Time elapsed since startup:   8.87460704054683     
+ Initial mesh structure
+ Level  1 has          1 grids (       0,       1,       0,)
+ Level  2 has          8 grids (       0,       1,       0,)
+ Level  3 has         64 grids (       4,       8,       5,)
+ Level  4 has        512 grids (      32,      48,      42,)
+ Level  5 has       4096 grids (     320,     384,     341,)
+ Level  6 has      32768 grids (    2560,    2816,    2730,)
+ Level  7 has     262144 grids (   21504,   22528,   21845,)
+ Level  8 has    2097152 grids (  172032,  176128,  174762,)
+ Starting time integration
+ Load balancing AMR grid...
+ Start backup header
+ End backup header
+ Start backup info etc.
+ End backup info etc.
+ Start backup amr
+ End backup amr
+ Start backup hydro
+ End backup hydro
+ Start backup part
+ End backup part
+ Start backup poisson
+ End backup poisson
+   ==> Level=    8 Step=    5 Error= 1.083E-05
+ Fine step=      0 t=-2.15200E+01 dt= 1.280E+00 a= 1.961E-02 mem= 7.3% 22.5%
+ Mtot= 1.51E-01 Ekin_tot=-1.75E-07 Epop_tot= 9.92E-08 Eint_tot= 2.56E-11
+ Time elapsed since last coarse step:    6.66 s        4.76 mus/pt        4.76 mus/pt (av)
+ Used memory:   7.6 Gb
+ Memory min/max:      7.6 /      7.6 Gb
+ Total running time:   15.53000     s
+ Load balancing AMR grid...
+   ==> Level=    8 Step=    5 Error= 1.083E-05
+ Mesh structure
+ Level  1 has          1 grids (       0,       1,       0,)
+ Level  2 has          8 grids (       0,       1,       0,)
+ Level  3 has         64 grids (       4,       8,       5,)
+ Level  4 has        512 grids (      32,      48,      42,)
+ Level  5 has       4096 grids (     320,     384,     341,)
+ Level  6 has      32768 grids (    2560,    2816,    2730,)
+ Level  7 has     262144 grids (   21504,   22528,   21845,)
+ Level  8 has    2097152 grids (  172032,  176128,  174762,)
+ Main step=      1 mcons= 0.00E+00 econs= 0.00E+00 epot=-2.31E-07 ekin= 1.35E-07
+ Fine step=      1 t=-2.02396E+01 dt= 1.216E+00 a= 2.173E-02 mem= 7.3% 22.6%
+ Run completed
+ Total elapsed time:   3.66100491490215     
+ --------------------------------------------------------------------
+
+     minimum       average       maximum  standard dev        std/av       %   rmn   rmx  TIMER
+       0.160         0.161         0.162         0.001         0.003     1.8     1  11    coarse levels           
+       0.031         0.032         0.033         0.001         0.017     0.4    11   1    refine                  
+       2.673         2.673         2.673         0.000         0.000    29.4     5   9    loadbalance             
+       0.489         0.501         0.520         0.008         0.017     5.5     4  10    particles               
+       3.024         3.024         3.024         0.000         0.000    33.2     5   1    io                      
+       0.558         0.563         0.567         0.002         0.004     6.2     8   7    poisson                 
+       1.084         1.086         1.088         0.001         0.001    11.9    11   8    poisson - mg            
+       0.090         0.112         0.129         0.010         0.085     1.2    10   8    hydro - ghostzones      
+       0.030         0.031         0.032         0.000         0.014     0.3     6   1    courant                 
+       0.011         0.015         0.018         0.003         0.170     0.2     7  10    hydro - set unew        
+       0.336         0.620         0.769         0.187         0.301     6.8     8  10    hydro - godunov         
+       0.025         0.176         0.465         0.189         1.074     1.9    10   7    hydro - rev ghostzones  
+       0.012         0.021         0.026         0.005         0.237     0.2     2  10    hydro - set uold        
+       0.085         0.085         0.085         0.000         0.001     0.9    10   7    flag                    
+       9.102     100.0    TOTAL

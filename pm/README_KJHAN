@@ -1,0 +1,10 @@
+[1] OpenMP implmentation list:
+
+add_list.f90
+clfind_commons.f90
+clump_finder.f90
+clump_merger.f90
+feedback.f90
+particle_tree.f90
+rho_fine.f90
+

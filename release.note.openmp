@@ -1,0 +1,55 @@
+This is the OpenMP version of the RAMSES applied to the chemical branch built by Prof. Gibson.
+
+This work is done by Dr. Juhan Kim (hereafter kjhan). The purpose of this implementation
+is to add more cpu cores to the MPI run. The current MPI version of RAMSES is known to 
+have substantial performance degradation for larger than a few thousand cores while the 
+OpenMP version is expected to increase the number of cpu cores further without significant 
+performance degradation.
+
+
+
+release note on 06/19/2018
+
+[1] "bin/Makefile":
+This version of patch only applies to "Horizon5-master_newref", and one should declare it 
+by "PATCH = ../patch/Horizon5-master_newref" in Makefile.  To check the output consistency 
+between logs files, one should define "-DOMP_TEST" in the "FFLAGS" environment variable.  
+For a production run, one may delete this flag.  Source codes made by kjhan can be easily 
+found by searching for "*.kjhan.o" in the objects.
+
+ - The OpenMP implementation to the "kinetic feedback" subroutine in "feedback.kjhan.f90" 
+ is not done yet.
+
+[2] I have adopted such a naming convention that my OpenMP version of the source files should 
+have a name with a suffix such as "kjhan.f90". Other files such as "*.kjhan.uncorrected.f90" 
+should be ignored because they were created just for test.
+
+[3] Some ordering issues are detected in the original source code. First, in 
+"sink_particle.f90" if three lines as follow are insered (only to change the FoF-link-group 
+id number) as
+... 
+! This to test 
+  do isink=1,nsink
+     gsink(isink) = new_sink-gsink(isink) +1
+  enddo
+...
+between the FoF link and sink update (around 885'th line) in merge_sink routine, the results 
+are different with different star formation and sink formation histories. Also in 
+"hydro/godunov_fine.kjhan.f90", the multi-threaded call to "godfine1()" function produces 
+different outputs even though we wrap the relevant part with "!$omp critical". However, 
+if we enclose the same part with "!$omp ordered", the outputs are identical. 
+
+[4] For the intel fortran compiler, we have to include an option, "-cpp", to invoke the C-type 
+preprocessor.  Also we set the options "-fc=ifort" and "-qopenmp" for OpenMP directives.
+Those options depend on the compilers and should be applied with caution.
+
+
+[5] The original RAMSES codes are exhaustive in the static memory space and, therefore,
+one should increase the stack size with
+% export OMP_STACKSIZE=2048m
+where this example uses 2GB memory space for static space.
+
+[6] If one wants to specify the number of threads for each MPI rank, one should define the
+number of threads as
+export OMP_NUM_THREADS=3
+where three threads are allocated for each mpi rank.

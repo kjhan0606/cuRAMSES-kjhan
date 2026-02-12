@@ -1,0 +1,78 @@
+#!/bin/sh
+
+1. Implementation of OpenMP by Juhan Kim
+
+[1] particle_tree.kjhan.f90 - 1st phase pass
+[2] feedback.kjhan.f90 - 1st phase pass
+[2] sin_particle.kjhan.f90 - 0th phase ongoing
+
+
+
+
+2. Description of phases.
+
+0th phase: OpenMP modification is ongoing.
+1st phase: Simple openmp modification is done.
+2nd phase: Compilation issues were passed.
+2.5nd phase: clean up the temporary allocated memory
+3rd phase: Running test with the same results as of the non threaded runs.
+
+
+
+3. Important note.
+
+
+################################################################################
+[1] thread-safe issue:
+call add_list: seems to be thread-safe
+call remove_list: seems to be nonthread-safe
+
+
+Therefore, it would be better to apply openmp to the grids loop as:
+
+
+From:
+...
+do icpu=.....
+igrid=headl(icpu,ilevel)
+ig=0
+ip=0
+do jgrid=1,numbl(icpu,ilevel)
+...
+
+
+To:
+    do icpu=.....
+     igrid = ptlhead(mythread)
+	 ig = 0
+	 ip = 0
+#ifdef _OPENMP
+     call pthreadLinkedList(headl(icpu,ilevel), numbl(icpu,ilevel), nthreads, nparticles, prthead, next)
+!$omp paralle private(npart1, igrid, jgrid,npart1,ig,ipart,jpart,next_part,ip)
+     npart3 = nparticles(mythread)
+	 igrid = ptrhead(mythread)
+     do jgrid=1,npart3
+#else
+     do jgrid=1,numbl(icpu,ilevel)
+#endif
+	 .............
+	 call sub1
+	 enddo
+!$omp end do
+     ...........
+!$omp end parallel
+	 enddo
+	 .....
+	 .....
+	 subroutine  sub1
+	 .....
+!$omp critical
+     non-thread-safe routine
+!$omp end critical
+	 .....
+	 end subroutine sub1
+   
+
+################################################################################
+
+

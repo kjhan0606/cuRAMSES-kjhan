@@ -1,0 +1,4214 @@
+5c5,93
+< subroutine org_make_sink(ilevel)
+---
+> subroutine create_sink
+>   use amr_commons
+>   use pm_commons
+>   use hydro_commons
+>   use cooling_module, ONLY: XH=>X, rhoc, mH
+>   implicit none
+> #ifndef WITHOUTMPI
+>   include 'mpif.h'
+> #endif
+>   !-------------------------------------------------------------------------------
+>   ! Description: This subroutine create sink particle in cells where some density
+>   ! threshold has been crossed. It also removes from the gas the corresponding
+>   ! particle mass. On exit, all fluid variables in the cell are modified.
+>   ! This routine is called only once per coarse step by routine amr_step.
+>   ! Romain Teyssier, October 7th, 2007
+>   !-------------------------------------------------------------------------------
+>   ! local constants
+>   integer::ilevel,ivar,info,icpu,igrid,npartbound,isink,nelvelmax_loc
+>   real(dp)::dx_min,vol_min,dx,dx_temp
+>   integer::nx_loc
+> 
+>   if(verbose)write(*,*)' Entering create_sink'
+>   ! Remove particles to finer levels
+>   do ilevel=levelmin,nlevelmax
+>      call kill_tree_fine(ilevel)
+>      call virtual_tree_fine(ilevel)
+>   end do
+> 
+>   ! Get the star density value in each cell
+>   do ilevel=levelmin,nlevelmax
+>      call get_rho_star(ilevel)
+>   enddo
+> 
+>   ! Create new sink particles
+>   ! and gather particle from the grid
+>   call make_sink(nlevelmax)
+>   do ilevel=nlevelmax-1,1,-1
+>      if(ilevel>=levelmin)call make_sink(ilevel)
+>      call merge_tree_fine(ilevel)
+>   end do
+> 
+>   ! Remove particle clouds around old sinks
+>   call kill_cloud(1)
+> 
+>   ! update sink position before merging sinks and creating clouds
+>   call update_sink_position_velocity
+> 
+>   ! Merge sink using FOF
+>   call merge_sink(1)
+> 
+>   ! Create new particle clouds
+>   call create_cloud(1)
+> 
+>   ! Scatter particle to the grid
+>   do ilevel=1,nlevelmax
+>      call make_tree_fine(ilevel)
+>      call kill_tree_fine(ilevel)
+>      call virtual_tree_fine(ilevel)
+>   end do
+> 
+>   ! Update hydro quantities for split cells
+>   if(hydro)then
+>      do ilevel=nlevelmax,levelmin,-1
+> 	call upload_fine(ilevel)
+> #ifdef SOLVERmhd
+> 	do ivar=1,nvar+3
+> #else
+> 	do ivar=1,nvar
+> #endif
+> 	   call make_virtual_fine_dp(uold(1,ivar),ilevel)
+> 	end do
+> 	! Update boundaries
+> 	if(simple_boundary)call make_boundary_hydro(ilevel)
+>      end do
+>   end if
+> 
+>   jsink=0d0
+>   ! Compute Bondi parameters and gather particle
+>   do ilevel=nlevelmax,levelmin,-1
+>      if(bondi)call bondi_hoyle(ilevel)
+>      call merge_tree_fine(ilevel)
+>   end do
+> 
+> end subroutine create_sink
+> !################################################################
+> !################################################################
+> !################################################################
+> !################################################################
+> subroutine make_sink(ilevel)
+109c197
+<     yy=dble(jj)*dx_min/2.0
+---
+> 	yy=dble(jj)*dx_min/2.0
+111,115c199,203
+<     do ii=-8,8
+<        xx=dble(ii)*dx_min/2.0
+<        rr=sqrt(xx*xx+yy*yy+zz*zz)
+<        if(rr<=rmax)ncloud=ncloud+1
+<     end do
+---
+> 	do ii=-8,8
+> 	   xx=dble(ii)*dx_min/2.0
+> 	   rr=sqrt(xx*xx+yy*yy+zz*zz)
+> 	   if(rr<=rmax)ncloud=ncloud+1
+> 	end do
+136c224
+<     ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+---
+> 	ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+139,148c227,236
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,ngrid
+<        ind_cell(i)=iskip+ind_grid(i)
+<     end do
+<     do i=1,ngrid
+<        d=uold(ind_cell(i),1)
+<        u=uold(ind_cell(i),2)/d
+<        v=uold(ind_cell(i),3)/d
+<        w=uold(ind_cell(i),4)/d
+<        e=uold(ind_cell(i),5)/d
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,ngrid
+> 	   ind_cell(i)=iskip+ind_grid(i)
+> 	end do
+> 	do i=1,ngrid
+> 	   d=uold(ind_cell(i),1)
+> 	   u=uold(ind_cell(i),2)/d
+> 	   v=uold(ind_cell(i),3)/d
+> 	   w=uold(ind_cell(i),4)/d
+> 	   e=uold(ind_cell(i),5)/d
+150,173c238,261
+<        bx1=uold(ind_cell(i),6)
+<        by1=uold(ind_cell(i),7)
+<        bz1=uold(ind_cell(i),8)
+<        bx2=uold(ind_cell(i),nvar+1)
+<        by2=uold(ind_cell(i),nvar+2)
+<        bz2=uold(ind_cell(i),nvar+3)
+<        e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+< #endif
+<        e=e-0.5d0*(u**2+v**2+w**2)
+<        uold(ind_cell(i),1)=d
+<        uold(ind_cell(i),2)=u
+<        uold(ind_cell(i),3)=v
+<        uold(ind_cell(i),4)=w
+<        uold(ind_cell(i),5)=e
+<        ! No AGN formation site by default
+<        flag2(ind_cell(i))=1
+<     end do
+<     if(metal)then
+<        do i=1,ngrid
+<           d=uold(ind_cell(i),1)
+<           w=uold(ind_cell(i),imetal)/d
+<           uold(ind_cell(i),imetal)=w
+<        end do
+<     endif
+---
+> 	   bx1=uold(ind_cell(i),6)
+> 	   by1=uold(ind_cell(i),7)
+> 	   bz1=uold(ind_cell(i),8)
+> 	   bx2=uold(ind_cell(i),nvar+1)
+> 	   by2=uold(ind_cell(i),nvar+2)
+> 	   bz2=uold(ind_cell(i),nvar+3)
+> 	   e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+> #endif
+> 	   e=e-0.5d0*(u**2+v**2+w**2)
+> 	   uold(ind_cell(i),1)=d
+> 	   uold(ind_cell(i),2)=u
+> 	   uold(ind_cell(i),3)=v
+> 	   uold(ind_cell(i),4)=w
+> 	   uold(ind_cell(i),5)=e
+> 	   ! No AGN formation site by default
+> 	   flag2(ind_cell(i))=1
+> 	end do
+> 	if(metal)then
+> 	   do i=1,ngrid
+> 	      d=uold(ind_cell(i),1)
+> 	      w=uold(ind_cell(i),imetal)/d
+> 	      uold(ind_cell(i),imetal)=w
+> 	   end do
+> 	endif
+180c268
+<   call org_quenching(ilevel)
+---
+>   call quenching(ilevel)
+191c279
+<     ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+---
+> 	ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+195,212c283,300
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,ngrid
+<        ind_cell(i)=iskip+ind_grid(i)
+<     end do
+<     ! Flag leaf cells
+<     do i=1,ngrid
+<        ok(i)=son(ind_cell(i))==0
+<     end do
+< 
+<     ! Create new sink if the gas density exceed some threshold
+<     do i=1,ngrid
+<        d=uold(ind_cell(i),1)
+<        star_ratio=rho_star(ind_cell(i))/(d+rho_star(ind_cell(i)))
+< 
+<        ! Jeans length related density threshold
+<        temp=max(uold(ind_cell(i),5)*(gamma-1.0),smallc**2)
+<        d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+<        d_thres=d_jeans
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,ngrid
+> 	   ind_cell(i)=iskip+ind_grid(i)
+> 	end do
+> 	! Flag leaf cells
+> 	do i=1,ngrid
+> 	   ok(i)=son(ind_cell(i))==0
+> 	end do
+> 
+> 	! Create new sink if the gas density exceed some threshold
+> 	do i=1,ngrid
+> 	   d=uold(ind_cell(i),1)
+> 	   star_ratio=rho_star(ind_cell(i))/(d+rho_star(ind_cell(i)))
+> 
+> 	   ! Jeans length related density threshold
+> 	   temp=max(uold(ind_cell(i),5)*(gamma-1.0),smallc**2)
+> 	   d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+> 	   d_thres=d_jeans
+214,215c302,303
+<        ! User defined density threshold
+<        !d_thres=dd_sink
+---
+> 	   ! User defined density threshold
+> 	   !d_thres=dd_sink
+219,225c307,313
+< !!$       ! Check if the star ratio is higher than a certain fraction
+< !!$       if(star.and.star_ratio<star_ratio_floor)ok(i)=.false.
+<        ! Check if the density is higher than star formation threshold
+<        if(d       <d_star )ok(i)=.false.
+<        ! Check if gas is Jeans unstable
+<        if(d       <d_thres)ok(i)=.false.
+<        ! Quenching criterion
+---
+> !!$	   ! Check if the star ratio is higher than a certain fraction
+> !!$	   if(star.and.star_ratio<star_ratio_floor)ok(i)=.false.
+> 	   ! Check if the density is higher than star formation threshold
+> 	   if(d	   <d_star )ok(i)=.false.
+> 	   ! Check if gas is Jeans unstable
+> 	   if(d	   <d_thres)ok(i)=.false.
+> 	   ! Quenching criterion
+228,269c316,357
+<        if(ok(i))then
+<           x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+<           y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+<           z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+<           do isink=1,nsink
+<          dxx=x-xsink(isink,1)
+<          if(dxx> x_half)then
+<             dxx=dxx-x_box
+<          endif
+<          if(dxx<-x_half)then
+<             dxx=dxx+x_box
+<          endif
+<          dr_sink=dxx*dxx
+<          dyy=y-xsink(isink,2)
+<          if(dyy> y_half)then
+<             dyy=dyy-y_box
+<          endif
+<          if(dyy<-y_half)then
+<             dyy=dyy+y_box
+<          endif
+<          dr_sink=dyy*dyy+dr_sink
+<          dzz=z-xsink(isink,3)
+<          if(dzz> z_half)then
+<             dzz=dzz-z_box
+<          endif
+<          if(dzz<-z_half)then
+<             dzz=dzz+z_box
+<          endif
+<          dr_sink=dzz*dzz+dr_sink
+<          if(dr_sink .le. rmax_sink2)ok(i)=.false.
+<           enddo
+<        endif
+< 
+<     end do
+<     ! Calculate number of new sinks in each cell plus cloud particles
+<     do i=1,ngrid
+<        flag2(ind_cell(i))=0
+<        if(ok(i))then
+<           ntot=ntot+1
+<           flag2(ind_cell(i))=1
+<        endif
+<     enddo
+---
+> 	   if(ok(i))then
+> 	      x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+> 	      y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+> 	      z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+> 	      do isink=1,nsink
+> 		 dxx=x-xsink(isink,1)
+> 		 if(dxx> x_half)then
+> 		    dxx=dxx-x_box
+> 		 endif
+> 		 if(dxx<-x_half)then
+> 		    dxx=dxx+x_box
+> 		 endif
+> 		 dr_sink=dxx*dxx
+> 		 dyy=y-xsink(isink,2)
+> 		 if(dyy> y_half)then
+> 		    dyy=dyy-y_box
+> 		 endif
+> 		 if(dyy<-y_half)then
+> 		    dyy=dyy+y_box
+> 		 endif
+> 		 dr_sink=dyy*dyy+dr_sink
+> 		 dzz=z-xsink(isink,3)
+> 		 if(dzz> z_half)then
+> 		    dzz=dzz-z_box
+> 		 endif
+> 		 if(dzz<-z_half)then
+> 		    dzz=dzz+z_box
+> 		 endif
+> 		 dr_sink=dzz*dzz+dr_sink
+> 		 if(dr_sink .le. rmax_sink2)ok(i)=.false.
+> 	      enddo
+> 	   endif
+> 
+> 	end do
+> 	! Calculate number of new sinks in each cell plus cloud particles
+> 	do i=1,ngrid
+> 	   flag2(ind_cell(i))=0
+> 	   if(ok(i))then
+> 	      ntot=ntot+1
+> 	      flag2(ind_cell(i))=1
+> 	   endif
+> 	enddo
+314c402
+<     ! Gather cells with a new sink
+---
+> 	! Gather cells with a new sink
+447c535
+<     write(*,'(" Level = ",I6," New sink = ",I6," Tot =",I8)')ilevel,ntot_all,nsink
+---
+> 	write(*,'(" Level = ",I6," New sink = ",I6," Tot =",I8)')ilevel,ntot_all,nsink
+468c556
+<     ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+---
+> 	ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+473,519c561,607
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,ngrid
+<        ind_cell(i)=iskip+ind_grid(i)
+<     end do
+< 
+<     ! Gather cells with a new sink
+<     nnew=0
+<     do i=1,ngrid
+<        if (flag2(ind_cell(i))>0)then
+<           nnew=nnew+1
+<           ind_grid_new(nnew)=ind_grid(i)
+<           ind_cell_new(nnew)=ind_cell(i)
+<        end if
+<     end do
+< 
+<     ! Create new sink particles
+<     do i=1,nnew
+<        index_sink=index_sink+1
+<        index_sink_tot=index_sink_tot+1
+< 
+<        ! Get gas variables
+<        d=uold(ind_cell_new(i),1)
+<        u=uold(ind_cell_new(i),2)
+<        v=uold(ind_cell_new(i),3)
+<        w=uold(ind_cell_new(i),4)
+<        e=uold(ind_cell_new(i),5)
+< 
+<        ! Get gas cell position
+<        x=(xg(ind_grid_new(i),1)+xc(ind,1)-skip_loc(1))*scale
+<        y=(xg(ind_grid_new(i),2)+xc(ind,2)-skip_loc(2))*scale
+<        z=(xg(ind_grid_new(i),3)+xc(ind,3)-skip_loc(3))*scale
+< 
+<        ! Mass of the new sink
+< 
+<        ! Jeans length related density threshold
+<        temp=max(e*(gamma-1.0),smallc**2)
+<        d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+<        d_thres=d_jeans
+<        !d_thres=0.25d0*d
+< 
+<        ! User defined density threshold
+<        !d_thres=dd_sink
+< 
+<        msink_new (index_sink)=min((d-d_thres/4.0)*dx_loc**3,Mseed*2d33/scale_m)
+<        dMsmbh_new(index_sink)=0d0
+<        Esave_new (index_sink)=0d0
+<        oksink_new(index_sink)=1d0
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,ngrid
+> 	   ind_cell(i)=iskip+ind_grid(i)
+> 	end do
+> 
+> 	! Gather cells with a new sink
+> 	nnew=0
+> 	do i=1,ngrid
+> 	   if (flag2(ind_cell(i))>0)then
+> 	      nnew=nnew+1
+> 	      ind_grid_new(nnew)=ind_grid(i)
+> 	      ind_cell_new(nnew)=ind_cell(i)
+> 	   end if
+> 	end do
+> 
+> 	! Create new sink particles
+> 	do i=1,nnew
+> 	   index_sink=index_sink+1
+> 	   index_sink_tot=index_sink_tot+1
+> 
+> 	   ! Get gas variables
+> 	   d=uold(ind_cell_new(i),1)
+> 	   u=uold(ind_cell_new(i),2)
+> 	   v=uold(ind_cell_new(i),3)
+> 	   w=uold(ind_cell_new(i),4)
+> 	   e=uold(ind_cell_new(i),5)
+> 
+> 	   ! Get gas cell position
+> 	   x=(xg(ind_grid_new(i),1)+xc(ind,1)-skip_loc(1))*scale
+> 	   y=(xg(ind_grid_new(i),2)+xc(ind,2)-skip_loc(2))*scale
+> 	   z=(xg(ind_grid_new(i),3)+xc(ind,3)-skip_loc(3))*scale
+> 
+> 	   ! Mass of the new sink
+> 
+> 	   ! Jeans length related density threshold
+> 	   temp=max(e*(gamma-1.0),smallc**2)
+> 	   d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+> 	   d_thres=d_jeans
+> 	   !d_thres=0.25d0*d
+> 
+> 	   ! User defined density threshold
+> 	   !d_thres=dd_sink
+> 
+> 	   msink_new (index_sink)=min((d-d_thres/4.0)*dx_loc**3,Mseed*2d33/scale_m)
+> 	   dMsmbh_new(index_sink)=0d0
+> 	   Esave_new (index_sink)=0d0
+> 	   oksink_new(index_sink)=1d0
+523,547c611,635
+<        ! Update linked list
+<        ind_grid_cloud(1)=ind_grid_new(i)
+<        call remove_free(ind_part_cloud,1)
+<        call add_list(ind_part_cloud,ind_grid_cloud,ok_true,1)
+<        ind_cloud=ind_part_cloud(1)
+< 
+<        ! Set new sink particle variables
+<        tp(ind_cloud)=0d0         ! Birth epoch
+<        mp(ind_cloud)=msink_new(index_sink) ! Mass
+<        levelp(ind_cloud)=ilevel     ! Level
+<        idp(ind_cloud)=-index_sink     ! Identity
+<        xp(ind_cloud,1)=x
+<        xp(ind_cloud,2)=y
+<        xp(ind_cloud,3)=z
+<        vp(ind_cloud,1)=u
+<        vp(ind_cloud,2)=v
+<        vp(ind_cloud,3)=w
+<        idsink_new(index_sink) =index_sink_tot
+<        tsink_new(index_sink)  =birth_epoch
+<        xsink_new(index_sink,1)=x
+<        xsink_new(index_sink,2)=y
+<        xsink_new(index_sink,3)=z
+<        vsink_new(index_sink,1)=u
+<        vsink_new(index_sink,2)=v
+<        vsink_new(index_sink,3)=w
+---
+> 	   ! Update linked list
+> 	   ind_grid_cloud(1)=ind_grid_new(i)
+> 	   call remove_free(ind_part_cloud,1)
+> 	   call add_list(ind_part_cloud,ind_grid_cloud,ok_true,1)
+> 	   ind_cloud=ind_part_cloud(1)
+> 
+> 	   ! Set new sink particle variables
+> 	   tp(ind_cloud)=0d0		 ! Birth epoch
+> 	   mp(ind_cloud)=msink_new(index_sink) ! Mass
+> 	   levelp(ind_cloud)=ilevel	 ! Level
+> 	   idp(ind_cloud)=-index_sink	 ! Identity
+> 	   xp(ind_cloud,1)=x
+> 	   xp(ind_cloud,2)=y
+> 	   xp(ind_cloud,3)=z
+> 	   vp(ind_cloud,1)=u
+> 	   vp(ind_cloud,2)=v
+> 	   vp(ind_cloud,3)=w
+> 	   idsink_new(index_sink) =index_sink_tot
+> 	   tsink_new(index_sink)  =birth_epoch
+> 	   xsink_new(index_sink,1)=x
+> 	   xsink_new(index_sink,2)=y
+> 	   xsink_new(index_sink,3)=z
+> 	   vsink_new(index_sink,1)=u
+> 	   vsink_new(index_sink,2)=v
+> 	   vsink_new(index_sink,3)=w
+549c637
+<        uold(ind_cell_new(i),1)=d-msink_new(index_sink)/dx_loc**3
+---
+> 	   uold(ind_cell_new(i),1)=d-msink_new(index_sink)/dx_loc**3
+551,552c639,640
+<     end do
+<     ! End loop over new sink particle cells
+---
+> 	end do
+> 	! End loop over new sink particle cells
+566c654
+<     ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+---
+> 	ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+569,578c657,666
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,ngrid
+<        ind_cell(i)=iskip+ind_grid(i)
+<     end do
+<     do i=1,ngrid
+<        d=uold(ind_cell(i),1)
+<        u=uold(ind_cell(i),2)
+<        v=uold(ind_cell(i),3)
+<        w=uold(ind_cell(i),4)
+<        e=uold(ind_cell(i),5)
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,ngrid
+> 	   ind_cell(i)=iskip+ind_grid(i)
+> 	end do
+> 	do i=1,ngrid
+> 	   d=uold(ind_cell(i),1)
+> 	   u=uold(ind_cell(i),2)
+> 	   v=uold(ind_cell(i),3)
+> 	   w=uold(ind_cell(i),4)
+> 	   e=uold(ind_cell(i),5)
+580,601c668,689
+<        bx1=uold(ind_cell(i),6)
+<        by1=uold(ind_cell(i),7)
+<        bz1=uold(ind_cell(i),8)
+<        bx2=uold(ind_cell(i),nvar+1)
+<        by2=uold(ind_cell(i),nvar+2)
+<        bz2=uold(ind_cell(i),nvar+3)
+<        e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+< #endif
+<        e=e+0.5d0*(u**2+v**2+w**2)
+<        uold(ind_cell(i),1)=d
+<        uold(ind_cell(i),2)=d*u
+<        uold(ind_cell(i),3)=d*v
+<        uold(ind_cell(i),4)=d*w
+<        uold(ind_cell(i),5)=d*e
+<     end do
+<     if(metal)then
+<        do i=1,ngrid
+<           d=uold(ind_cell(i),1)
+<           w=uold(ind_cell(i),imetal)
+<           uold(ind_cell(i),imetal)=d*w
+<        end do
+<     endif
+---
+> 	   bx1=uold(ind_cell(i),6)
+> 	   by1=uold(ind_cell(i),7)
+> 	   bz1=uold(ind_cell(i),8)
+> 	   bx2=uold(ind_cell(i),nvar+1)
+> 	   by2=uold(ind_cell(i),nvar+2)
+> 	   bz2=uold(ind_cell(i),nvar+3)
+> 	   e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+> #endif
+> 	   e=e+0.5d0*(u**2+v**2+w**2)
+> 	   uold(ind_cell(i),1)=d
+> 	   uold(ind_cell(i),2)=d*u
+> 	   uold(ind_cell(i),3)=d*v
+> 	   uold(ind_cell(i),4)=d*w
+> 	   uold(ind_cell(i),5)=d*e
+> 	end do
+> 	if(metal)then
+> 	   do i=1,ngrid
+> 	      d=uold(ind_cell(i),1)
+> 	      w=uold(ind_cell(i),imetal)
+> 	      uold(ind_cell(i),imetal)=d*w
+> 	   end do
+> 	endif
+606,607c694,695
+<   call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+<   call MPI_ALLREDUCE(msink_new ,msink_all ,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+---
+>   call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax	,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+>   call MPI_ALLREDUCE(msink_new ,msink_all ,nsinkmax	,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+610,613c698,701
+<   call MPI_ALLREDUCE(tsink_new ,tsink_all ,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+<   call MPI_ALLREDUCE(idsink_new,idsink_all,nsinkmax    ,MPI_INTEGER         ,MPI_SUM,MPI_COMM_WORLD,info)
+<   call MPI_ALLREDUCE(dMsmbh_new,dMsmbh_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+<   call MPI_ALLREDUCE(Esave_new ,Esave_all ,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+---
+>   call MPI_ALLREDUCE(tsink_new ,tsink_all ,nsinkmax	,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+>   call MPI_ALLREDUCE(idsink_new,idsink_all,nsinkmax	,MPI_INTEGER	     ,MPI_SUM,MPI_COMM_WORLD,info)
+>   call MPI_ALLREDUCE(dMsmbh_new,dMsmbh_all,nsinkmax	,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+>   call MPI_ALLREDUCE(Esave_new ,Esave_all ,nsinkmax	,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+630,636c718,724
+<     tsink(isink) =tsink_all(isink)
+<     idsink(isink)=idsink_all(isink)
+<     msink(isink) =msink_all(isink)
+<     dMsmbh(isink)=dMsmbh_all(isink)
+<     Esave (isink)=Esave_all (isink)
+<     xsink(isink,1:ndim)=xsink_all(isink,1:ndim)
+<     vsink(isink,1:ndim)=vsink_all(isink,1:ndim)
+---
+> 	tsink(isink) =tsink_all(isink)
+> 	idsink(isink)=idsink_all(isink)
+> 	msink(isink) =msink_all(isink)
+> 	dMsmbh(isink)=dMsmbh_all(isink)
+> 	Esave (isink)=Esave_all (isink)
+> 	xsink(isink,1:ndim)=xsink_all(isink,1:ndim)
+> 	vsink(isink,1:ndim)=vsink_all(isink,1:ndim)
+644c732
+< end subroutine org_make_sink
+---
+> end subroutine make_sink
+649c737
+< subroutine org_merge_sink(ilevel)
+---
+> subroutine merge_sink(ilevel)
+725,726c813,814
+<     igrp=igrp+1
+<     gsink(gndx)=igrp
+---
+> 	igrp=igrp+1
+> 	gsink(gndx)=igrp
+730,738c818,826
+<     indx=psink(ifirst)
+<     xx=xsink(indx,1)-xsink(gndx,1)
+<     if(xx>scale*xbound(1)/2.0)then
+<        xx=xx-scale*xbound(1)
+<     endif
+<     if(xx<-scale*xbound(1)/2.0)then
+<        xx=xx+scale*xbound(1)
+<     endif
+<     rr=xx**2
+---
+> 	indx=psink(ifirst)
+> 	xx=xsink(indx,1)-xsink(gndx,1)
+> 	if(xx>scale*xbound(1)/2.0)then
+> 	   xx=xx-scale*xbound(1)
+> 	endif
+> 	if(xx<-scale*xbound(1)/2.0)then
+> 	   xx=xx+scale*xbound(1)
+> 	endif
+> 	rr=xx**2
+740,747c828,835
+<     yy=xsink(indx,2)-xsink(gndx,2)
+<     if(yy>scale*xbound(2)/2.0)then
+<        yy=yy-scale*xbound(2)
+<     endif
+<     if(yy<-scale*xbound(2)/2.0)then
+<        yy=yy+scale*xbound(2)
+<     endif
+<     rr=yy**2+rr
+---
+> 	yy=xsink(indx,2)-xsink(gndx,2)
+> 	if(yy>scale*xbound(2)/2.0)then
+> 	   yy=yy-scale*xbound(2)
+> 	endif
+> 	if(yy<-scale*xbound(2)/2.0)then
+> 	   yy=yy+scale*xbound(2)
+> 	endif
+> 	rr=yy**2+rr
+750,757c838,845
+<     zz=xsink(indx,3)-xsink(gndx,3)
+<     if(zz>scale*xbound(3)/2.0)then
+<        zz=zz-scale*xbound(3)
+<     endif
+<     if(zz<-scale*xbound(3)/2.0)then
+<        zz=zz+scale*xbound(3)
+<     endif
+<     rr=zz**2+rr
+---
+> 	zz=xsink(indx,3)-xsink(gndx,3)
+> 	if(zz>scale*xbound(3)/2.0)then
+> 	   zz=zz-scale*xbound(3)
+> 	endif
+> 	if(zz<-scale*xbound(3)/2.0)then
+> 	   zz=zz+scale*xbound(3)
+> 	endif
+> 	rr=zz**2+rr
+792c880
+<      !     write(*,'(3(I4,1x),3(1PE10.3))')isink,psink(isink),gsink(isink),xsink(isink,1:ndim)
+---
+>      !	 write(*,'(3(I4,1x),3(1PE10.3))')isink,psink(isink),gsink(isink),xsink(isink,1:ndim)
+811,813c899,901
+<     rank_old(igrp)=isink
+<     idsink_old(igrp)=idsink(isink)
+<     tsink_old(igrp) =tsink(isink)
+---
+> 	rank_old(igrp)=isink
+> 	idsink_old(igrp)=idsink(isink)
+> 	tsink_old(igrp) =tsink(isink)
+816,820c904,908
+<     rank_old(igrp)=isink
+<     idsink_new(igrp)=idsink(isink)
+<     idsink_old(igrp)=idsink(isink)
+<     tsink_new(igrp) =tsink(isink)
+<     tsink_old(igrp) =tsink(isink)
+---
+> 	rank_old(igrp)=isink
+> 	idsink_new(igrp)=idsink(isink)
+> 	idsink_old(igrp)=idsink(isink)
+> 	tsink_new(igrp) =tsink(isink)
+> 	tsink_old(igrp) =tsink(isink)
+822,823c910,911
+<     idsink_new(igrp)=idsink_old(igrp)
+<     tsink_new(igrp) =tsink_old(igrp)
+---
+> 	idsink_new(igrp)=idsink_old(igrp)
+> 	tsink_new(igrp) =tsink_old(igrp)
+830,831c918,919
+<     oksink_all(isink)=igrp
+<     oksink_new(igrp)=isink
+---
+> 	oksink_all(isink)=igrp
+> 	oksink_new(igrp)=isink
+989c1077
+<     xx=xx-scale*xbound(1)
+---
+> 	xx=xx-scale*xbound(1)
+992c1080
+<     xx=xx+scale*xbound(1)
+---
+> 	xx=xx+scale*xbound(1)
+999c1087
+<     yy=yy-scale*xbound(2)
+---
+> 	yy=yy-scale*xbound(2)
+1002c1090
+<     yy=yy+scale*xbound(2)
+---
+> 	yy=yy+scale*xbound(2)
+1010c1098
+<     zz=zz-scale*xbound(3)
+---
+> 	zz=zz-scale*xbound(3)
+1013c1101
+<     zz=zz+scale*xbound(3)
+---
+> 	zz=zz+scale*xbound(3)
+1045c1133
+<     xx=xx+scale*(xbound(1)-skip_loc(1))
+---
+> 	xx=xx+scale*(xbound(1)-skip_loc(1))
+1048c1136
+<     xx=xx-scale*(xbound(1)-skip_loc(1))
+---
+> 	xx=xx-scale*(xbound(1)-skip_loc(1))
+1054c1142
+<     yy=yy+scale*(xbound(2)-skip_loc(2))
+---
+> 	yy=yy+scale*(xbound(2)-skip_loc(2))
+1057c1145
+<     yy=yy-scale*(xbound(2)-skip_loc(2))
+---
+> 	yy=yy-scale*(xbound(2)-skip_loc(2))
+1064c1152
+<     zz=zz+scale*(xbound(3)-skip_loc(3))
+---
+> 	zz=zz+scale*(xbound(3)-skip_loc(3))
+1067c1155
+<     zz=zz-scale*(xbound(3)-skip_loc(3))
+---
+> 	zz=zz-scale*(xbound(3)-skip_loc(3))
+1087,1088c1175,1176
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+1090,1131c1178,1219
+<     ! Count sink particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_kill_sink(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call kill_sink(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+1133c1221
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+1137c1225
+<      if(ip>0)call org_kill_sink(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call kill_sink(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+1143c1231
+< end subroutine org_merge_sink
+---
+> end subroutine merge_sink
+1148c1236
+< subroutine org_kill_sink(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine kill_sink(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+1169,1173c1257,1261
+<     isink_new=oksink_all(isink)
+<     idp(ind_part(j))=-isink_new
+<     mp(ind_part(j))=msink(isink_new)
+<     xp(ind_part(j),1)=xsink(isink_new,1)
+<     vp(ind_part(j),1)=vsink(isink_new,1)
+---
+> 	isink_new=oksink_all(isink)
+> 	idp(ind_part(j))=-isink_new
+> 	mp(ind_part(j))=msink(isink_new)
+> 	xp(ind_part(j),1)=xsink(isink_new,1)
+> 	vp(ind_part(j),1)=vsink(isink_new,1)
+1175,1176c1263,1264
+<     xp(ind_part(j),2)=xsink(isink_new,2)
+<     vp(ind_part(j),2)=vsink(isink_new,2)
+---
+> 	xp(ind_part(j),2)=xsink(isink_new,2)
+> 	vp(ind_part(j),2)=vsink(isink_new,2)
+1179,1180c1267,1268
+<     xp(ind_part(j),3)=xsink(isink_new,3)
+<     vp(ind_part(j),3)=vsink(isink_new,3)
+---
+> 	xp(ind_part(j),3)=xsink(isink_new,3)
+> 	vp(ind_part(j),3)=vsink(isink_new,3)
+1188c1276
+< end subroutine org_kill_sink
+---
+> end subroutine kill_sink
+1193c1281
+< subroutine org_create_cloud(ilevel)
+---
+> subroutine create_cloud(ilevel)
+1220,1221c1308,1309
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+1223,1264c1311,1352
+<     ! Count sink particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_mk_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call mk_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+1266c1354
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+1270c1358
+<      if(ip>0)call org_mk_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call mk_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+1276c1364
+< end subroutine org_create_cloud
+---
+> end subroutine create_cloud
+1281c1369
+< subroutine org_mk_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine mk_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+1317c1405
+<     yy=dble(jj)*dx_min/2.0
+---
+> 	yy=dble(jj)*dx_min/2.0
+1319,1323c1407,1411
+<     do ii=-8,8
+<        xx=dble(ii)*dx_min/2.0
+<        rr=sqrt(xx*xx+yy*yy+zz*zz)
+<        if(rr<=rmax)ncloud=ncloud+1
+<     end do
+---
+> 	do ii=-8,8
+> 	   xx=dble(ii)*dx_min/2.0
+> 	   rr=sqrt(xx*xx+yy*yy+zz*zz)
+> 	   if(rr<=rmax)ncloud=ncloud+1
+> 	end do
+1337c1425
+<     yy=dble(jj)*dx_min/2.0
+---
+> 	yy=dble(jj)*dx_min/2.0
+1339,1352c1427,1440
+<     do ii=-8,8
+<        xx=dble(ii)*dx_min/2.0
+<        rr=sqrt(xx*xx+yy*yy+zz*zz)
+<        if(rr>0.and.rr<=rmax)then
+<           call remove_free(ind_cloud,np)
+<           call add_list(ind_cloud,ind_grid_part,ok_true,np)
+<           do j=1,np
+<          isink=-idp(ind_part(j))
+<          idp(ind_cloud(j))=-isink
+<          tp (ind_cloud(j))=0.0d0
+<          levelp(ind_cloud(j))=levelmin
+<          mp(ind_cloud(j))=msink(isink)/dble(ncloud)
+<          xp(ind_cloud(j),1)=xp(ind_part(j),1)+xx
+<          vp(ind_cloud(j),1)=vsink(isink,1)
+---
+> 	do ii=-8,8
+> 	   xx=dble(ii)*dx_min/2.0
+> 	   rr=sqrt(xx*xx+yy*yy+zz*zz)
+> 	   if(rr>0.and.rr<=rmax)then
+> 	      call remove_free(ind_cloud,np)
+> 	      call add_list(ind_cloud,ind_grid_part,ok_true,np)
+> 	      do j=1,np
+> 		 isink=-idp(ind_part(j))
+> 		 idp(ind_cloud(j))=-isink
+> 		 tp (ind_cloud(j))=0.0d0
+> 		 levelp(ind_cloud(j))=levelmin
+> 		 mp(ind_cloud(j))=msink(isink)/dble(ncloud)
+> 		 xp(ind_cloud(j),1)=xp(ind_part(j),1)+xx
+> 		 vp(ind_cloud(j),1)=vsink(isink,1)
+1354,1355c1442,1443
+<          xp(ind_cloud(j),2)=xp(ind_part(j),2)+yy
+<          vp(ind_cloud(j),2)=vsink(isink,2)
+---
+> 		 xp(ind_cloud(j),2)=xp(ind_part(j),2)+yy
+> 		 vp(ind_cloud(j),2)=vsink(isink,2)
+1358,1359c1446,1447
+<          xp(ind_cloud(j),3)=xp(ind_part(j),3)+zz
+<          vp(ind_cloud(j),3)=vsink(isink,3)
+---
+> 		 xp(ind_cloud(j),3)=xp(ind_part(j),3)+zz
+> 		 vp(ind_cloud(j),3)=vsink(isink,3)
+1361,1363c1449,1451
+<           end do
+<        end if
+<     end do
+---
+> 	      end do
+> 	   end if
+> 	end do
+1380c1468
+< end subroutine org_mk_cloud
+---
+> end subroutine mk_cloud
+1385c1473
+< subroutine org_kill_cloud(ilevel)
+---
+> subroutine kill_cloud(ilevel)
+1410,1411c1498,1499
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+1413,1454c1501,1542
+<     ! Count sink and cloud particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink and cloud particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_rm_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink and cloud particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink and cloud particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call rm_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+1456c1544
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+1460c1548
+<      if(ip>0)call org_rm_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call rm_cloud(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+1465c1553
+< end subroutine org_kill_cloud
+---
+> end subroutine kill_cloud
+1470c1558
+< subroutine org_rm_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine rm_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+1501c1589
+<     r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+---
+> 	r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+1510c1598
+< end subroutine org_rm_cloud
+---
+> end subroutine rm_cloud
+1515c1603
+< subroutine org_bondi_hoyle(ilevel)
+---
+> subroutine bondi_hoyle(ilevel)
+1545c1633
+<   !write(*,*) 'Gcheck 1'
+---
+> 
+1560c1648
+<   !write(*,*) 'Gcheck 2'
+---
+> 
+1568,1569c1656,1657
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+1571,1626c1659,1714
+<     ! Count only sink particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          isink=-idp(ipart)
+<          r2=0.0
+<          do idim=1,ndim
+<             r2=r2+(xp(ipart,idim)-xsink(isink,idim))**2
+<          end do
+<          if(r2==0.0)then
+<             npart2=npart2+1
+<          end if
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather only sink particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          isink=-idp(ipart)
+<          r2=0.0
+<          do idim=1,ndim
+<             r2=r2+(xp(ipart,idim)-xsink(isink,idim))**2
+<          end do
+<          if(r2==0.0)then
+<             if(ig==0)then
+<                ig=1
+<                ind_grid(ig)=igrid
+<             end if
+<             ip=ip+1
+<             ind_part(ip)=ipart
+<             ind_grid_part(ip)=ig
+<          endif
+<           endif
+<           if(ip==nvector)then
+<          call org_bondi_velocity(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count only sink particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 isink=-idp(ipart)
+> 		 r2=0.0
+> 		 do idim=1,ndim
+> 		    r2=r2+(xp(ipart,idim)-xsink(isink,idim))**2
+> 		 end do
+> 		 if(r2==0.0)then
+> 		    npart2=npart2+1
+> 		 end if
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather only sink particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 isink=-idp(ipart)
+> 		 r2=0.0
+> 		 do idim=1,ndim
+> 		    r2=r2+(xp(ipart,idim)-xsink(isink,idim))**2
+> 		 end do
+> 		 if(r2==0.0)then
+> 		    if(ig==0)then
+> 		       ig=1
+> 		       ind_grid(ig)=igrid
+> 		    end if
+> 		    ip=ip+1
+> 		    ind_part(ip)=ipart
+> 		    ind_grid_part(ip)=ig
+> 		 endif
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call bondi_velocity(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+1628c1716
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+1632c1720
+<      if(ip>0)call org_bondi_velocity(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call bondi_velocity(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+1635d1722
+<   !write(*,*) 'Gcheck 3'
+1647d1733
+<   !write(*,*) 'Gcheck 4'
+1650,1660c1736,1746
+<     c2sink(isink)=c2sink_all(isink)
+<     v2sink(isink)=v2sink_all(isink)
+<     ! Compute sink radius
+<     r2sink(isink)=(factG*msink(isink)/(v2sink(isink)+c2sink(isink)))**2
+<     !r2sink(isink)=(factG*msink(isink)/(c2sink(isink)))**2
+< 
+<     ! If radius is far smaller than the resolution, spurious velocity
+<     ! must not be taken into account
+<     !if (sqrt(r2sink(isink)) .lt. dx_min/4d0) then
+<     !   r2sink(isink)=(factG*msink(isink)/c2sink(isink))**2
+<     !endif
+---
+> 	c2sink(isink)=c2sink_all(isink)
+> 	v2sink(isink)=v2sink_all(isink)
+> 	! Compute sink radius
+> 	r2sink(isink)=(factG*msink(isink)/(v2sink(isink)+c2sink(isink)))**2
+> 	!r2sink(isink)=(factG*msink(isink)/(c2sink(isink)))**2
+> 
+> 	! If radius is far smaller than the resolution, spurious velocity
+> 	! must not be taken into account
+> 	!if (sqrt(r2sink(isink)) .lt. dx_min/4d0) then
+> 	!   r2sink(isink)=(factG*msink(isink)/c2sink(isink))**2
+> 	!endif
+1662c1748
+<     r2k(isink)   =min(max(r2sink(isink),(dx_min/4.0)**2),(2.*dx_min)**2)
+---
+> 	r2k(isink)   =min(max(r2sink(isink),(dx_min/4.0)**2),(2.*dx_min)**2)
+1665d1750
+<   !write(*,*) 'Gcheck 5'
+1676,1677c1761,1762
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+1679,1721c1764,1806
+<     ! Count sink and cloud particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink and cloud particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_average_density(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          if((.not.random_jet)) call org_jet_AGN(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink and cloud particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink and cloud particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call average_density(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 if((.not.random_jet)) call jet_AGN(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+1723c1808
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+1727,1728c1812,1813
+<      if(ip>0)call org_average_density(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<      if(ip>0 .and.(.not.random_jet)) call org_jet_AGN(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call average_density(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+>      if(ip>0 .and.(.not.random_jet)) call jet_AGN(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+1731d1815
+<   !write(*,*) 'Gcheck 6'
+1734,1747c1818,1831
+<     do isink=1,nsink
+<        ! Random directions
+<        call ranf(localseed,RandNum)
+<        SS =(RandNum-0.5)*2.
+<        call ranf(localseed,RandNum)
+<        phi=(RandNum-0.5)*2.*pi
+<        call ranf(localseed,RandNum)
+<        UU =RandNum
+<        Rrand=UU**(1./3.)
+<        CC=Rrand*sqrt(1.-SS**2.)
+<        jsink_new(isink,1)=CC*cos(phi)
+<        jsink_new(isink,2)=CC*sin(phi)
+<        jsink_new(isink,3)=Rrand*SS
+<     enddo
+---
+> 	do isink=1,nsink
+> 	   ! Random directions
+> 	   call ranf(localseed,RandNum)
+> 	   SS =(RandNum-0.5)*2.
+> 	   call ranf(localseed,RandNum)
+> 	   phi=(RandNum-0.5)*2.*pi
+> 	   call ranf(localseed,RandNum)
+> 	   UU =RandNum
+> 	   Rrand=UU**(1./3.)
+> 	   CC=Rrand*sqrt(1.-SS**2.)
+> 	   jsink_new(isink,1)=CC*cos(phi)
+> 	   jsink_new(isink,2)=CC*sin(phi)
+> 	   jsink_new(isink,3)=Rrand*SS
+> 	enddo
+1750d1833
+<   !write(*,*) 'Gcheck 7'
+1766d1848
+<   !write(*,*) 'Gcheck 8'
+1773c1855
+<     jsink(isink,i)=jsink(isink,i)+jsink_all(isink,i)
+---
+> 	jsink(isink,i)=jsink(isink,i)+jsink_all(isink,i)
+1776c1858
+<   !write(*,*) 'Gcheck 9'
+---
+> 
+1779c1861
+< end subroutine org_bondi_hoyle
+---
+> end subroutine bondi_hoyle
+1784c1866
+< subroutine org_bondi_velocity(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine bondi_velocity(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+1834c1916
+<     x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+---
+> 	x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+1847c1929
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+1852c1934
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+1857c1939
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+1865c1947
+<     if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+---
+> 	if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+1880c1962
+<     id(j,idim)=x(j,idim)
+---
+> 	id(j,idim)=x(j,idim)
+1887c1969
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igd(j,idim)=id(j,idim)/2
+1906,1908c1988,1990
+<     if(ok(j))then
+<        icd(j,idim)=id(j,idim)-2*igd(j,idim)
+<     end if
+---
+> 	if(ok(j))then
+> 	   icd(j,idim)=id(j,idim)-2*igd(j,idim)
+> 	end if
+1913c1995
+<     icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+1920c2002
+<     indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+---
+> 	indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+1927,1931c2009,2013
+<     d=uold(indp(j),1)
+<     u=uold(indp(j),2)/d
+<     v=uold(indp(j),3)/d
+<     w=uold(indp(j),4)/d
+<     e=uold(indp(j),5)/d
+---
+> 	d=uold(indp(j),1)
+> 	u=uold(indp(j),2)/d
+> 	v=uold(indp(j),3)/d
+> 	w=uold(indp(j),4)/d
+> 	e=uold(indp(j),5)/d
+1933,1939c2015,2021
+<     bx1=uold(indp(j),6)
+<     by1=uold(indp(j),7)
+<     bz1=uold(indp(j),8)
+<     bx2=uold(indp(j),nvar+1)
+<     by2=uold(indp(j),nvar+2)
+<     bz2=uold(indp(j),nvar+3)
+<     e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+---
+> 	bx1=uold(indp(j),6)
+> 	by1=uold(indp(j),7)
+> 	bz1=uold(indp(j),8)
+> 	bx2=uold(indp(j),nvar+1)
+> 	by2=uold(indp(j),nvar+2)
+> 	bz2=uold(indp(j),nvar+3)
+> 	e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+1941,1952c2023,2034
+<     isink=-idp(ind_part(j))
+<     v2=(u**2+v**2+w**2)
+<     e=e-0.5d0*v2
+<     c2=MAX(gamma*(gamma-1.0)*e,smallc**2)
+<     ! Relative velocity of the gas in regards of the sink
+<     u=u-vsink(isink,1)
+<     v=v-vsink(isink,2)
+<     w=w-vsink(isink,3)
+<     v2=(u**2+v**2+w**2)
+<     v2sink_new(isink)=v2
+<     c2sink_new(isink)=c2
+<     oksink_new(isink)=1d0
+---
+> 	isink=-idp(ind_part(j))
+> 	v2=(u**2+v**2+w**2)
+> 	e=e-0.5d0*v2
+> 	c2=MAX(gamma*(gamma-1.0)*e,smallc**2)
+> 	! Relative velocity of the gas in regards of the sink
+> 	u=u-vsink(isink,1)
+> 	v=v-vsink(isink,2)
+> 	w=w-vsink(isink,3)
+> 	v2=(u**2+v**2+w**2)
+> 	v2sink_new(isink)=v2
+> 	c2sink_new(isink)=c2
+> 	oksink_new(isink)=1d0
+1958c2040
+< end subroutine org_bondi_velocity
+---
+> end subroutine bondi_velocity
+1963c2045
+< subroutine org_average_density(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine average_density(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+2008c2090
+<     x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+---
+> 	x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+2021c2103
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+2026c2108
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+2031c2113
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+2039c2121
+<     if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)error=.true.
+---
+> 	if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)error=.true.
+2045,2049c2127,2131
+<     do j=1,np
+<        if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)then
+<           write(*,*)x(j,1:ndim)
+<        endif
+<     end do
+---
+> 	do j=1,np
+> 	   if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)then
+> 	      write(*,*)x(j,1:ndim)
+> 	   endif
+> 	end do
+2057,2061c2139,2143
+<     dd(j,idim)=x(j,idim)+0.5D0
+<     id(j,idim)=dd(j,idim)
+<     dd(j,idim)=dd(j,idim)-id(j,idim)
+<     dg(j,idim)=1.0D0-dd(j,idim)
+<     ig(j,idim)=id(j,idim)-1
+---
+> 	dd(j,idim)=x(j,idim)+0.5D0
+> 	id(j,idim)=dd(j,idim)
+> 	dd(j,idim)=dd(j,idim)-id(j,idim)
+> 	dg(j,idim)=1.0D0-dd(j,idim)
+> 	ig(j,idim)=id(j,idim)-1
+2068,2069c2150,2151
+<     igg(j,idim)=ig(j,idim)/2
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igg(j,idim)=ig(j,idim)/2
+> 	igd(j,idim)=id(j,idim)/2
+2100c2182
+<     igrid(j,ind)=son(nbors_father_cells(ind_grid_part(j),kg(j,ind)))
+---
+> 	igrid(j,ind)=son(nbors_father_cells(ind_grid_part(j),kg(j,ind)))
+2108c2190
+<     ok(j)=ok(j).and.igrid(j,ind)>0
+---
+> 	ok(j)=ok(j).and.igrid(j,ind)>0
+2115,2117c2197,2199
+<     if(.not.ok(j))then
+<        x(j,idim)=x(j,idim)/2.0D0
+<     end if
+---
+> 	if(.not.ok(j))then
+> 	   x(j,idim)=x(j,idim)/2.0D0
+> 	end if
+2123,2129c2205,2211
+<     if(.not.ok(j))then
+<        dd(j,idim)=x(j,idim)+0.5D0
+<        id(j,idim)=dd(j,idim)
+<        dd(j,idim)=dd(j,idim)-id(j,idim)
+<        dg(j,idim)=1.0D0-dd(j,idim)
+<        ig(j,idim)=id(j,idim)-1
+<     end if
+---
+> 	if(.not.ok(j))then
+> 	   dd(j,idim)=x(j,idim)+0.5D0
+> 	   id(j,idim)=dd(j,idim)
+> 	   dd(j,idim)=dd(j,idim)-id(j,idim)
+> 	   dg(j,idim)=1.0D0-dd(j,idim)
+> 	   ig(j,idim)=id(j,idim)-1
+> 	end if
+2136,2142c2218,2224
+<     if(ok(j))then
+<        icg(j,idim)=ig(j,idim)-2*igg(j,idim)
+<        icd(j,idim)=id(j,idim)-2*igd(j,idim)
+<     else
+<        icg(j,idim)=ig(j,idim)
+<        icd(j,idim)=id(j,idim)
+<     end if
+---
+> 	if(ok(j))then
+> 	   icg(j,idim)=ig(j,idim)-2*igg(j,idim)
+> 	   icd(j,idim)=id(j,idim)-2*igd(j,idim)
+> 	else
+> 	   icg(j,idim)=ig(j,idim)
+> 	   icd(j,idim)=id(j,idim)
+> 	end if
+2154,2157c2236,2239
+<     icell(j,1)=1+icg(j,1)+2*icg(j,2)
+<     icell(j,2)=1+icd(j,1)+2*icg(j,2)
+<     icell(j,3)=1+icg(j,1)+2*icd(j,2)
+<     icell(j,4)=1+icd(j,1)+2*icd(j,2)
+---
+> 	icell(j,1)=1+icg(j,1)+2*icg(j,2)
+> 	icell(j,2)=1+icd(j,1)+2*icg(j,2)
+> 	icell(j,3)=1+icg(j,1)+2*icd(j,2)
+> 	icell(j,4)=1+icd(j,1)+2*icd(j,2)
+2159,2162c2241,2244
+<     icell(j,1)=1+icg(j,1)+3*icg(j,2)
+<     icell(j,2)=1+icd(j,1)+3*icg(j,2)
+<     icell(j,3)=1+icg(j,1)+3*icd(j,2)
+<     icell(j,4)=1+icd(j,1)+3*icd(j,2)
+---
+> 	icell(j,1)=1+icg(j,1)+3*icg(j,2)
+> 	icell(j,2)=1+icd(j,1)+3*icg(j,2)
+> 	icell(j,3)=1+icg(j,1)+3*icd(j,2)
+> 	icell(j,4)=1+icd(j,1)+3*icd(j,2)
+2169,2176c2251,2258
+<     icell(j,1)=1+icg(j,1)+2*icg(j,2)+4*icg(j,3)
+<     icell(j,2)=1+icd(j,1)+2*icg(j,2)+4*icg(j,3)
+<     icell(j,3)=1+icg(j,1)+2*icd(j,2)+4*icg(j,3)
+<     icell(j,4)=1+icd(j,1)+2*icd(j,2)+4*icg(j,3)
+<     icell(j,5)=1+icg(j,1)+2*icg(j,2)+4*icd(j,3)
+<     icell(j,6)=1+icd(j,1)+2*icg(j,2)+4*icd(j,3)
+<     icell(j,7)=1+icg(j,1)+2*icd(j,2)+4*icd(j,3)
+<     icell(j,8)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+---
+> 	icell(j,1)=1+icg(j,1)+2*icg(j,2)+4*icg(j,3)
+> 	icell(j,2)=1+icd(j,1)+2*icg(j,2)+4*icg(j,3)
+> 	icell(j,3)=1+icg(j,1)+2*icd(j,2)+4*icg(j,3)
+> 	icell(j,4)=1+icd(j,1)+2*icd(j,2)+4*icg(j,3)
+> 	icell(j,5)=1+icg(j,1)+2*icg(j,2)+4*icd(j,3)
+> 	icell(j,6)=1+icd(j,1)+2*icg(j,2)+4*icd(j,3)
+> 	icell(j,7)=1+icg(j,1)+2*icd(j,2)+4*icd(j,3)
+> 	icell(j,8)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+2178,2185c2260,2267
+<     icell(j,1)=1+icg(j,1)+3*icg(j,2)+9*icg(j,3)
+<     icell(j,2)=1+icd(j,1)+3*icg(j,2)+9*icg(j,3)
+<     icell(j,3)=1+icg(j,1)+3*icd(j,2)+9*icg(j,3)
+<     icell(j,4)=1+icd(j,1)+3*icd(j,2)+9*icg(j,3)
+<     icell(j,5)=1+icg(j,1)+3*icg(j,2)+9*icd(j,3)
+<     icell(j,6)=1+icd(j,1)+3*icg(j,2)+9*icd(j,3)
+<     icell(j,7)=1+icg(j,1)+3*icd(j,2)+9*icd(j,3)
+<     icell(j,8)=1+icd(j,1)+3*icd(j,2)+9*icd(j,3)
+---
+> 	icell(j,1)=1+icg(j,1)+3*icg(j,2)+9*icg(j,3)
+> 	icell(j,2)=1+icd(j,1)+3*icg(j,2)+9*icg(j,3)
+> 	icell(j,3)=1+icg(j,1)+3*icd(j,2)+9*icg(j,3)
+> 	icell(j,4)=1+icd(j,1)+3*icd(j,2)+9*icg(j,3)
+> 	icell(j,5)=1+icg(j,1)+3*icg(j,2)+9*icd(j,3)
+> 	icell(j,6)=1+icd(j,1)+3*icg(j,2)+9*icd(j,3)
+> 	icell(j,7)=1+icg(j,1)+3*icd(j,2)+9*icd(j,3)
+> 	icell(j,8)=1+icd(j,1)+3*icd(j,2)+9*icd(j,3)
+2193,2197c2275,2279
+<     if(ok(j))then
+<        indp(j,ind)=ncoarse+(icell(j,ind)-1)*ngridmax+igrid(j,ind)
+<     else
+<        indp(j,ind)=nbors_father_cells(ind_grid_part(j),icell(j,ind))
+<     end if
+---
+> 	if(ok(j))then
+> 	   indp(j,ind)=ncoarse+(icell(j,ind)-1)*ngridmax+igrid(j,ind)
+> 	else
+> 	   indp(j,ind)=nbors_father_cells(ind_grid_part(j),icell(j,ind))
+> 	end if
+2237,2242c2319,2324
+<     dgas(j)=dgas(j)+uold(indp(j,ind),1)*vol(j,ind)
+<     d=uold(indp(j,ind),1)
+<     u=uold(indp(j,ind),2)/d
+<     v=uold(indp(j,ind),3)/d
+<     w=uold(indp(j,ind),4)/d
+<     e=uold(indp(j,ind),5)/d
+---
+> 	dgas(j)=dgas(j)+uold(indp(j,ind),1)*vol(j,ind)
+> 	d=uold(indp(j,ind),1)
+> 	u=uold(indp(j,ind),2)/d
+> 	v=uold(indp(j,ind),3)/d
+> 	w=uold(indp(j,ind),4)/d
+> 	e=uold(indp(j,ind),5)/d
+2244,2270c2326,2352
+<     bx1=uold(indp(j,ind),6)
+<     by1=uold(indp(j,ind),7)
+<     bz1=uold(indp(j,ind),8)
+<     bx2=uold(indp(j,ind),nvar+1)
+<     by2=uold(indp(j,ind),nvar+2)
+<     bz2=uold(indp(j,ind),nvar+3)
+<     e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+< #endif
+<     v2=(u**2+v**2+w**2)
+<     e=e-0.5d0*v2
+<     c2=MAX(gamma*(gamma-1.0)*e,smallc**2)
+<     ! --------------------------
+<     ! Volume-weighted quantities
+<     ! (if you change this, be sure to renormalize
+<     ! correctly these quantities in grow_bondi)
+<     ! --------------------------
+<     !ugas(j)=ugas(j)+u*vol(j,ind)
+<     !vgas(j)=vgas(j)+v*vol(j,ind)
+<     !wgas(j)=wgas(j)+w*vol(j,ind)
+<     !c2gas(j)=c2gas(j)+c2*vol(j,ind)
+<     ! --------------------------
+<     ! Mass-weighted quantities
+<     ! --------------------------
+<     ugas(j)=ugas(j)+d*u*vol(j,ind)
+<     vgas(j)=vgas(j)+d*v*vol(j,ind)
+<     wgas(j)=wgas(j)+d*w*vol(j,ind)
+<     c2gas(j)=c2gas(j)+d*c2*vol(j,ind)
+---
+> 	bx1=uold(indp(j,ind),6)
+> 	by1=uold(indp(j,ind),7)
+> 	bz1=uold(indp(j,ind),8)
+> 	bx2=uold(indp(j,ind),nvar+1)
+> 	by2=uold(indp(j,ind),nvar+2)
+> 	bz2=uold(indp(j,ind),nvar+3)
+> 	e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+> #endif
+> 	v2=(u**2+v**2+w**2)
+> 	e=e-0.5d0*v2
+> 	c2=MAX(gamma*(gamma-1.0)*e,smallc**2)
+> 	! --------------------------
+> 	! Volume-weighted quantities
+> 	! (if you change this, be sure to renormalize
+> 	! correctly these quantities in grow_bondi)
+> 	! --------------------------
+> 	!ugas(j)=ugas(j)+u*vol(j,ind)
+> 	!vgas(j)=vgas(j)+v*vol(j,ind)
+> 	!wgas(j)=wgas(j)+w*vol(j,ind)
+> 	!c2gas(j)=c2gas(j)+c2*vol(j,ind)
+> 	! --------------------------
+> 	! Mass-weighted quantities
+> 	! --------------------------
+> 	ugas(j)=ugas(j)+d*u*vol(j,ind)
+> 	vgas(j)=vgas(j)+d*v*vol(j,ind)
+> 	wgas(j)=wgas(j)+d*w*vol(j,ind)
+> 	c2gas(j)=c2gas(j)+d*c2*vol(j,ind)
+2278c2360
+<     r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+---
+> 	r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+2289c2371
+< end subroutine org_average_density
+---
+> end subroutine average_density
+2294c2376
+< subroutine org_grow_bondi(ilevel)
+---
+> subroutine grow_bondi(ilevel)
+2343,2345c2425,2427
+<     do i=1,active(ilevel)%ngrid
+<        unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
+<     enddo
+---
+> 	do i=1,active(ilevel)%ngrid
+> 	   unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
+> 	enddo
+2363,2368c2445,2450
+<     density=density+weighted_density(isink,i)
+<     c2mean =c2mean +weighted_c2    (isink,i)
+<     velocity(1)=velocity(1)+weighted_momentum(isink,i,1)
+<     velocity(2)=velocity(2)+weighted_momentum(isink,i,2)
+<     velocity(3)=velocity(3)+weighted_momentum(isink,i,3)
+<     volume =volume +weighted_volume (isink,i)
+---
+> 	density=density+weighted_density(isink,i)
+> 	c2mean =c2mean +weighted_c2	(isink,i)
+> 	velocity(1)=velocity(1)+weighted_momentum(isink,i,1)
+> 	velocity(2)=velocity(2)+weighted_momentum(isink,i,2)
+> 	velocity(3)=velocity(3)+weighted_momentum(isink,i,3)
+> 	volume =volume +weighted_volume (isink,i)
+2387,2388c2469,2470
+<     dMBHoverdt(isink)=alpha * fourpi *density* (factG*msink(isink))**2 &
+<          & / (c2mean+v2mean)**1.5d0
+---
+> 	dMBHoverdt(isink)=alpha * fourpi *density* (factG*msink(isink))**2 &
+> 	     & / (c2mean+v2mean)**1.5d0
+2390,2392c2472,2474
+<     ! Prevent the accretion of new material onto the BH if
+<     ! energy has not been released in the previous coarse time step
+<     dMBHoverdt(isink)=0d0
+---
+> 	! Prevent the accretion of new material onto the BH if
+> 	! energy has not been released in the previous coarse time step
+> 	dMBHoverdt(isink)=0d0
+2395c2477
+< !!$      & /(scale_m/scale_t)
+---
+> !!$	  & /(scale_m/scale_t)
+2422,2423c2504,2505
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+2425,2466c2507,2548
+<     ! Count sink and cloud particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink and cloud particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink and cloud particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink and cloud particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+2468c2550
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+2472c2554
+<      if(ip>0)call org_accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+2478c2560
+<      call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+---
+>      call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax	 ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+2488c2570
+<      dMsmbh_all        =dMBsmbh_new
+---
+>      dMsmbh_all	    =dMBsmbh_new
+2494c2576
+<      msink(isink)    =msink(isink)        +msink_all(isink)
+---
+>      msink(isink)	=msink(isink)	    +msink_all(isink)
+2498c2580
+<      dMsmbh    (isink)=dMsmbh       (isink)+dMsmbh_all      (isink)
+---
+>      dMsmbh	(isink)=dMsmbh	   (isink)+dMsmbh_all	  (isink)
+2502c2584
+<   if(spin_bh)call org_growspin
+---
+>   if(spin_bh)call growspin
+2507c2589
+< end subroutine org_grow_bondi
+---
+> end subroutine grow_bondi
+2512c2594
+< subroutine org_accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+2589c2671
+<     yy=dble(jj)*dx_min/2.0
+---
+> 	yy=dble(jj)*dx_min/2.0
+2591,2595c2673,2677
+<     do ii=-8,8
+<        xx=dble(ii)*dx_min/2.0
+<        rr=sqrt(xx*xx+yy*yy+zz*zz)
+<        if(rr<=rmax)ncloud=ncloud+1
+<     end do
+---
+> 	do ii=-8,8
+> 	   xx=dble(ii)*dx_min/2.0
+> 	   rr=sqrt(xx*xx+yy*yy+zz*zz)
+> 	   if(rr<=rmax)ncloud=ncloud+1
+> 	end do
+2606c2688
+<     x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+---
+> 	x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+2619c2701
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+2624c2706
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+2629c2711
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+2637c2719
+<     if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+---
+> 	if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+2649c2731
+<     id(j,idim)=x(j,idim)
+---
+> 	id(j,idim)=x(j,idim)
+2656c2738
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igd(j,idim)=id(j,idim)/2
+2687,2689c2769,2771
+<     if(ok(j))then
+<        icd(j,idim)=id(j,idim)-2*igd(j,idim)
+<     end if
+---
+> 	if(ok(j))then
+> 	   icd(j,idim)=id(j,idim)-2*igd(j,idim)
+> 	end if
+2695c2777
+<     icell(j)=1+icd(j,1)
+---
+> 	icell(j)=1+icd(j,1)
+2702c2784
+<     icell(j)=1+icd(j,1)+2*icd(j,2)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)
+2709c2791
+<     icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+2717c2799
+<     indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+---
+> 	indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+2724,2729c2806,2811
+<     isink=-idp(ind_part(j))
+<     r2=0d0
+<     do idim=1,ndim
+<        r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+<     end do
+<     weight=exp(-r2/r2k(isink))
+---
+> 	isink=-idp(ind_part(j))
+> 	r2=0d0
+> 	do idim=1,ndim
+> 	   r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+> 	end do
+> 	weight=exp(-r2/r2k(isink))
+2731,2732c2813,2814
+<     d=uold(indp(j),1)
+<     u=uold(indp(j),2)/d
+---
+> 	d=uold(indp(j),1)
+> 	u=uold(indp(j),2)/d
+2734c2816
+<     v=uold(indp(j),3)/d
+---
+> 	v=uold(indp(j),3)/d
+2737c2819
+<     w=uold(indp(j),4)/d
+---
+> 	w=uold(indp(j),4)/d
+2739,2742c2821,2824
+<     e=uold(indp(j),ndim+2)/d
+<     if(metal)then
+<        z=uold(indp(j),imetal)/d
+<     endif
+---
+> 	e=uold(indp(j),ndim+2)/d
+> 	if(metal)then
+> 	   z=uold(indp(j),imetal)/d
+> 	endif
+2745,2756c2827,2838
+<     bx1=uold(indp(j),6)
+<     by1=uold(indp(j),7)
+<     bz1=uold(indp(j),8)
+<     bx2=uold(indp(j),nvar+1)
+<     by2=uold(indp(j),nvar+2)
+<     bz2=uold(indp(j),nvar+3)
+<     e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+< #endif
+<     d_ini=unew(indp(j),1)
+<     acc_mass=min(dMBHoverdt(isink),dMEdoverdt(isink)) &
+<          & *weight/total_volume(isink)*dtnew(ilevel)
+<     dmsink=max( min(acc_mass, (d-floorB*d_ini)*vol_loc), 0d0)
+---
+> 	bx1=uold(indp(j),6)
+> 	by1=uold(indp(j),7)
+> 	bz1=uold(indp(j),8)
+> 	bx2=uold(indp(j),nvar+1)
+> 	by2=uold(indp(j),nvar+2)
+> 	bz2=uold(indp(j),nvar+3)
+> 	e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+> #endif
+> 	d_ini=unew(indp(j),1)
+> 	acc_mass=min(dMBHoverdt(isink),dMEdoverdt(isink)) &
+> 	     & *weight/total_volume(isink)*dtnew(ilevel)
+> 	dmsink=max( min(acc_mass, (d-floorB*d_ini)*vol_loc), 0d0)
+2770,2776c2852,2858
+<     ! Add the accreted mass to the total accreted mass over
+<     ! a coarse time step
+<     dMBH_coarse_new(isink)=dMBH_coarse_new(isink) + &
+<          & dMBHoverdt(isink)*weight/total_volume(isink)*dtnew(ilevel)
+<     dMEd_coarse_new(isink)=dMEd_coarse_new(isink) + &
+<          & dMEdoverdt(isink)*weight/total_volume(isink)*dtnew(ilevel)
+<     dMsmbh_new     (isink)=dMsmbh_new     (isink) + dmsink
+---
+> 	! Add the accreted mass to the total accreted mass over
+> 	! a coarse time step
+> 	dMBH_coarse_new(isink)=dMBH_coarse_new(isink) + &
+> 	     & dMBHoverdt(isink)*weight/total_volume(isink)*dtnew(ilevel)
+> 	dMEd_coarse_new(isink)=dMEd_coarse_new(isink) + &
+> 	     & dMEdoverdt(isink)*weight/total_volume(isink)*dtnew(ilevel)
+> 	dMsmbh_new     (isink)=dMsmbh_new     (isink) + dmsink
+2778,2779c2860,2861
+<     msink_new(isink     )=msink_new(isink  )+dmsink
+<     vsink_new(isink,1)=vsink_new(isink,1)+dmsink*u
+---
+> 	msink_new(isink	 )=msink_new(isink  )+dmsink
+> 	vsink_new(isink,1)=vsink_new(isink,1)+dmsink*u
+2781c2863
+<     vsink_new(isink,2)=vsink_new(isink,2)+dmsink*v
+---
+> 	vsink_new(isink,2)=vsink_new(isink,2)+dmsink*v
+2784c2866
+<     vsink_new(isink,3)=vsink_new(isink,3)+dmsink*w
+---
+> 	vsink_new(isink,3)=vsink_new(isink,3)+dmsink*w
+2787,2793c2869,2875
+<     vp(ind_part(j),1)=mp(ind_part(j))*vp(ind_part(j),1)+dmsink*u
+<     vp(ind_part(j),2)=mp(ind_part(j))*vp(ind_part(j),2)+dmsink*v
+<     vp(ind_part(j),3)=mp(ind_part(j))*vp(ind_part(j),3)+dmsink*w
+<     mp(ind_part(j))=mp(ind_part(j))+dmsink
+<     vp(ind_part(j),1)=vp(ind_part(j),1)/mp(ind_part(j))
+<     vp(ind_part(j),2)=vp(ind_part(j),2)/mp(ind_part(j))
+<     vp(ind_part(j),3)=vp(ind_part(j),3)/mp(ind_part(j))
+---
+> 	vp(ind_part(j),1)=mp(ind_part(j))*vp(ind_part(j),1)+dmsink*u
+> 	vp(ind_part(j),2)=mp(ind_part(j))*vp(ind_part(j),2)+dmsink*v
+> 	vp(ind_part(j),3)=mp(ind_part(j))*vp(ind_part(j),3)+dmsink*w
+> 	mp(ind_part(j))=mp(ind_part(j))+dmsink
+> 	vp(ind_part(j),1)=vp(ind_part(j),1)/mp(ind_part(j))
+> 	vp(ind_part(j),2)=vp(ind_part(j),2)/mp(ind_part(j))
+> 	vp(ind_part(j),3)=vp(ind_part(j),3)/mp(ind_part(j))
+2796c2878
+<     d=d-dmsink/vol_loc
+---
+> 	d=d-dmsink/vol_loc
+2798c2880
+<     e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+---
+> 	e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+2800,2801c2882,2883
+<     uold(indp(j),1)=d
+<     uold(indp(j),2)=d*u
+---
+> 	uold(indp(j),1)=d
+> 	uold(indp(j),2)=d*u
+2803c2885
+<     uold(indp(j),3)=d*v
+---
+> 	uold(indp(j),3)=d*v
+2806c2888
+<     uold(indp(j),4)=d*w
+---
+> 	uold(indp(j),4)=d*w
+2808,2811c2890,2893
+<     uold(indp(j),ndim+2)=d*e
+<     if(metal)then
+<        uold(indp(j),imetal)=d*z
+<     endif
+---
+> 	uold(indp(j),ndim+2)=d*e
+> 	if(metal)then
+> 	   uold(indp(j),imetal)=d*z
+> 	endif
+2868c2950
+< end subroutine org_accrete_bondi
+---
+> end subroutine accrete_bondi
+2873c2955
+< subroutine org_grow_jeans(ilevel)
+---
+> subroutine grow_jeans(ilevel)
+2935,2936c3017,3018
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     npart2=0
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	npart2=0
+2938,2979c3020,3061
+<     ! Count sink and cloud particles
+<     if(npart1>0)then
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          npart2=npart2+1
+<           endif
+<           ipart=next_part  ! Go to next particle
+<        end do
+<     endif
+< 
+<     ! Gather sink and cloud particles
+<     if(npart2>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           ! Save next particle   <--- Very important !!!
+<           next_part=nextp(ipart)
+<           ! Select only sink particles
+<           if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+<          if(ig==0)then
+<             ig=1
+<             ind_grid(ig)=igrid
+<          end if
+<          ip=ip+1
+<          ind_part(ip)=ipart
+<          ind_grid_part(ip)=ig
+<           endif
+<           if(ip==nvector)then
+<          call org_accrete_jeans(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=next_part  ! Go to next particle
+<        end do
+<        ! End loop over particles
+<     end if
+---
+> 	! Count sink and cloud particles
+> 	if(npart1>0)then
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 npart2=npart2+1
+> 	      endif
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	endif
+> 
+> 	! Gather sink and cloud particles
+> 	if(npart2>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      ! Save next particle   <--- Very important !!!
+> 	      next_part=nextp(ipart)
+> 	      ! Select only sink particles
+> 	      if(idp(ipart).lt.0 .and. tp(ipart).eq.0.d0)then
+> 		 if(ig==0)then
+> 		    ig=1
+> 		    ind_grid(ig)=igrid
+> 		 end if
+> 		 ip=ip+1
+> 		 ind_part(ip)=ipart
+> 		 ind_grid_part(ip)=ig
+> 	      endif
+> 	      if(ip==nvector)then
+> 		 call accrete_jeans(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=next_part  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+> 	end if
+2981c3063
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+2985c3067
+<      if(ip>0)call org_accrete_jeans(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+---
+>      if(ip>0)call accrete_jeans(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+2991c3073
+<      call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+---
+>      call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax	 ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+3000c3082
+<      msink(isink)    =msink(isink)        +msink_all(isink)
+---
+>      msink(isink)	=msink(isink)	    +msink_all(isink)
+3006c3088
+< end subroutine org_grow_jeans
+---
+> end subroutine grow_jeans
+3011c3093
+< subroutine org_accrete_jeans(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine accrete_jeans(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+3069c3151
+<     x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+---
+> 	x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+3082c3164
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+3087c3169
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+3092c3174
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+3100c3182
+<     if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+---
+> 	if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+3112c3194
+<     id(j,idim)=x(j,idim)
+---
+> 	id(j,idim)=x(j,idim)
+3119c3201
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igd(j,idim)=id(j,idim)/2
+3150,3152c3232,3234
+<     if(ok(j))then
+<        icd(j,idim)=id(j,idim)-2*igd(j,idim)
+<     end if
+---
+> 	if(ok(j))then
+> 	   icd(j,idim)=id(j,idim)-2*igd(j,idim)
+> 	end if
+3158c3240
+<     icell(j)=1+icd(j,1)
+---
+> 	icell(j)=1+icd(j,1)
+3165c3247
+<     icell(j)=1+icd(j,1)+2*icd(j,2)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)
+3172c3254
+<     icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+3180c3262
+<     indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+---
+> 	indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+3188,3190c3270,3272
+<     ! Convert to primitive variables
+<     d=uold(indp(j),1)
+<     u=uold(indp(j),2)/d
+---
+> 	! Convert to primitive variables
+> 	d=uold(indp(j),1)
+> 	u=uold(indp(j),2)/d
+3192c3274
+<     v=uold(indp(j),3)/d
+---
+> 	v=uold(indp(j),3)/d
+3195c3277
+<     w=uold(indp(j),4)/d
+---
+> 	w=uold(indp(j),4)/d
+3197,3200c3279,3282
+<     e=uold(indp(j),ndim+2)/d
+<     if(metal)then
+<        z=uold(indp(j),imetal)/d
+<     endif
+---
+> 	e=uold(indp(j),ndim+2)/d
+> 	if(metal)then
+> 	   z=uold(indp(j),imetal)/d
+> 	endif
+3202,3226c3284,3308
+<     bx1=uold(indp(j),6)
+<     by1=uold(indp(j),7)
+<     bz1=uold(indp(j),8)
+<     bx2=uold(indp(j),nvar+1)
+<     by2=uold(indp(j),nvar+2)
+<     bz2=uold(indp(j),nvar+3)
+<     e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+< #endif
+<     v2=(u**2+v**2+w**2)
+<     e=e-0.5d0*v2
+< 
+<     ! Jeans length related density threshold
+<     temp=max(e*(gamma-1.0),smallc**2)
+<     d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+<     d_thres=d_jeans
+< 
+<     ! User defined density threshold
+<     !d_thres=dd_sink
+< 
+<     if(d .ge. d_thres)then
+<        isink=-idp(ind_part(j))
+<        acc_mass=min((d-d_thres/4.0)*vol_loc,1d5*2d33/scale_m)
+<        !write(*,*)'Masse accretee par accretion de Jeans=',acc_mass*scale_m/2d33,' Msun'
+<        msink_new(isink  )=msink_new(isink  )+acc_mass
+<        vsink_new(isink,1)=vsink_new(isink,1)+acc_mass*u
+---
+> 	bx1=uold(indp(j),6)
+> 	by1=uold(indp(j),7)
+> 	bz1=uold(indp(j),8)
+> 	bx2=uold(indp(j),nvar+1)
+> 	by2=uold(indp(j),nvar+2)
+> 	bz2=uold(indp(j),nvar+3)
+> 	e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+> #endif
+> 	v2=(u**2+v**2+w**2)
+> 	e=e-0.5d0*v2
+> 
+> 	! Jeans length related density threshold
+> 	temp=max(e*(gamma-1.0),smallc**2)
+> 	d_jeans=temp*3.1415926/(4.0*dx_loc)**2/factG
+> 	d_thres=d_jeans
+> 
+> 	! User defined density threshold
+> 	!d_thres=dd_sink
+> 
+> 	if(d .ge. d_thres)then
+> 	   isink=-idp(ind_part(j))
+> 	   acc_mass=min((d-d_thres/4.0)*vol_loc,1d5*2d33/scale_m)
+> 	   !write(*,*)'Masse accretee par accretion de Jeans=',acc_mass*scale_m/2d33,' Msun'
+> 	   msink_new(isink  )=msink_new(isink  )+acc_mass
+> 	   vsink_new(isink,1)=vsink_new(isink,1)+acc_mass*u
+3228c3310
+<        vsink_new(isink,2)=vsink_new(isink,2)+acc_mass*v
+---
+> 	   vsink_new(isink,2)=vsink_new(isink,2)+acc_mass*v
+3231c3313
+<        vsink_new(isink,3)=vsink_new(isink,3)+acc_mass*w
+---
+> 	   vsink_new(isink,3)=vsink_new(isink,3)+acc_mass*w
+3233,3234c3315,3316
+<        !d=d_thres/4.0
+<        d=d-acc_mass
+---
+> 	   !d=d_thres/4.0
+> 	   d=d-acc_mass
+3236c3318
+<        mp(ind_part(j))=mp(ind_part(j))+acc_mass
+---
+> 	   mp(ind_part(j))=mp(ind_part(j))+acc_mass
+3238c3320
+<        ! Convert back to conservative variable
+---
+> 	   ! Convert back to conservative variable
+3240c3322
+<        e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+---
+> 	   e=e+0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)/d
+3242,3244c3324,3326
+<        e=e+0.5d0*(u**2+v**2+w**2)
+<        uold(indp(j),1)=d
+<        uold(indp(j),2)=d*u
+---
+> 	   e=e+0.5d0*(u**2+v**2+w**2)
+> 	   uold(indp(j),1)=d
+> 	   uold(indp(j),2)=d*u
+3246c3328
+<        uold(indp(j),3)=d*v
+---
+> 	   uold(indp(j),3)=d*v
+3249c3331
+<        uold(indp(j),4)=d*w
+---
+> 	   uold(indp(j),4)=d*w
+3251,3255c3333,3337
+<        uold(indp(j),ndim+2)=d*e
+<        if(metal)then
+<           uold(indp(j),imetal)=d*z
+<        endif
+<     endif
+---
+> 	   uold(indp(j),ndim+2)=d*e
+> 	   if(metal)then
+> 	      uold(indp(j),imetal)=d*z
+> 	   endif
+> 	endif
+3262c3344
+< end subroutine org_accrete_jeans
+---
+> end subroutine accrete_jeans
+3267c3349
+< subroutine org_jet_AGN(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+---
+> subroutine jet_AGN(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
+3315c3397
+<     x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+---
+> 	x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+3328c3410
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+3333c3415
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+3338c3420
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+3346c3428
+<     if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+---
+> 	if(x(j,idim)<=0.0D0.or.x(j,idim)>=6.0D0)error=.true.
+3358c3440
+<     id(j,idim)=x(j,idim)
+---
+> 	id(j,idim)=x(j,idim)
+3365c3447
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igd(j,idim)=id(j,idim)/2
+3396,3398c3478,3480
+<     if(ok(j))then
+<        icd(j,idim)=id(j,idim)-2*igd(j,idim)
+<     end if
+---
+> 	if(ok(j))then
+> 	   icd(j,idim)=id(j,idim)-2*igd(j,idim)
+> 	end if
+3404c3486
+<     icell(j)=1+icd(j,1)
+---
+> 	icell(j)=1+icd(j,1)
+3411c3493
+<     icell(j)=1+icd(j,1)+2*icd(j,2)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)
+3418c3500
+<     icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+---
+> 	icell(j)=1+icd(j,1)+2*icd(j,2)+4*icd(j,3)
+3426c3508
+<     indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+---
+> 	indp(j)=ncoarse+(icell(j)-1)*ngridmax+igrid(j)
+3433,3438c3515,3520
+<     isink=-idp(ind_part(j))
+<     r2=0d0
+<     do idim=1,ndim
+<        r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+<     end do
+<     weight=exp(-r2/r2k(isink))
+---
+> 	isink=-idp(ind_part(j))
+> 	r2=0d0
+> 	do idim=1,ndim
+> 	   r2=r2+(xp(ind_part(j),idim)-xsink(isink,idim))**2
+> 	end do
+> 	weight=exp(-r2/r2k(isink))
+3440,3441c3522,3523
+<     d=uold(indp(j),1)
+<     u=uold(indp(j),2)/d
+---
+> 	d=uold(indp(j),1)
+> 	u=uold(indp(j),2)/d
+3443c3525
+<     v=uold(indp(j),3)/d
+---
+> 	v=uold(indp(j),3)/d
+3446c3528
+<     w=uold(indp(j),4)/d
+---
+> 	w=uold(indp(j),4)/d
+3449,3460c3531,3542
+<     d_x=xp(ind_part(j),1)-xsink(isink,1)
+<     d_y=xp(ind_part(j),2)-xsink(isink,2)
+<     d_z=xp(ind_part(j),3)-xsink(isink,3)
+<     !dr =sqrt(d_x*d_x+d_y*d_y+d_z*d_z)
+<     uc =u-vsink(isink,1)
+<     vc =v-vsink(isink,2)
+<     wc =w-vsink(isink,3)
+< 
+<     !j_sp= d_x*uc + d_y*vc + d_z*wc
+<     jsink_new(isink,1)=jsink_new(isink,1) + (d_y*wc-d_z*vc)*d*vol_loc
+<     jsink_new(isink,2)=jsink_new(isink,2) + (d_z*uc-d_x*wc)*d*vol_loc
+<     jsink_new(isink,3)=jsink_new(isink,3) + (d_x*vc-d_y*uc)*d*vol_loc
+---
+> 	d_x=xp(ind_part(j),1)-xsink(isink,1)
+> 	d_y=xp(ind_part(j),2)-xsink(isink,2)
+> 	d_z=xp(ind_part(j),3)-xsink(isink,3)
+> 	!dr =sqrt(d_x*d_x+d_y*d_y+d_z*d_z)
+> 	uc =u-vsink(isink,1)
+> 	vc =v-vsink(isink,2)
+> 	wc =w-vsink(isink,3)
+> 
+> 	!j_sp= d_x*uc + d_y*vc + d_z*wc
+> 	jsink_new(isink,1)=jsink_new(isink,1) + (d_y*wc-d_z*vc)*d*vol_loc
+> 	jsink_new(isink,2)=jsink_new(isink,2) + (d_z*uc-d_x*wc)*d*vol_loc
+> 	jsink_new(isink,3)=jsink_new(isink,3) + (d_x*vc-d_y*uc)*d*vol_loc
+3469c3551
+< end subroutine org_jet_AGN
+---
+> end subroutine jet_AGN
+3474c3556
+< subroutine org_get_rho_star(ilevel)
+---
+> subroutine get_rho_star(ilevel)
+3511c3593
+<     rho_star(active(ilevel)%igrid(i)+iskip)=0.0D0
+---
+> 	rho_star(active(ilevel)%igrid(i)+iskip)=0.0D0
+3520,3523c3602,3605
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,reception(icpu,ilevel)%ngrid
+<        rho_star(reception(icpu,ilevel)%igrid(i)+iskip)=0.0D0
+<     end do
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,reception(icpu,ilevel)%ngrid
+> 	   rho_star(reception(icpu,ilevel)%igrid(i)+iskip)=0.0D0
+> 	end do
+3531c3613
+<   call org_rhostar_from_current_level(ilevel)
+---
+>   call rhostar_from_current_level(ilevel)
+3541,3544c3623,3626
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     do i=1,boundary(ibound,ilevel)%ngrid
+<        rho_star(boundary(ibound,ilevel)%igrid(i)+iskip)=0.0
+<     end do
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	do i=1,boundary(ibound,ilevel)%ngrid
+> 	   rho_star(boundary(ibound,ilevel)%igrid(i)+iskip)=0.0
+> 	end do
+3548c3630
+< end subroutine org_get_rho_star
+---
+> end subroutine get_rho_star
+3553c3635
+< subroutine org_rhostar_from_current_level(ilevel)
+---
+> subroutine rhostar_from_current_level(ilevel)
+3583,3614c3665,3696
+<     npart1=numbp(igrid)  ! Number of particles in the grid
+<     if(npart1>0)then
+<        ig=ig+1
+<        ind_grid(ig)=igrid
+<        ipart=headp(igrid)
+< 
+<        ! Loop over particles
+<        do jpart=1,npart1
+<           if(ig==0)then
+<          ig=1
+<          ind_grid(ig)=igrid
+<           end if
+<           ip=ip+1
+<           ind_part(ip)=ipart
+<           ind_grid_part(ip)=ig
+<           if(ip==nvector)then
+<          ! Lower left corner of 3x3x3 grid-cube
+<          do idim=1,ndim
+<             do i=1,ig
+<                x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+<             end do
+<          end do
+<          do i=1,ig
+<             ind_cell(i)=father(ind_grid(i))
+<          end do
+<          call org_cic_star(ind_cell,ind_part,ind_grid_part,x0,ig,ip,ilevel)
+<          ip=0
+<          ig=0
+<           end if
+<           ipart=nextp(ipart)  ! Go to next particle
+<        end do
+<        ! End loop over particles
+---
+> 	npart1=numbp(igrid)  ! Number of particles in the grid
+> 	if(npart1>0)then
+> 	   ig=ig+1
+> 	   ind_grid(ig)=igrid
+> 	   ipart=headp(igrid)
+> 
+> 	   ! Loop over particles
+> 	   do jpart=1,npart1
+> 	      if(ig==0)then
+> 		 ig=1
+> 		 ind_grid(ig)=igrid
+> 	      end if
+> 	      ip=ip+1
+> 	      ind_part(ip)=ipart
+> 	      ind_grid_part(ip)=ig
+> 	      if(ip==nvector)then
+> 		 ! Lower left corner of 3x3x3 grid-cube
+> 		 do idim=1,ndim
+> 		    do i=1,ig
+> 		       x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+> 		    end do
+> 		 end do
+> 		 do i=1,ig
+> 		    ind_cell(i)=father(ind_grid(i))
+> 		 end do
+> 		 call cic_star(ind_cell,ind_part,ind_grid_part,x0,ig,ip,ilevel)
+> 		 ip=0
+> 		 ig=0
+> 	      end if
+> 	      ipart=nextp(ipart)  ! Go to next particle
+> 	   end do
+> 	   ! End loop over particles
+3616c3698
+<     end if
+---
+> 	end if
+3618c3700
+<     igrid=next(igrid)   ! Go to next grid
+---
+> 	igrid=next(igrid)   ! Go to next grid
+3623,3632c3705,3714
+<     ! Lower left corner of 3x3x3 grid-cube
+<     do idim=1,ndim
+<        do i=1,ig
+<           x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+<        end do
+<     end do
+<     do i=1,ig
+<        ind_cell(i)=father(ind_grid(i))
+<     end do
+<     call org_cic_star(ind_cell,ind_part,ind_grid_part,x0,ig,ip,ilevel)
+---
+> 	! Lower left corner of 3x3x3 grid-cube
+> 	do idim=1,ndim
+> 	   do i=1,ig
+> 	      x0(i,idim)=xg(ind_grid(i),idim)-3.0D0*dx
+> 	   end do
+> 	end do
+> 	do i=1,ig
+> 	   ind_cell(i)=father(ind_grid(i))
+> 	end do
+> 	call cic_star(ind_cell,ind_part,ind_grid_part,x0,ig,ip,ilevel)
+3638c3720
+< end subroutine org_rhostar_from_current_level
+---
+> end subroutine rhostar_from_current_level
+3643c3725
+< subroutine org_cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
+---
+> subroutine cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
+3691c3773
+<     x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+---
+> 	x(j,idim)=xp(ind_part(j),idim)/scale+skip_loc(idim)
+3696c3778
+<     x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+---
+> 	x(j,idim)=x(j,idim)-x0(ind_grid_part(j),idim)
+3701c3783
+<     x(j,idim)=x(j,idim)/dx
+---
+> 	x(j,idim)=x(j,idim)/dx
+3713c3795
+<     ttt(j)=tp(ind_part(j))
+---
+> 	ttt(j)=tp(ind_part(j))
+3721c3803
+<     if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)error=.true.
+---
+> 	if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)error=.true.
+3727,3731c3809,3813
+<     do j=1,np
+<        if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)then
+<           write(*,*)x(j,1:ndim)
+<        endif
+<     end do
+---
+> 	do j=1,np
+> 	   if(x(j,idim)<0.5D0.or.x(j,idim)>5.5D0)then
+> 	      write(*,*)x(j,1:ndim)
+> 	   endif
+> 	end do
+3739,3743c3821,3825
+<     dd(j,idim)=x(j,idim)+0.5D0
+<     id(j,idim)=dd(j,idim)
+<     dd(j,idim)=dd(j,idim)-id(j,idim)
+<     dg(j,idim)=1.0D0-dd(j,idim)
+<     ig(j,idim)=id(j,idim)-1
+---
+> 	dd(j,idim)=x(j,idim)+0.5D0
+> 	id(j,idim)=dd(j,idim)
+> 	dd(j,idim)=dd(j,idim)-id(j,idim)
+> 	dg(j,idim)=1.0D0-dd(j,idim)
+> 	ig(j,idim)=id(j,idim)-1
+3778,3779c3860,3861
+<     igg(j,idim)=ig(j,idim)/2
+<     igd(j,idim)=id(j,idim)/2
+---
+> 	igg(j,idim)=ig(j,idim)/2
+> 	igd(j,idim)=id(j,idim)/2
+3810c3892
+<     igrid(j,ind)=son(nbors_father_cells(ind_grid_part(j),kg(j,ind)))
+---
+> 	igrid(j,ind)=son(nbors_father_cells(ind_grid_part(j),kg(j,ind)))
+3817,3818c3899,3900
+<     icg(j,idim)=ig(j,idim)-2*igg(j,idim)
+<     icd(j,idim)=id(j,idim)-2*igd(j,idim)
+---
+> 	icg(j,idim)=ig(j,idim)-2*igg(j,idim)
+> 	icd(j,idim)=id(j,idim)-2*igd(j,idim)
+3851c3933
+<     indp(j,ind)=ncoarse+(icell(j,ind)-1)*ngridmax+igrid(j,ind)
+---
+> 	indp(j,ind)=ncoarse+(icell(j,ind)-1)*ngridmax+igrid(j,ind)
+3858c3940
+<     ok(j)=igrid(j,ind)>0
+---
+> 	ok(j)=igrid(j,ind)>0
+3862c3944
+<     vol2(j)=mmm(j)*vol(j,ind)/vol_loc
+---
+> 	vol2(j)=mmm(j)*vol(j,ind)/vol_loc
+3866,3868c3948,3950
+<     if(ok(j).and.ttt(j).ne.0d0)then
+<        rho_star(indp(j,ind))=rho_star(indp(j,ind))+vol2(j)
+<     end if
+---
+> 	if(ok(j).and.ttt(j).ne.0d0)then
+> 	   rho_star(indp(j,ind))=rho_star(indp(j,ind))+vol2(j)
+> 	end if
+3872c3954
+< end subroutine org_cic_star
+---
+> end subroutine cic_star
+3877c3959
+< subroutine org_quenching(ilevel)
+---
+> subroutine quenching(ilevel)
+3936,3953c4018,4035
+<     ipart=headp(igrid)
+<     ! Loop over particles
+<     do jpart=1,npart1
+<        ! Save next particle      <--- Very important !!!
+<        next_part=nextp(ipart)
+<        !if(idp(ipart).gt.0.and.tp(ipart).ne.0)then
+<        if(tp(ipart).ne.0)then
+<           npart2=npart2+1
+<           tot_m=tot_m+mp(ipart)
+<           ave_u=ave_u+mp(ipart)*vp(ipart,1)
+<           ave_v=ave_v+mp(ipart)*vp(ipart,2)
+<           ave_w=ave_w+mp(ipart)*vp(ipart,3)
+<           sig_u=sig_u+mp(ipart)*vp(ipart,1)**2
+<           sig_v=sig_v+mp(ipart)*vp(ipart,2)**2
+<           sig_w=sig_w+mp(ipart)*vp(ipart,3)**2
+<        endif
+<        ipart=next_part  ! Go to next particle
+<     end do
+---
+> 	ipart=headp(igrid)
+> 	! Loop over particles
+> 	do jpart=1,npart1
+> 	   ! Save next particle	  <--- Very important !!!
+> 	   next_part=nextp(ipart)
+> 	   !if(idp(ipart).gt.0.and.tp(ipart).ne.0)then
+> 	   if(tp(ipart).ne.0)then
+> 	      npart2=npart2+1
+> 	      tot_m=tot_m+mp(ipart)
+> 	      ave_u=ave_u+mp(ipart)*vp(ipart,1)
+> 	      ave_v=ave_v+mp(ipart)*vp(ipart,2)
+> 	      ave_w=ave_w+mp(ipart)*vp(ipart,3)
+> 	      sig_u=sig_u+mp(ipart)*vp(ipart,1)**2
+> 	      sig_v=sig_v+mp(ipart)*vp(ipart,2)**2
+> 	      sig_w=sig_w+mp(ipart)*vp(ipart,3)**2
+> 	   endif
+> 	   ipart=next_part  ! Go to next particle
+> 	end do
+3958,3964c4040,4046
+<     ave_u=ave_u/tot_m
+<     ave_v=ave_v/tot_m
+<     ave_w=ave_w/tot_m
+<     sig_u=sqrt(sig_u/tot_m-ave_u**2)*scale_v/1d5
+<     sig_v=sqrt(sig_v/tot_m-ave_v**2)*scale_v/1d5
+<     sig_w=sqrt(sig_w/tot_m-ave_w**2)*scale_v/1d5
+<     str_d=tot_m/(2**ndim*vol_loc)*scale_nH
+---
+> 	ave_u=ave_u/tot_m
+> 	ave_v=ave_v/tot_m
+> 	ave_w=ave_w/tot_m
+> 	sig_u=sqrt(sig_u/tot_m-ave_u**2)*scale_v/1d5
+> 	sig_v=sqrt(sig_v/tot_m-ave_v**2)*scale_v/1d5
+> 	sig_w=sqrt(sig_w/tot_m-ave_w**2)*scale_v/1d5
+> 	str_d=tot_m/(2**ndim*vol_loc)*scale_nH
+3969,3977c4051,4059
+<     iskip=ncoarse+(ind-1)*ngridmax
+<     ind_cell=iskip+igrid
+<     ! AGN formation sites
+<     ! if n_star>0.1 H/cc and v_disp>75 km/s - Slightly concerning hard-coded units system!
+<     if(str_d>0.1.and.MAX(sig_u,sig_v,sig_w)>20.)then
+<        flag2(ind_cell)=0
+<     else
+<        flag2(ind_cell)=1
+<     end if
+---
+> 	iskip=ncoarse+(ind-1)*ngridmax
+> 	ind_cell=iskip+igrid
+> 	! AGN formation sites
+> 	! if n_star>0.1 H/cc and v_disp>75 km/s - Slightly concerning hard-coded units system!
+> 	if(str_d>0.1.and.MAX(sig_u,sig_v,sig_w)>20.)then
+> 	   flag2(ind_cell)=0
+> 	else
+> 	   flag2(ind_cell)=1
+> 	end if
+3986c4068
+< end subroutine org_quenching
+---
+> end subroutine quenching
+3991c4073
+< subroutine org_growspin
+---
+> subroutine growspin
+4207c4289
+< end subroutine org_growspin
+---
+> end subroutine growspin
+4212c4294
+< subroutine org_AGN_feedback
+---
+> subroutine AGN_feedback
+4300c4382
+<   call org_getAGNonmyid(itemp,nAGN)
+---
+>   call getAGNonmyid(itemp,nAGN)
+4343,4344c4425,4426
+<     Mfrac=dMsmbh_AGN(iAGN)/(Msmbh(iAGN)-dMsmbh_AGN(iAGN))
+<     if(Mfrac.ge.jetfrac)ok_blast_agn(iAGN)=.true.
+---
+> 	Mfrac=dMsmbh_AGN(iAGN)/(Msmbh(iAGN)-dMsmbh_AGN(iAGN))
+> 	if(Mfrac.ge.jetfrac)ok_blast_agn(iAGN)=.true.
+4355,4366c4437,4448
+<     ! Compute estimated average temperature in the blast
+<     temp_blast=0.0
+<     if(vol_gas(iAGN)>0.0)then
+<        temp_blast=eAGN_T*1d12*dMsmbh_AGN(iAGN)/mass_gas(iAGN)
+<     else
+<        if(ind_blast(iAGN)>0)then
+<           temp_blast=eAGN_T*1d12*dMsmbh_AGN(iAGN)/mass_blast(iAGN)
+<        endif
+<     endif
+<     if(temp_blast>TAGN)then
+<        ok_blast_agn(iAGN)=.true.
+<     endif
+---
+> 	! Compute estimated average temperature in the blast
+> 	temp_blast=0.0
+> 	if(vol_gas(iAGN)>0.0)then
+> 	   temp_blast=eAGN_T*1d12*dMsmbh_AGN(iAGN)/mass_gas(iAGN)
+> 	else
+> 	   if(ind_blast(iAGN)>0)then
+> 	      temp_blast=eAGN_T*1d12*dMsmbh_AGN(iAGN)/mass_blast(iAGN)
+> 	   endif
+> 	endif
+> 	if(temp_blast>TAGN)then
+> 	   ok_blast_agn(iAGN)=.true.
+> 	endif
+4377,4378c4459,4460
+<     isort=iAGN_myid(iAGN)
+<     dMsmbh(isort)=0d0
+---
+> 	isort=iAGN_myid(iAGN)
+> 	dMsmbh(isort)=0d0
+4416c4498
+<     call make_virtual_fine_dp(uold(1,ivar),ilevel)
+---
+> 	call make_virtual_fine_dp(uold(1,ivar),ilevel)
+4426c4508
+< end subroutine org_AGN_feedback
+---
+> end subroutine AGN_feedback
+4431c4513
+< subroutine org_average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
+---
+> subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
+4442c4524
+<   ! Jet case    : remove some gas from the BH's cell
+---
+>   ! Jet case	: remove some gas from the BH's cell
+4468c4550
+<   if(verbose)write(*,*)'Entering org_average_AGN'
+---
+>   if(verbose)write(*,*)'Entering average_AGN'
+4505,4510c4587,4592
+<     iz=(ind-1)/4
+<     iy=(ind-1-4*iz)/2
+<     ix=(ind-1-2*iy-4*iz)
+<     xc(ind,1)=(dble(ix)-0.5D0)*dx
+<     xc(ind,2)=(dble(iy)-0.5D0)*dx
+<     xc(ind,3)=(dble(iz)-0.5D0)*dx
+---
+> 	iz=(ind-1)/4
+> 	iy=(ind-1-4*iz)/2
+> 	ix=(ind-1-2*iy-4*iz)
+> 	xc(ind,1)=(dble(ix)-0.5D0)*dx
+> 	xc(ind,2)=(dble(iy)-0.5D0)*dx
+> 	xc(ind,3)=(dble(iz)-0.5D0)*dx
+4516,4636c4598,4718
+<     ngrid=MIN(nvector,ncache-igrid+1)
+<     do i=1,ngrid
+<        ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+<     end do
+< 
+<     ! Loop over cells
+<     do ind=1,twotondim
+<        iskip=ncoarse+(ind-1)*ngridmax
+<        do i=1,ngrid
+<           ind_cell(i)=iskip+ind_grid(i)
+<        end do
+< 
+<        ! Flag leaf cells
+<        do i=1,ngrid
+<           ok(i)=son(ind_cell(i))==0
+<        end do
+< 
+<        do i=1,ngrid
+<           if(ok(i))then
+<          ! Get gas cell position
+<          x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+<          y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+<          z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+<          do iAGN=1,nAGN
+<             dxx=x-xAGN(iAGN,1)
+<             dyy=y-xAGN(iAGN,2)
+<             dzz=z-xAGN(iAGN,3)
+<             dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+< 
+<             ! ------------------------------------------
+<             ! case 0: Some energy has not been released
+<             ! ------------------------------------------
+<             if(EsaveAGN(iAGN).gt.0d0)then
+<                if(dr_AGN.le.rmax2)then
+<               vol_gas (iAGN)=vol_gas (iAGN)+vol_loc*uold(ind_cell(i),1)
+<                endif
+<                dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+<                if(dr_cell.le.dx_loc/2.0)then
+<               ind_blast (iAGN)=ind_cell(i)
+<               vol_blast (iAGN)=vol_loc
+<                endif
+< 
+<             ! ------------------------------------------
+<             ! case 1: All energy has been released in
+<             ! previous time step -> choose between kinetic
+<             ! or thermal feedback
+<             ! ------------------------------------------
+<             else
+< 
+<                ! ------------------------------------------
+<                ! Jet feedback
+<                ! ------------------------------------------
+<                if(X_radio(iAGN).lt.X_floor)then
+< 
+<               if(ok_blast_agn(iAGN))then
+<                  jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
+<                  if(jtot.gt.0d0)then
+<                 j_x=jAGN(iAGN,1)/jtot
+<                 j_y=jAGN(iAGN,2)/jtot
+<                 j_z=jAGN(iAGN,3)/jtot
+<                 dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+<                 dzjet= dxx*j_x + dyy*j_y + dzz*j_z
+<                 drjet=sqrt(dr_AGN-dzjet*dzjet)
+<                 ! Check if the cell lies within the AGN jet cylindre
+<                 if (drjet .le. rmax .and. abs(dzjet) .le. rmax)then
+<                    vol_gas(iAGN)=vol_gas(iAGN)+vol_loc
+<                    psy=exp(-drjet**2/2d0/rmax**2d0)
+<                    psy_norm(iAGN)=psy_norm(iAGN)+psy
+<                 endif
+<                 if(dr_cell.le.dx_loc/2.0)then
+<                    ind_blast(iAGN)=ind_cell(i)
+<                    d=uold(ind_blast(iAGN),1)
+<                    u=uold(ind_blast(iAGN),2)/d
+<                    v=uold(ind_blast(iAGN),3)/d
+<                    w=uold(ind_blast(iAGN),4)/d
+<                    ekk=0.5d0*d*(u*u+v*v+w*w)
+<                    eint=uold(ind_blast(iAGN),5)-ekk
+<                    vol_blast  (iAGN)=vol_loc
+<                    mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN),0.25d0*d*vol_loc)
+<                    if(metal)then
+<                       ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
+<                       uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
+<                        & - ZAGN(iAGN)*mAGN(iAGN)/vol_loc
+<                    endif
+< 
+<                    d=uold(ind_blast(iAGN),1)-mAGN(iAGN)/vol_loc
+<                    uold(ind_blast(iAGN),1)=d
+<                    uold(ind_blast(iAGN),2)=d*u
+<                    uold(ind_blast(iAGN),3)=d*v
+<                    uold(ind_blast(iAGN),4)=d*w
+<                    uold(ind_blast(iAGN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+<                 endif
+<                 ! If no spin for the jet then put all thermal
+<                  else
+<                 if(dr_AGN.le.rmax2) then
+<                    vol_gas(iAGN)=vol_gas(iAGN)+vol_loc
+<                 endif
+<                 dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+<                  endif
+<               endif
+< 
+<                ! ------------------------------------------
+<                ! Thermal feedback
+<                ! ------------------------------------------
+<                else
+<               if(dr_AGN.le.rmax2)then
+<                  vol_gas (iAGN)=vol_gas (iAGN)+vol_loc*uold(ind_cell(i),1)
+<                  mass_gas(iAGN)=mass_gas(iAGN)+vol_loc*uold(ind_cell(i),1)
+<               endif
+<               dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+<               if(dr_cell.le.dx_loc/2.0)then
+<                  ind_blast (iAGN)=ind_cell(i)
+<                  vol_blast (iAGN)=vol_loc
+<                  mass_blast(iAGN)=vol_loc*uold(ind_cell(i),1)
+<               endif
+<                endif
+<             endif
+< 
+<          end do
+<           endif
+<        end do
+---
+> 	ngrid=MIN(nvector,ncache-igrid+1)
+> 	do i=1,ngrid
+> 	   ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+> 	end do
+> 
+> 	! Loop over cells
+> 	do ind=1,twotondim
+> 	   iskip=ncoarse+(ind-1)*ngridmax
+> 	   do i=1,ngrid
+> 	      ind_cell(i)=iskip+ind_grid(i)
+> 	   end do
+> 
+> 	   ! Flag leaf cells
+> 	   do i=1,ngrid
+> 	      ok(i)=son(ind_cell(i))==0
+> 	   end do
+> 
+> 	   do i=1,ngrid
+> 	      if(ok(i))then
+> 		 ! Get gas cell position
+> 		 x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+> 		 y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+> 		 z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+> 		 do iAGN=1,nAGN
+> 		    dxx=x-xAGN(iAGN,1)
+> 		    dyy=y-xAGN(iAGN,2)
+> 		    dzz=z-xAGN(iAGN,3)
+> 		    dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+> 
+> 		    ! ------------------------------------------
+> 		    ! case 0: Some energy has not been released
+> 		    ! ------------------------------------------
+> 		    if(EsaveAGN(iAGN).gt.0d0)then
+> 		       if(dr_AGN.le.rmax2)then
+> 			  vol_gas (iAGN)=vol_gas (iAGN)+vol_loc*uold(ind_cell(i),1)
+> 		       endif
+> 		       dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+> 		       if(dr_cell.le.dx_loc/2.0)then
+> 			  ind_blast (iAGN)=ind_cell(i)
+> 			  vol_blast (iAGN)=vol_loc
+> 		       endif
+> 
+> 		    ! ------------------------------------------
+> 		    ! case 1: All energy has been released in
+> 		    ! previous time step -> choose between kinetic
+> 		    ! or thermal feedback
+> 		    ! ------------------------------------------
+> 		    else
+> 
+> 		       ! ------------------------------------------
+> 		       ! Jet feedback
+> 		       ! ------------------------------------------
+> 		       if(X_radio(iAGN).lt.X_floor)then
+> 
+> 			  if(ok_blast_agn(iAGN))then
+> 			     jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
+> 			     if(jtot.gt.0d0)then
+> 				j_x=jAGN(iAGN,1)/jtot
+> 				j_y=jAGN(iAGN,2)/jtot
+> 				j_z=jAGN(iAGN,3)/jtot
+> 				dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+> 				dzjet= dxx*j_x + dyy*j_y + dzz*j_z
+> 				drjet=sqrt(dr_AGN-dzjet*dzjet)
+> 				! Check if the cell lies within the AGN jet cylindre
+> 				if (drjet .le. rmax .and. abs(dzjet) .le. rmax)then
+> 				   vol_gas(iAGN)=vol_gas(iAGN)+vol_loc
+> 				   psy=exp(-drjet**2/2d0/rmax**2d0)
+> 				   psy_norm(iAGN)=psy_norm(iAGN)+psy
+> 				endif
+> 				if(dr_cell.le.dx_loc/2.0)then
+> 				   ind_blast(iAGN)=ind_cell(i)
+> 				   d=uold(ind_blast(iAGN),1)
+> 				   u=uold(ind_blast(iAGN),2)/d
+> 				   v=uold(ind_blast(iAGN),3)/d
+> 				   w=uold(ind_blast(iAGN),4)/d
+> 				   ekk=0.5d0*d*(u*u+v*v+w*w)
+> 				   eint=uold(ind_blast(iAGN),5)-ekk
+> 				   vol_blast  (iAGN)=vol_loc
+> 				   mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN),0.25d0*d*vol_loc)
+> 				   if(metal)then
+> 				      ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
+> 				      uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
+> 					   & - ZAGN(iAGN)*mAGN(iAGN)/vol_loc
+> 				   endif
+> 
+> 				   d=uold(ind_blast(iAGN),1)-mAGN(iAGN)/vol_loc
+> 				   uold(ind_blast(iAGN),1)=d
+> 				   uold(ind_blast(iAGN),2)=d*u
+> 				   uold(ind_blast(iAGN),3)=d*v
+> 				   uold(ind_blast(iAGN),4)=d*w
+> 				   uold(ind_blast(iAGN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+> 				endif
+> 				! If no spin for the jet then put all thermal
+> 			     else
+> 				if(dr_AGN.le.rmax2) then
+> 				   vol_gas(iAGN)=vol_gas(iAGN)+vol_loc
+> 				endif
+> 				dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+> 			     endif
+> 			  endif
+> 
+> 		       ! ------------------------------------------
+> 		       ! Thermal feedback
+> 		       ! ------------------------------------------
+> 		       else
+> 			  if(dr_AGN.le.rmax2)then
+> 			     vol_gas (iAGN)=vol_gas (iAGN)+vol_loc*uold(ind_cell(i),1)
+> 			     mass_gas(iAGN)=mass_gas(iAGN)+vol_loc*uold(ind_cell(i),1)
+> 			  endif
+> 			  dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+> 			  if(dr_cell.le.dx_loc/2.0)then
+> 			     ind_blast (iAGN)=ind_cell(i)
+> 			     vol_blast (iAGN)=vol_loc
+> 			     mass_blast(iAGN)=vol_loc*uold(ind_cell(i),1)
+> 			  endif
+> 		       endif
+> 		    endif
+> 
+> 		 end do
+> 	      endif
+> 	   end do
+4638,4639c4720,4721
+<     end do
+<     ! End loop over cells
+---
+> 	end do
+> 	! End loop over cells
+4653,4654c4735,4736
+<      mAGN_mpi     (isink)=mAGN     (iAGN)
+<      ZAGN_mpi     (isink)=ZAGN     (iAGN)
+---
+>      mAGN_mpi	 (isink)=mAGN	 (iAGN)
+>      ZAGN_mpi	 (isink)=ZAGN	 (iAGN)
+4659,4660c4741,4742
+<   call MPI_ALLREDUCE(mAGN_mpi     ,mAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+<   call MPI_ALLREDUCE(ZAGN_mpi     ,ZAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+---
+>   call MPI_ALLREDUCE(mAGN_mpi	 ,mAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+>   call MPI_ALLREDUCE(ZAGN_mpi	 ,ZAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+4672,4673c4754,4755
+<      mAGN    (iAGN)=mAGN_mpi    (isink)
+<      ZAGN    (iAGN)=ZAGN_mpi    (isink)
+---
+>      mAGN    (iAGN)=mAGN_mpi	(isink)
+>      ZAGN    (iAGN)=ZAGN_mpi	(isink)
+4679c4761
+<   if(verbose)write(*,*)'Exiting org_average_AGN',nAGN
+---
+>   if(verbose)write(*,*)'Exiting average_AGN'
+4681c4763
+< end subroutine org_average_AGN
+---
+> end subroutine average_AGN
+4686c4768
+< subroutine org_AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_blast,vol_gas &
+---
+> subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_blast,vol_gas &
+4759,4761c4841,4843
+<     ok_save(iAGN)=.true.
+<     EAGN (iAGN)=EsaveAGN(iAGN)
+<     p_gas(iAGN)=EAGN    (iAGN) / vol_gas(iAGN)
+---
+> 	ok_save(iAGN)=.true.
+> 	EAGN (iAGN)=EsaveAGN(iAGN)
+> 	p_gas(iAGN)=EAGN    (iAGN) / vol_gas(iAGN)
+4768c4850
+<     if(X_radio(iAGN).lt.X_floor)then
+---
+> 	if(X_radio(iAGN).lt.X_floor)then
+4782,4785c4864,4867
+<     else
+<        EAGN     (iAGN)=eAGN_T*epsilon_r*dMsmbh_AGN(iAGN)*(3d10/scale_v)**2d0
+<        p_gas (iAGN)=EAGN(iAGN) / vol_gas(iAGN)
+<     endif
+---
+> 	else
+> 	   EAGN	 (iAGN)=eAGN_T*epsilon_r*dMsmbh_AGN(iAGN)*(3d10/scale_v)**2d0
+> 	   p_gas (iAGN)=EAGN(iAGN) / vol_gas(iAGN)
+> 	endif
+4798,4803c4880,4885
+<     iz=(ind-1)/4
+<     iy=(ind-1-4*iz)/2
+<     ix=(ind-1-2*iy-4*iz)
+<     xc(ind,1)=(dble(ix)-0.5D0)*dx
+<     xc(ind,2)=(dble(iy)-0.5D0)*dx
+<     xc(ind,3)=(dble(iz)-0.5D0)*dx
+---
+> 	iz=(ind-1)/4
+> 	iy=(ind-1-4*iz)/2
+> 	ix=(ind-1-2*iy-4*iz)
+> 	xc(ind,1)=(dble(ix)-0.5D0)*dx
+> 	xc(ind,2)=(dble(iy)-0.5D0)*dx
+> 	xc(ind,3)=(dble(iz)-0.5D0)*dx
+4809,5009c4891,5091
+<     ngrid=MIN(nvector,ncache-igrid+1)
+<     do i=1,ngrid
+<        ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+<     end do
+< 
+<     ! Loop over cells
+<     do ind=1,twotondim
+<        iskip=ncoarse+(ind-1)*ngridmax
+<        do i=1,ngrid
+<           ind_cell(i)=iskip+ind_grid(i)
+<        end do
+< 
+<        ! Flag leaf cells
+<        do i=1,ngrid
+<           ok(i)=son(ind_cell(i))==0
+<        end do
+< 
+<        do i=1,ngrid
+<           if(ok(i))then
+<          ! Get gas cell position
+<          x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+<          y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+<          z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+< 
+<          do iAGN=1,nAGN
+< 
+<             ! ------------------------------------------
+<             ! case 0: Some energy has not been released
+<             ! in previous time step -> do thermal input
+<             ! ------------------------------------------
+<             if(ok_save(iAGN))then
+<                dxx=x-xAGN(iAGN,1)
+<                dyy=y-xAGN(iAGN,2)
+<                dzz=z-xAGN(iAGN,3)
+<                dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+<                if(dr_AGN.le.rmax2)then
+<               ekk=0d0
+<               d=uold(ind_cell(i),1)
+<               do idim=1,ndim
+<                  ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/d
+<               end do
+<               etot=uold(ind_cell(i),5)
+<               eint=etot - ekk
+<               T2_1=(gamma-1d0)*eint/d*scale_T2
+<               if(T2_1 .lt. T2maxAGNz)then
+<                  eint=eint + p_gas(iAGN)*d
+<                  T2_2=(gamma-1d0)*eint/d*scale_T2
+<                  if(T2_2 .le. T2maxAGNz)then
+<                 uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)*d
+<                  else
+<                 uold(ind_cell(i),5)=uold(ind_cell(i),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<                 EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<                  endif
+<               else
+<                  EsaveAGN(iAGN)=EsaveAGN(iAGN)+p_gas(iAGN)*d*vol_loc
+<               endif
+<                endif
+< 
+<             ! ------------------------------------------
+<             ! case 1: All energy has been released in
+<             ! previous time step -> choose between kinetic
+<             ! or thermal feedback
+<             ! ------------------------------------------
+<             else if(ok_blast_agn(iAGN))then
+<                ! ------------------------------------------
+<                ! Jet case
+<                ! ------------------------------------------
+<                if(X_radio(iAGN).lt.X_floor)then
+< 
+<               dxx=x-xAGN(iAGN,1)
+<               dyy=y-xAGN(iAGN,2)
+<               dzz=z-xAGN(iAGN,3)
+<               dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+<               jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
+<               if(jtot.gt.0d0)then
+<                  j_x=jAGN(iAGN,1)/jtot
+<                  j_y=jAGN(iAGN,2)/jtot
+<                  j_z=jAGN(iAGN,3)/jtot
+<                  dzjet= dxx*j_x + dyy*j_y + dzz*j_z
+<                  drjet=sqrt(dr_AGN-dzjet*dzjet)
+< 
+<                  ! Check if the cell lies within the AGN jet cylindre
+<                  if (drjet .le. rmax .and. abs(dzjet) .le. rmax)then
+<                 psy=exp(-drjet**2/2d0/rmax**2d0) / psy_norm(iAGN)
+<                 if (dzjet.lt.0d0)then
+<                    u=-j_x*uBlast(iAGN)
+<                    v=-j_y*uBlast(iAGN)
+<                    w=-j_z*uBlast(iAGN)
+<                 endif
+<                 if (dzjet.gt.0d0)then
+<                    u= j_x*uBlast(iAGN)
+<                    v= j_y*uBlast(iAGN)
+<                    w= j_z*uBlast(iAGN)
+<                 endif
+< 
+<                 ekk=0d0
+<                 ! Compute kinetic energy before velocity input
+<                 do idim=1,ndim
+<                    ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/uold(ind_cell(i),1)
+<                 end do
+<                 ekkold=ekk
+<                 ! Compute total energy before energy input
+<                 etot=uold(ind_cell(i),5)
+<                 ! Compute internal energy before energy input
+<                 eint=etot - ekk
+<                 ! Compute temperature T2=T/mu in Kelvin before energy input
+<                 T2_1=(gamma-1d0)*eint/uold(ind_cell(i),1)*scale_T2
+< 
+<                 d_gas=mAGN(iAGN)/vol_gas(iAGN)
+<                 ! Compute the density and the metal density of the cell
+<                 uold(ind_cell(i),1)=uold(ind_cell(i),1) + d_gas * psy
+<                 d=uold(ind_cell(i),1)
+<                 if(metal)then
+<                    uold(ind_cell(i),imetal)=uold(ind_cell(i),imetal)+ZAGN(iAGN)*d_gas*psy
+<                 endif
+<                 ! Velocity at a given dr_AGN linearly interpolated between zero and uBlast
+<                 u= u + vAGN(iAGN,1)
+<                 v= v + vAGN(iAGN,2)
+<                 w= w + vAGN(iAGN,3)
+< 
+<                 ! Add each momentum component of the jet to the gas
+<                 uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u * psy
+<                 uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v * psy
+<                 uold(ind_cell(i),4)=uold(ind_cell(i),4)+d_gas*w * psy
+< 
+<                 ekk=0d0
+<                 ! Compute kinetic energy after velocity input
+<                 do idim=1,ndim
+<                    ekk=ekk+0.5*uold(ind_cell(i),idim+1)**2/d
+<                 end do
+<                 if(T2_1 .ge. T2maxAGNz)then
+<                    etot=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)*psy &
+<                     & + p_gas(iAGN)
+<                    ! Update total energy with new kinetic energy and
+<                    ! old internal energy (Temperature does not increase!)
+<                    uold(ind_cell(i),5)=ekk+eint
+<                    T2_2=(gamma-1d0)*(etot-uold(ind_cell(i),5))/d*scale_T2
+<                    EsaveAGN(iAGN)=EsaveAGN(iAGN)+T2_2/scale_T2/(gamma-1d0)*d*vol_loc
+<                 else
+<                    ! Compute new total energy
+<                    etot=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)*psy &
+<                     & + p_gas(iAGN)
+<                    ! Compute new internal energy
+<                    eint=etot - ekk
+<                    ! Compute T2=T/mu in Kelvin
+<                    T2_2=(gamma-1d0)*eint/d*scale_T2
+<                    if(T2_2 .le. T2maxAGNz)then
+<                       uold(ind_cell(i),5)=ekk+T2_2/scale_T2/(gamma-1d0)*d
+<                    else
+<                       uold(ind_cell(i),5)=ekk+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<                       EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<                    endif
+<                 endif
+< 
+<                  endif
+<                  ! Jet case with jsink=0
+<               else
+<                  if(dr_AGN.le.rmax2)then
+<                 uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)
+<                  endif
+<               endif
+< 
+<               ! ------------------------------------------
+<               ! Thermal case
+<               ! ------------------------------------------
+<                else
+<               dxx=x-xAGN(iAGN,1)
+<               dyy=y-xAGN(iAGN,2)
+<               dzz=z-xAGN(iAGN,3)
+<               dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+<               if(dr_AGN.le.rmax2)then
+<                  ekk=0d0
+<                  d=uold(ind_cell(i),1)
+<                  do idim=1,ndim
+<                 ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/d
+<                  end do
+<                  etot=uold(ind_cell(i),5)
+<                  eint=etot - ekk
+<                  T2_1=(gamma-1d0)*eint/d*scale_T2
+<                  if(T2_1 .lt. T2maxAGNz)then
+<                 eint=eint + p_gas(iAGN)*d
+<                 T2_2=(gamma-1d0)*eint/d*scale_T2
+<                 if(T2_2 .le. T2maxAGNz)then
+<                    uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)*d
+<                 else
+<                    uold(ind_cell(i),5)=uold(ind_cell(i),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<                    EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<                 endif
+<                  else
+<                 EsaveAGN(iAGN)=EsaveAGN(iAGN)+p_gas(iAGN)*d*vol_loc
+<                  endif
+< 
+<               endif
+<                endif
+< 
+<             endif
+<             !End of ok_blast_agn
+< 
+<          end do
+<           endif
+<        end do
+---
+> 	ngrid=MIN(nvector,ncache-igrid+1)
+> 	do i=1,ngrid
+> 	   ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+> 	end do
+> 
+> 	! Loop over cells
+> 	do ind=1,twotondim
+> 	   iskip=ncoarse+(ind-1)*ngridmax
+> 	   do i=1,ngrid
+> 	      ind_cell(i)=iskip+ind_grid(i)
+> 	   end do
+> 
+> 	   ! Flag leaf cells
+> 	   do i=1,ngrid
+> 	      ok(i)=son(ind_cell(i))==0
+> 	   end do
+> 
+> 	   do i=1,ngrid
+> 	      if(ok(i))then
+> 		 ! Get gas cell position
+> 		 x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+> 		 y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+> 		 z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+> 
+> 		 do iAGN=1,nAGN
+> 
+> 		    ! ------------------------------------------
+> 		    ! case 0: Some energy has not been released
+> 		    ! in previous time step -> do thermal input
+> 		    ! ------------------------------------------
+> 		    if(ok_save(iAGN))then
+> 		       dxx=x-xAGN(iAGN,1)
+> 		       dyy=y-xAGN(iAGN,2)
+> 		       dzz=z-xAGN(iAGN,3)
+> 		       dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+> 		       if(dr_AGN.le.rmax2)then
+> 			  ekk=0d0
+> 			  d=uold(ind_cell(i),1)
+> 			  do idim=1,ndim
+> 			     ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/d
+> 			  end do
+> 			  etot=uold(ind_cell(i),5)
+> 			  eint=etot - ekk
+> 			  T2_1=(gamma-1d0)*eint/d*scale_T2
+> 			  if(T2_1 .lt. T2maxAGNz)then
+> 			     eint=eint + p_gas(iAGN)*d
+> 			     T2_2=(gamma-1d0)*eint/d*scale_T2
+> 			     if(T2_2 .le. T2maxAGNz)then
+> 				uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)*d
+> 			     else
+> 				uold(ind_cell(i),5)=uold(ind_cell(i),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 				EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 			     endif
+> 			  else
+> 			     EsaveAGN(iAGN)=EsaveAGN(iAGN)+p_gas(iAGN)*d*vol_loc
+> 			  endif
+> 		       endif
+> 
+> 		    ! ------------------------------------------
+> 		    ! case 1: All energy has been released in
+> 		    ! previous time step -> choose between kinetic
+> 		    ! or thermal feedback
+> 		    ! ------------------------------------------
+> 		    else if(ok_blast_agn(iAGN))then
+> 		       ! ------------------------------------------
+> 		       ! Jet case
+> 		       ! ------------------------------------------
+> 		       if(X_radio(iAGN).lt.X_floor)then
+> 
+> 			  dxx=x-xAGN(iAGN,1)
+> 			  dyy=y-xAGN(iAGN,2)
+> 			  dzz=z-xAGN(iAGN,3)
+> 			  dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+> 			  jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
+> 			  if(jtot.gt.0d0)then
+> 			     j_x=jAGN(iAGN,1)/jtot
+> 			     j_y=jAGN(iAGN,2)/jtot
+> 			     j_z=jAGN(iAGN,3)/jtot
+> 			     dzjet= dxx*j_x + dyy*j_y + dzz*j_z
+> 			     drjet=sqrt(dr_AGN-dzjet*dzjet)
+> 
+> 			     ! Check if the cell lies within the AGN jet cylindre
+> 			     if (drjet .le. rmax .and. abs(dzjet) .le. rmax)then
+> 				psy=exp(-drjet**2/2d0/rmax**2d0) / psy_norm(iAGN)
+> 				if (dzjet.lt.0d0)then
+> 				   u=-j_x*uBlast(iAGN)
+> 				   v=-j_y*uBlast(iAGN)
+> 				   w=-j_z*uBlast(iAGN)
+> 				endif
+> 				if (dzjet.gt.0d0)then
+> 				   u= j_x*uBlast(iAGN)
+> 				   v= j_y*uBlast(iAGN)
+> 				   w= j_z*uBlast(iAGN)
+> 				endif
+> 
+> 				ekk=0d0
+> 				! Compute kinetic energy before velocity input
+> 				do idim=1,ndim
+> 				   ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/uold(ind_cell(i),1)
+> 				end do
+> 				ekkold=ekk
+> 				! Compute total energy before energy input
+> 				etot=uold(ind_cell(i),5)
+> 				! Compute internal energy before energy input
+> 				eint=etot - ekk
+> 				! Compute temperature T2=T/mu in Kelvin before energy input
+> 				T2_1=(gamma-1d0)*eint/uold(ind_cell(i),1)*scale_T2
+> 
+> 				d_gas=mAGN(iAGN)/vol_gas(iAGN)
+> 				! Compute the density and the metal density of the cell
+> 				uold(ind_cell(i),1)=uold(ind_cell(i),1) + d_gas * psy
+> 				d=uold(ind_cell(i),1)
+> 				if(metal)then
+> 				   uold(ind_cell(i),imetal)=uold(ind_cell(i),imetal)+ZAGN(iAGN)*d_gas*psy
+> 				endif
+> 				! Velocity at a given dr_AGN linearly interpolated between zero and uBlast
+> 				u= u + vAGN(iAGN,1)
+> 				v= v + vAGN(iAGN,2)
+> 				w= w + vAGN(iAGN,3)
+> 
+> 				! Add each momentum component of the jet to the gas
+> 				uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u * psy
+> 				uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v * psy
+> 				uold(ind_cell(i),4)=uold(ind_cell(i),4)+d_gas*w * psy
+> 
+> 				ekk=0d0
+> 				! Compute kinetic energy after velocity input
+> 				do idim=1,ndim
+> 				   ekk=ekk+0.5*uold(ind_cell(i),idim+1)**2/d
+> 				end do
+> 				if(T2_1 .ge. T2maxAGNz)then
+> 				   etot=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)*psy &
+> 					& + p_gas(iAGN)
+> 				   ! Update total energy with new kinetic energy and
+> 				   ! old internal energy (Temperature does not increase!)
+> 				   uold(ind_cell(i),5)=ekk+eint
+> 				   T2_2=(gamma-1d0)*(etot-uold(ind_cell(i),5))/d*scale_T2
+> 				   EsaveAGN(iAGN)=EsaveAGN(iAGN)+T2_2/scale_T2/(gamma-1d0)*d*vol_loc
+> 				else
+> 				   ! Compute new total energy
+> 				   etot=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)*psy &
+> 					& + p_gas(iAGN)
+> 				   ! Compute new internal energy
+> 				   eint=etot - ekk
+> 				   ! Compute T2=T/mu in Kelvin
+> 				   T2_2=(gamma-1d0)*eint/d*scale_T2
+> 				   if(T2_2 .le. T2maxAGNz)then
+> 				      uold(ind_cell(i),5)=ekk+T2_2/scale_T2/(gamma-1d0)*d
+> 				   else
+> 				      uold(ind_cell(i),5)=ekk+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 				      EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 				   endif
+> 				endif
+> 
+> 			     endif
+> 			     ! Jet case with jsink=0
+> 			  else
+> 			     if(dr_AGN.le.rmax2)then
+> 				uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)
+> 			     endif
+> 			  endif
+> 
+> 			  ! ------------------------------------------
+> 			  ! Thermal case
+> 			  ! ------------------------------------------
+> 		       else
+> 			  dxx=x-xAGN(iAGN,1)
+> 			  dyy=y-xAGN(iAGN,2)
+> 			  dzz=z-xAGN(iAGN,3)
+> 			  dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
+> 			  if(dr_AGN.le.rmax2)then
+> 			     ekk=0d0
+> 			     d=uold(ind_cell(i),1)
+> 			     do idim=1,ndim
+> 				ekk=ekk+0.5d0*uold(ind_cell(i),idim+1)**2/d
+> 			     end do
+> 			     etot=uold(ind_cell(i),5)
+> 			     eint=etot - ekk
+> 			     T2_1=(gamma-1d0)*eint/d*scale_T2
+> 			     if(T2_1 .lt. T2maxAGNz)then
+> 				eint=eint + p_gas(iAGN)*d
+> 				T2_2=(gamma-1d0)*eint/d*scale_T2
+> 				if(T2_2 .le. T2maxAGNz)then
+> 				   uold(ind_cell(i),5)=uold(ind_cell(i),5)+p_gas(iAGN)*d
+> 				else
+> 				   uold(ind_cell(i),5)=uold(ind_cell(i),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 				   EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 				endif
+> 			     else
+> 				EsaveAGN(iAGN)=EsaveAGN(iAGN)+p_gas(iAGN)*d*vol_loc
+> 			     endif
+> 
+> 			  endif
+> 		       endif
+> 
+> 		    endif
+> 		    !End of ok_blast_agn
+> 
+> 		 end do
+> 	      endif
+> 	   end do
+5011,5012c5093,5094
+<     end do
+<     ! End loop over cells
+---
+> 	end do
+> 	! End loop over cells
+5027,5047c5109,5129
+<     if(vol_gas(iAGN)==0d0)then
+<        ekk=0d0
+<        d=uold(ind_blast(iAGN),1)
+<        do idim=1,ndim
+<           ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+<        end do
+<        etot=uold(ind_blast(iAGN),5)
+<        eint=etot - ekk
+<        T2_1=(gamma-1d0)*eint/d*scale_T2
+<        if(T2_1 .lt. T2maxAGNz)then
+<           eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+<           T2_2=(gamma-1d0)*eint/d*scale_T2
+<           if(T2_2 .le. T2maxAGNz)then
+<          uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+<           else
+<          uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<          EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<           endif
+<        else
+<           EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+<        endif
+---
+> 	if(vol_gas(iAGN)==0d0)then
+> 	   ekk=0d0
+> 	   d=uold(ind_blast(iAGN),1)
+> 	   do idim=1,ndim
+> 	      ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+> 	   end do
+> 	   etot=uold(ind_blast(iAGN),5)
+> 	   eint=etot - ekk
+> 	   T2_1=(gamma-1d0)*eint/d*scale_T2
+> 	   if(T2_1 .lt. T2maxAGNz)then
+> 	      eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+> 	      T2_2=(gamma-1d0)*eint/d*scale_T2
+> 	      if(T2_2 .le. T2maxAGNz)then
+> 		 uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+> 	      else
+> 		 uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 		 EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 	      endif
+> 	   else
+> 	      EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+> 	   endif
+5049c5131
+<     endif
+---
+> 	endif
+5056,5114c5138,5196
+<     if(vol_gas(iAGN)==0d0.and.ok_blast_agn(iAGN))then
+<        ! ------------------------------------------
+<        ! Jet case
+<        ! ------------------------------------------
+<        if(X_radio(iAGN).lt.X_floor)then
+<           ! Here vol_blast lies for the cell volume where the AGN sits in
+<           d_gas=mAGN(iAGN)/vol_blast(iAGN)
+<           u=vAGN(iAGN,1)
+<           v=vAGN(iAGN,2)
+<           w=vAGN(iAGN,3)
+<           uold(ind_blast(iAGN),1)=uold(ind_blast(iAGN),1)+d_gas
+<           if(metal)then
+<          uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal)+d_gas*ZAGN(iAGN)
+<           endif
+<           ekk=0d0
+<           d=uold(ind_blast(iAGN),1)
+<           do idim=1,ndim
+<          ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+<           end do
+<           etot=uold(ind_blast(iAGN),5)
+<           eint=etot - ekk
+<           T2_1=(gamma-1d0)*eint/d*scale_T2
+<           if(T2_1 .lt. T2maxAGNz)then
+<          eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+<          T2_2=(gamma-1d0)*eint/d*scale_T2
+<          if(T2_2 .le. T2maxAGNz)then
+<             uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+<          else
+<             uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<             EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<          endif
+<           else
+<          EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+<           endif
+< 
+<        ! ------------------------------------------
+<        ! Thermal case
+<        ! ------------------------------------------
+<        else
+<           ekk=0d0
+<           d=uold(ind_blast(iAGN),1)
+<           do idim=1,ndim
+<          ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+<           end do
+<           etot=uold(ind_blast(iAGN),5)
+<           eint=etot - ekk
+<           T2_1=(gamma-1d0)*eint/d*scale_T2
+<           if(T2_1 .lt. T2maxAGNz)then
+<          eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+<          T2_2=(gamma-1d0)*eint/d*scale_T2
+<          if(T2_2 .le. T2maxAGNz)then
+<             uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+<          else
+<             uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+<             EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+<          endif
+<           else
+<          EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+<           endif
+---
+> 	if(vol_gas(iAGN)==0d0.and.ok_blast_agn(iAGN))then
+> 	   ! ------------------------------------------
+> 	   ! Jet case
+> 	   ! ------------------------------------------
+> 	   if(X_radio(iAGN).lt.X_floor)then
+> 	      ! Here vol_blast lies for the cell volume where the AGN sits in
+> 	      d_gas=mAGN(iAGN)/vol_blast(iAGN)
+> 	      u=vAGN(iAGN,1)
+> 	      v=vAGN(iAGN,2)
+> 	      w=vAGN(iAGN,3)
+> 	      uold(ind_blast(iAGN),1)=uold(ind_blast(iAGN),1)+d_gas
+> 	      if(metal)then
+> 		 uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal)+d_gas*ZAGN(iAGN)
+> 	      endif
+> 	      ekk=0d0
+> 	      d=uold(ind_blast(iAGN),1)
+> 	      do idim=1,ndim
+> 		 ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+> 	      end do
+> 	      etot=uold(ind_blast(iAGN),5)
+> 	      eint=etot - ekk
+> 	      T2_1=(gamma-1d0)*eint/d*scale_T2
+> 	      if(T2_1 .lt. T2maxAGNz)then
+> 		 eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+> 		 T2_2=(gamma-1d0)*eint/d*scale_T2
+> 		 if(T2_2 .le. T2maxAGNz)then
+> 		    uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+> 		 else
+> 		    uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 		    EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 		 endif
+> 	      else
+> 		 EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+> 	      endif
+> 
+> 	   ! ------------------------------------------
+> 	   ! Thermal case
+> 	   ! ------------------------------------------
+> 	   else
+> 	      ekk=0d0
+> 	      d=uold(ind_blast(iAGN),1)
+> 	      do idim=1,ndim
+> 		 ekk=ekk+0.5d0*uold(ind_blast(iAGN),idim+1)**2/d
+> 	      end do
+> 	      etot=uold(ind_blast(iAGN),5)
+> 	      eint=etot - ekk
+> 	      T2_1=(gamma-1d0)*eint/d*scale_T2
+> 	      if(T2_1 .lt. T2maxAGNz)then
+> 		 eint=eint + EAGN(iAGN)/vol_blast(iAGN)
+> 		 T2_2=(gamma-1d0)*eint/d*scale_T2
+> 		 if(T2_2 .le. T2maxAGNz)then
+> 		    uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+EAGN(iAGN)/vol_blast(iAGN)
+> 		 else
+> 		    uold(ind_blast(iAGN),5)=uold(ind_blast(iAGN),5)+T2maxAGNz/scale_T2/(gamma-1d0)*d
+> 		    EsaveAGN(iAGN)=EsaveAGN(iAGN)+(T2_2-T2maxAGNz)/scale_T2/(gamma-1d0)*d*vol_loc
+> 		 endif
+> 	      else
+> 		 EsaveAGN(iAGN)=EsaveAGN(iAGN)+EAGN(iAGN)
+> 	      endif
+5116,5117c5198,5199
+<        endif
+<     endif
+---
+> 	   endif
+> 	endif
+5125c5207
+< end subroutine org_AGN_blast
+---
+> end subroutine AGN_blast
+5130c5212
+< subroutine org_getAGNonmyid(isink_myid,nsink_myid)
+---
+> subroutine getAGNonmyid(isink_myid,nsink_myid)
+5186,5254c5268,5336
+<     dmax=max(xxmax-xxmin,yymax-yymin,zzmax-zzmin)
+<     do ilevel=1,lmax
+<        dx=0.5d0**ilevel
+<        if(dx.lt.dmax)exit
+<     end do
+<     lmin=ilevel
+<     bit_length=lmin-1
+<     maxdom=2**bit_length
+<     imin=0; imax=0; jmin=0; jmax=0; kmin=0; kmax=0
+<     if(bit_length>0)then
+<        imin=int(xxmin*dble(maxdom))
+<        imax=imin+1
+<        jmin=int(yymin*dble(maxdom))
+<        jmax=jmin+1
+<        kmin=int(zzmin*dble(maxdom))
+<        kmax=kmin+1
+<     endif
+< 
+<     !dkey=(dble(2**(nlevelmax+1)/dble(maxdom)))**ndim
+<     dkey=(real(2**(nlevelmax+1),kind=qdp)/real(maxdom,kind=qdp))**ndim
+<     ndom=1
+<     if(bit_length>0)ndom=8
+<     idom(1)=imin; idom(2)=imax
+<     idom(3)=imin; idom(4)=imax
+<     idom(5)=imin; idom(6)=imax
+<     idom(7)=imin; idom(8)=imax
+<     jdom(1)=jmin; jdom(2)=jmin
+<     jdom(3)=jmax; jdom(4)=jmax
+<     jdom(5)=jmin; jdom(6)=jmin
+<     jdom(7)=jmax; jdom(8)=jmax
+<     kdom(1)=kmin; kdom(2)=kmin
+<     kdom(3)=kmin; kdom(4)=kmin
+<     kdom(5)=kmax; kdom(6)=kmax
+<     kdom(7)=kmax; kdom(8)=kmax
+< 
+<     do i=1,ndom
+<        if(bit_length>0)then
+<           call hilbert3d(idom(i),jdom(i),kdom(i),order_min,bit_length,1)
+<        else
+<           order_min=0.0d0
+<        endif
+<        bounding_min(i)=(order_min)*dkey
+<        bounding_max(i)=(order_min+oneqdp)*dkey
+<     end do
+< 
+<     cpu_min=0; cpu_max=0
+<     do impi=1,ncpu
+<        do i=1,ndom
+<           if (   bound_key(impi-1).le.bounding_min(i).and.&
+<            & bound_key(impi  ).gt.bounding_min(i))then
+<          cpu_min(i)=impi
+<           endif
+<           if (   bound_key(impi-1).lt.bounding_max(i).and.&
+<            & bound_key(impi  ).ge.bounding_max(i))then
+<          cpu_max(i)=impi
+<           endif
+<        end do
+<     end do
+< 
+<     ncpu_read=0
+<     do i=1,ndom
+<        do j=cpu_min(i),cpu_max(i)
+<           if(.not. cpu_read(j))then
+<          ncpu_read=ncpu_read+1
+<          cpu_list(ncpu_read)=j
+<          cpu_read(j)=.true.
+<           endif
+<        enddo
+<     enddo
+---
+> 	dmax=max(xxmax-xxmin,yymax-yymin,zzmax-zzmin)
+> 	do ilevel=1,lmax
+> 	   dx=0.5d0**ilevel
+> 	   if(dx.lt.dmax)exit
+> 	end do
+> 	lmin=ilevel
+> 	bit_length=lmin-1
+> 	maxdom=2**bit_length
+> 	imin=0; imax=0; jmin=0; jmax=0; kmin=0; kmax=0
+> 	if(bit_length>0)then
+> 	   imin=int(xxmin*dble(maxdom))
+> 	   imax=imin+1
+> 	   jmin=int(yymin*dble(maxdom))
+> 	   jmax=jmin+1
+> 	   kmin=int(zzmin*dble(maxdom))
+> 	   kmax=kmin+1
+> 	endif
+> 
+> 	!dkey=(dble(2**(nlevelmax+1)/dble(maxdom)))**ndim
+> 	dkey=(real(2**(nlevelmax+1),kind=qdp)/real(maxdom,kind=qdp))**ndim
+> 	ndom=1
+> 	if(bit_length>0)ndom=8
+> 	idom(1)=imin; idom(2)=imax
+> 	idom(3)=imin; idom(4)=imax
+> 	idom(5)=imin; idom(6)=imax
+> 	idom(7)=imin; idom(8)=imax
+> 	jdom(1)=jmin; jdom(2)=jmin
+> 	jdom(3)=jmax; jdom(4)=jmax
+> 	jdom(5)=jmin; jdom(6)=jmin
+> 	jdom(7)=jmax; jdom(8)=jmax
+> 	kdom(1)=kmin; kdom(2)=kmin
+> 	kdom(3)=kmin; kdom(4)=kmin
+> 	kdom(5)=kmax; kdom(6)=kmax
+> 	kdom(7)=kmax; kdom(8)=kmax
+> 
+> 	do i=1,ndom
+> 	   if(bit_length>0)then
+> 	      call hilbert3d(idom(i),jdom(i),kdom(i),order_min,bit_length,1)
+> 	   else
+> 	      order_min=0.0d0
+> 	   endif
+> 	   bounding_min(i)=(order_min)*dkey
+> 	   bounding_max(i)=(order_min+oneqdp)*dkey
+> 	end do
+> 
+> 	cpu_min=0; cpu_max=0
+> 	do impi=1,ncpu
+> 	   do i=1,ndom
+> 	      if (   bound_key(impi-1).le.bounding_min(i).and.&
+> 		   & bound_key(impi  ).gt.bounding_min(i))then
+> 		 cpu_min(i)=impi
+> 	      endif
+> 	      if (   bound_key(impi-1).lt.bounding_max(i).and.&
+> 		   & bound_key(impi  ).ge.bounding_max(i))then
+> 		 cpu_max(i)=impi
+> 	      endif
+> 	   end do
+> 	end do
+> 
+> 	ncpu_read=0
+> 	do i=1,ndom
+> 	   do j=cpu_min(i),cpu_max(i)
+> 	      if(.not. cpu_read(j))then
+> 		 ncpu_read=ncpu_read+1
+> 		 cpu_list(ncpu_read)=j
+> 		 cpu_read(j)=.true.
+> 	      endif
+> 	   enddo
+> 	enddo
+5256,5259c5338,5341
+<     ncpu_read=ncpu
+<     do j=1,ncpu
+<        cpu_list(j)=j
+<     end do
+---
+> 	ncpu_read=ncpu
+> 	do j=1,ncpu
+> 	   cpu_list(j)=j
+> 	end do
+5264,5268c5346,5350
+<     icpu=cpu_list(k)
+<     if(icpu==myid)then
+<        ii=ii+1
+<        isink_myid(ii)=isink
+<     endif
+---
+> 	icpu=cpu_list(k)
+> 	if(icpu==myid)then
+> 	   ii=ii+1
+> 	   isink_myid(ii)=isink
+> 	endif
+5276c5358
+< end subroutine org_getAGNonmyid
+---
+> end subroutine getAGNonmyid
+5281c5363
+< subroutine org_update_sink_position_velocity
+---
+> subroutine update_sink_position_velocity
+5310,5323c5392,5405
+<     do idim=1,ndim
+<        vdum = sum(sink_stat_all(isink,levelmin:nlevelmax,idim))
+<        xsink(isink,idim)=vdum/ncloud
+<        if(xsink(isink,idim)>scale*xbound(idim))then
+<           xsink(isink,idim)=xsink(isink,idim)-scale*xbound(idim)
+<        endif
+<        if(xsink(isink,idim)<0.0)then
+<           xsink(isink,idim)=xsink(isink,idim)+scale*xbound(idim)
+<        endif
+<     enddo
+<     do idim=1,ndim
+<        vdum = sum(sink_stat_all(isink,levelmin:nlevelmax,idim+ndim))
+<        vsink(isink,idim)=vdum/ncloud
+<     enddo
+---
+> 	do idim=1,ndim
+> 	   vdum = sum(sink_stat_all(isink,levelmin:nlevelmax,idim))
+> 	   xsink(isink,idim)=vdum/ncloud
+> 	   if(xsink(isink,idim)>scale*xbound(idim))then
+> 	      xsink(isink,idim)=xsink(isink,idim)-scale*xbound(idim)
+> 	   endif
+> 	   if(xsink(isink,idim)<0.0)then
+> 	      xsink(isink,idim)=xsink(isink,idim)+scale*xbound(idim)
+> 	   endif
+> 	enddo
+> 	do idim=1,ndim
+> 	   vdum = sum(sink_stat_all(isink,levelmin:nlevelmax,idim+ndim))
+> 	   vsink(isink,idim)=vdum/ncloud
+> 	enddo
+5327c5409
+< end subroutine org_update_sink_position_velocity
+---
+> end subroutine update_sink_position_velocity
+5334c5416
+< subroutine org_true_max(x,y,z,ilevel)
+---
+> subroutine true_max(x,y,z,ilevel)
+5458c5540
+< end subroutine org_true_max
+---
+> end subroutine true_max
