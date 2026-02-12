@@ -353,6 +353,7 @@ subroutine sub1_gauss_seidel(ilevel,redstep,igrid,ngrid)
   use amr_commons
   use pm_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer::ilevel
   logical::redstep
@@ -383,8 +384,8 @@ subroutine sub1_gauss_seidel(ilevel,redstep,igrid,ngrid)
   end do
   do idim=1,ndim
      do i=1,ngrid
-        igridn(i,2*idim-1)=son(nbor(ind_grid(i),2*idim-1))
-        igridn(i,2*idim  )=son(nbor(ind_grid(i),2*idim  ))
+        igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+        igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
      end do
   end do
   
@@ -503,6 +504,7 @@ subroutine sub_cmp_residual_mg(ilevel, igrid,ngrid)
   use amr_commons
   use pm_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer::ilevel
   !------------------------------------------------------------------
@@ -529,8 +531,8 @@ subroutine sub_cmp_residual_mg(ilevel, igrid,ngrid)
   end do
   do idim=1,ndim
      do i=1,ngrid
-        igridn(i,2*idim-1)=son(nbor(ind_grid(i),2*idim-1))
-        igridn(i,2*idim  )=son(nbor(ind_grid(i),2*idim  ))
+        igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+        igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
      end do
   end do
   

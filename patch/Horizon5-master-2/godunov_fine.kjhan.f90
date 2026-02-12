@@ -263,6 +263,7 @@ end subroutine add_pdv_source_terms
 subroutine sub_add_pdv_source_terms(ilevel,igrid,ngrid)
   use amr_commons
   use hydro_commons
+  use morton_hash
   implicit none
   integer::ilevel
   !---------------------------------------------------------
@@ -306,10 +307,10 @@ subroutine sub_add_pdv_source_terms(ilevel,igrid,ngrid)
      end do
      do idim=1,ndim
         do i=1,ngrid
-           ind_left (i,idim)=nbor(ind_grid(i),2*idim-1)
-           ind_right(i,idim)=nbor(ind_grid(i),2*idim  )
-           igridn(i,2*idim-1)=son(ind_left (i,idim))
-           igridn(i,2*idim  )=son(ind_right(i,idim))
+           igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+           igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
+           ind_left (i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
+           ind_right(i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim  )
         end do
      end do
      
@@ -407,6 +408,7 @@ subroutine godfine1(ilevel, jgrid,mgrid)
   use amr_commons
   use hydro_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer, intent(in) ::ilevel,jgrid,mgrid
   integer,dimension(1:nvector)::ind_grid
@@ -439,6 +441,7 @@ subroutine godfine1(ilevel, jgrid,mgrid)
 
   integer::i,j,ivar,idim,ind_son,ind_father,iskip,nbuffer,ibuffer
   integer::i0,j0,k0,i1,j1,k1,i2,j2,k2,i3,j3,k3,nx_loc,nb_noneigh,nb_noneigh2,nexist
+  integer::igridn_tmp
   integer::i1min,i1max,j1min,j1max,k1min,k1max
   integer::i2min,i2max,j2min,j2max,k2min,k2max
   integer::i3min,i3max,j3min,j3max,k3min,k3max
@@ -680,23 +683,25 @@ subroutine godfine1(ilevel, jgrid,mgrid)
      ! and gather neighbor father cells index
      nb_noneigh=0
      do i=1,ngrid
-        if (son(nbor(ind_grid(i),2*idim-1))==0) then
+        igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+        if (igridn_tmp==0) then
            nb_noneigh = nb_noneigh + 1
-           ind_buffer(nb_noneigh) = nbor(ind_grid(i),2*idim-1)
+           ind_buffer(nb_noneigh) = morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
            ind_cell(nb_noneigh) = i
         end if
      end do
 
      !-----------------------
      ! Right flux at boundary
-     !-----------------------     
+     !-----------------------
      ! Check if grids sits near right boundary
      ! and gather neighbor father cells index
      nb_noneigh2=0
      do i=1,ngrid
-        if (son(nbor(ind_grid(i),2*idim))==0) then
+        igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim)
+        if (igridn_tmp==0) then
            nb_noneigh2 = nb_noneigh2 + 1
-           ind_buffer2(nb_noneigh2) = nbor(ind_grid(i),2*idim)
+           ind_buffer2(nb_noneigh2) = morton_nbor_cell(ind_grid(i),ilevel,2*idim)
            ind_cell2(nb_noneigh2) = i
         end if
      end do

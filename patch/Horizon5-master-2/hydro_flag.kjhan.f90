@@ -1,6 +1,7 @@
 subroutine sub_hydro_flag(ilevel,igrid,ngrid,iflag)
   use amr_commons
   use hydro_commons
+  use morton_hash
 #ifdef RT
   use rt_parameters
 #endif
@@ -53,7 +54,7 @@ subroutine sub_hydro_flag(ilevel,igrid,ngrid,iflag)
      do j=1,twondim
         do i=1,ngrid
            if(indn(i,j)==0)then
-              indn(i,j)=nbor(ind_grid(i),j)
+              indn(i,j)=morton_nbor_cell(ind_grid(i),ilevel,j)
            end if
         end do
      end do

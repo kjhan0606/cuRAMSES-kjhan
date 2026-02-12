@@ -136,6 +136,7 @@ subroutine cmp_residual_mg_fine(ilevel)
    ! Computes the residual the fine (AMR) level, and stores it into f(:,1)
    use amr_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
 
@@ -183,7 +184,7 @@ subroutine cmp_residual_mg_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                   end if
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
@@ -202,7 +203,7 @@ subroutine cmp_residual_mg_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -323,6 +324,7 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
    use amr_commons
    use pm_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
    logical, intent(in) :: redstep
@@ -388,7 +390,7 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                   end if
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
@@ -413,7 +415,7 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -764,6 +766,7 @@ end subroutine interpolate_and_correct_fine
 subroutine set_scan_flag_fine(ilevel)
    use amr_commons
    use poisson_commons
+   use morton_hash
    implicit none
 
    integer, intent(in) :: ilevel
@@ -801,7 +804,7 @@ subroutine set_scan_flag_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                   end if
 
                   if(igrid_nbor_amr==0) then

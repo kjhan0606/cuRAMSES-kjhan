@@ -116,9 +116,10 @@ end subroutine morton_hash_rebuild_level
 !################################################################
 subroutine morton_hash_verify(label)
   !--------------------------------------------------------------
-  ! Verify Morton hash tables against existing son(nbor())
-  ! neighbor structure. Does NOT rebuild — uses existing tables.
-  ! label: a short string printed with the results for identification
+  ! Verify Morton hash table self-consistency:
+  ! - Every local grid must be found by its own Morton key lookup
+  ! - grid_level must match the level in the headl/numbl lists
+  ! (nbor is no longer available for cross-checking)
   !--------------------------------------------------------------
   use amr_commons
   use amr_parameters
@@ -130,12 +131,11 @@ subroutine morton_hash_verify(label)
 #endif
 
   character(len=*), intent(in) :: label
-  integer :: ilevel, igrid, j, i
-  integer :: igrid_morton, igrid_nbor
+  integer :: ilevel, igrid, i
+  integer :: igrid_morton
   integer :: nmatch, nmismatch
   integer :: nmatch_all, nmismatch_all
-  integer :: nmax_x, nmax_y, nmax_z
-  integer(mkb) :: mkey, nkey
+  integer(mkb) :: mkey
   integer :: info
 
   if (.not. allocated(mort_table)) return
@@ -144,58 +144,28 @@ subroutine morton_hash_verify(label)
   nmismatch = 0
 
   do ilevel = 1, nlevelmax
-     nmax_x = nx * 2**(ilevel-1)
-     nmax_y = ny * 2**(ilevel-1)
-     nmax_z = nz * 2**(ilevel-1)
+     ! Check all grids (local + virtual)
+     do i = 1, ncpu
+        igrid = headl(i, ilevel)
+        do while (igrid > 0)
+           mkey = grid_to_morton(igrid, ilevel)
 
-     ! Only check local grids (myid), virtual grids may have incomplete nbor
-     igrid = headl(myid, ilevel)
-     do i = 1, numbl(myid, ilevel)
-        if (igrid == 0) exit
-
-        mkey = grid_to_morton(igrid, ilevel)
-
-        ! Verify self-lookup
-        igrid_morton = morton_hash_lookup(mort_table(ilevel), mkey)
-        if (igrid_morton /= igrid) then
-           nmismatch = nmismatch + 1
-           if (nmismatch <= 5) then
-              write(*,'(A,A,A,I6,A,I8,A,I8,A,I3)') &
-                   ' [', trim(label), '] self-lookup MISMATCH cpu=', myid, &
-                   ' igrid=', igrid, ' lookup=', igrid_morton, &
-                   ' level=', ilevel
-           end if
-        end if
-
-        ! Verify neighbor lookups
-        do j = 1, twondim
-           if (nbor(igrid, j) == 0) cycle
-
-           igrid_nbor = son(nbor(igrid, j))
-
-           nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
-           if (nkey < 0) then
-              igrid_morton = 0
-           else
-              igrid_morton = morton_hash_lookup(mort_table(ilevel), nkey)
-           end if
-
-           if (igrid_morton == igrid_nbor) then
+           ! Verify self-lookup
+           igrid_morton = morton_hash_lookup(mort_table(ilevel), mkey)
+           if (igrid_morton == igrid) then
               nmatch = nmatch + 1
            else
               nmismatch = nmismatch + 1
               if (nmismatch <= 5) then
-                 write(*,'(A,A,A,I6,A,I8,A,I2,A,I2,A,I8,A,I8)') &
-                      ' [', trim(label), '] MISMATCH cpu=', myid, &
-                      ' igrid=', igrid, ' level=', ilevel, &
-                      ' dir=', j, &
-                      ' son(nbor)=', igrid_nbor, &
-                      ' morton=', igrid_morton
+                 write(*,'(A,A,A,I6,A,I8,A,I8,A,I3)') &
+                      ' [', trim(label), '] self-lookup MISMATCH cpu=', myid, &
+                      ' igrid=', igrid, ' lookup=', igrid_morton, &
+                      ' level=', ilevel
               end if
            end if
-        end do
 
-        igrid = next(igrid)
+           igrid = next(igrid)
+        end do
      end do
   end do
 
@@ -212,7 +182,7 @@ subroutine morton_hash_verify(label)
 
   if (myid == 1) then
      write(*,'(A,A,A,I10,A,I10)') &
-          ' Morton [', trim(label), '] match=', nmatch_all, &
+          ' Morton [', trim(label), '] self-lookups=', nmatch_all, &
           ' mismatch=', nmismatch_all
   end if
 

@@ -11,7 +11,8 @@ module morton_hash
   ! Uses linear probing with power-of-2 capacity.
   ! Sentinel values: MHASH_EMPTY = -1, MHASH_DELETED = -2
   !--------------------------------------------------------------
-  use morton_keys, only: mkb
+  use morton_keys, only: mkb, grid_to_morton, morton_neighbor, &
+       morton_decode, morton_encode
   implicit none
 
   integer(mkb), parameter :: MHASH_EMPTY   = -1_mkb
@@ -218,5 +219,76 @@ contains
 
     deallocate(old_keys, old_igrids)
   end subroutine morton_hash_rehash
+
+  !--------------------------------------------------------------
+  ! morton_nbor_grid: replaces son(nbor(igrid, j))
+  ! Returns same-level neighbor grid index, or 0 if not found
+  !--------------------------------------------------------------
+  function morton_nbor_grid(igrid, ilevel, j) result(igridn)
+    use amr_commons, only: nx, ny, nz
+    integer, intent(in) :: igrid, ilevel, j
+    integer :: igridn
+    integer :: nmax_x, nmax_y, nmax_z
+    integer(mkb) :: mkey, nkey
+
+    nmax_x = nx * 2**(ilevel-1)
+    nmax_y = ny * 2**(ilevel-1)
+    nmax_z = nz * 2**(ilevel-1)
+
+    mkey = grid_to_morton(igrid, ilevel)
+    nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
+    if (nkey < 0) then
+       igridn = 0
+    else
+       igridn = morton_hash_lookup(mort_table(ilevel), nkey)
+    end if
+  end function morton_nbor_grid
+
+  !--------------------------------------------------------------
+  ! morton_nbor_cell: replaces nbor(igrid, j)
+  ! Returns father cell index of the neighbor in direction j
+  ! Level 1: coarse cell index (1..nx*ny*nz)
+  ! Level >= 2: fine cell = ncoarse + (ind_oct-1)*ngridmax + igrid_parent
+  !--------------------------------------------------------------
+  function morton_nbor_cell(igrid, ilevel, j) result(icell)
+    use amr_commons, only: nx, ny, nz, ncoarse, ngridmax
+    integer, intent(in) :: igrid, ilevel, j
+    integer :: icell
+    integer :: nmax_x, nmax_y, nmax_z
+    integer :: nix, niy, niz, pix, piy, piz, ind_oct, igrid_parent
+    integer(mkb) :: mkey, nkey, pkey
+
+    nmax_x = nx * 2**(ilevel-1)
+    nmax_y = ny * 2**(ilevel-1)
+    nmax_z = nz * 2**(ilevel-1)
+
+    mkey = grid_to_morton(igrid, ilevel)
+    nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
+
+    if (nkey < 0) then
+       icell = 0
+       return
+    end if
+
+    call morton_decode(nkey, nix, niy, niz)
+
+    if (ilevel == 1) then
+       ! Coarse cell
+       icell = 1 + nix + niy*nx + niz*nx*ny
+    else
+       ! Fine cell: find parent grid at level ilevel-1
+       pix = nix / 2
+       piy = niy / 2
+       piz = niz / 2
+       ind_oct = 1 + mod(nix,2) + 2*mod(niy,2) + 4*mod(niz,2)
+       pkey = morton_encode(pix, piy, piz)
+       igrid_parent = morton_hash_lookup(mort_table(ilevel-1), pkey)
+       if (igrid_parent > 0) then
+          icell = ncoarse + (ind_oct-1)*ngridmax + igrid_parent
+       else
+          icell = 0
+       end if
+    end if
+  end function morton_nbor_cell
 
 end module morton_hash

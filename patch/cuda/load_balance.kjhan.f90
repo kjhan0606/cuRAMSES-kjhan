@@ -1125,45 +1125,7 @@ subroutine defrag
      father(igrid)=flag2(igrid)
   end do
 
-  do ind=1,twondim
-  ngrid2=0
-  do igrid=1,igridmax
-     flag2(igrid)=0
-  end do
-  do ilevel=1,nlevelmax
-     do ibound=1,nboundary+ncpu
-        if(ibound<=ncpu)then
-           ncache=numbl(ibound,ilevel)
-           istart=headl(ibound,ilevel)
-        else
-           ncache=numbb(ibound-ncpu,ilevel)
-           istart=headb(ibound-ncpu,ilevel)
-        end if
-        if(ncache>0)then
-           igrid=istart
-           do i=1,ncache
-              icell1=nbor(igrid,ind)
-              if(icell1>ncoarse)then
-                 ind1=(icell1-ncoarse-1)/ngridmax+1
-                 iskip1=ncoarse+(ind1-1)*ngridmax
-                 igrid1=(icell1-iskip1)
-                 igrid2=cpu_map2(igrid1)
-                 iskip2=ncoarse+(ind1-1)*ngridmax
-                 icell2=iskip2+igrid2
-              else
-                 icell2=icell1
-              end if
-              flag2(ngrid2+i)=icell2
-              igrid=next(igrid)
-           end do
-           ngrid2=ngrid2+ncache
-        end if
-     end do
-  end do
-  do igrid=1,igridmax
-     nbor(igrid,ind)=flag2(igrid)
-  end do
-  end do
+  ! nbor defrag remapping removed — computed from Morton keys
 
   do idim=1,ndim
   ngrid2=0

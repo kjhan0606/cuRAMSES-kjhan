@@ -331,54 +331,8 @@ subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
      end do
 
   else
-     ! Original nbor-based implementation
-     do kk=kkmin,kkmax
-        do i=1,ng
-           ind_grid1(i)=ind_grid(i)
-        end do
-        if(kk>0)then
-           inbor=kkk(ind)
-           do i=1,ng
-              if(ind_grid(i)>0)then
-                 ind_grid1(i)=son(nbor(ind_grid(i),inbor))
-              endif
-           end do
-        end if
-
-        do jj=jjmin,jjmax
-           do i=1,ng
-              ind_grid2(i)=ind_grid1(i)
-           end do
-           if(jj>0)then
-              inbor=jjj(ind)
-              do i=1,ng
-                 if(ind_grid1(i)>0)then
-                    ind_grid2(i)=son(nbor(ind_grid1(i),inbor))
-                 endif
-              end do
-           end if
-
-           do ii=iimin,iimax
-              do i=1,ng
-                 ind_grid3(i)=ind_grid2(i)
-              end do
-              if(ii>0)then
-                 inbor=iii(ind)
-                 do i=1,ng
-                    if(ind_grid2(i)>0)then
-                       ind_grid3(i)=son(nbor(ind_grid2(i),inbor))
-                    endif
-                 end do
-              end if
-
-              inbor=1+ii+2*jj+4*kk
-              do i=1,ng
-                 nbors_grids(i,inbor)=ind_grid3(i)
-              end do
-
-           end do
-        end do
-     end do
+     if(myid==1) write(*,*) 'FATAL: get3cubepos called without Morton hash tables'
+     call clean_stop
   end if
 
   do j=1,twotondim
@@ -659,7 +613,7 @@ subroutine getnborfather(ind_cell,ind_father,ncell,ilevel)
                           end if
                        end if
                     else
-                       ind_father(i,j)=nbor(ind_grid_father(i),j)
+                       ind_father(i,j)=morton_nbor_cell(ind_grid_father(i),ilevel,j)
                     end if
                  end if
               end if
@@ -742,12 +696,8 @@ subroutine getnborgrids(igrid,igridn,ngrid)
         end do
      end do
   else
-     ! Fallback: original nbor-based
-     do j=1,twondim
-        do i=1,ngrid
-           igridn(i,j)=son(nbor(igrid(i),j))
-        end do
-     end do
+     if(myid==1) write(*,*) 'FATAL: getnborgrids called without Morton hash tables'
+     call clean_stop
   end if
 
 end subroutine getnborgrids
@@ -818,12 +768,8 @@ subroutine getnborgrids_check(igrid,igridn,ngrid)
         end do
      end do
   else
-     ! Fallback: original nbor-based with check
-     do j=1,twondim
-        do i=1,ngrid
-           if (nbor(igrid(i),j)>0)igridn(i,j)=son(nbor(igrid(i),j))
-        end do
-     end do
+     if(myid==1) write(*,*) 'FATAL: getnborgrids_check called without Morton hash tables'
+     call clean_stop
   end if
 
 end subroutine getnborgrids_check

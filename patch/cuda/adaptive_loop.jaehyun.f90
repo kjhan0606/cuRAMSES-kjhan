@@ -56,6 +56,9 @@ subroutine adaptive_loop
   if(pic)call init_tree              ! Initialize particle tree
   if(nrestart==0)call init_refine_2  ! Build initial AMR grid again
 
+  ! Rebuild Morton hash tables after full AMR grid is available
+  if(nrestart==0) call morton_hash_build_and_verify()
+
 #ifndef WITHOUTMPI
   muspt=0.
   tot_pt=-1

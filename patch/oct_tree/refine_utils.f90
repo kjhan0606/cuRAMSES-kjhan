@@ -264,9 +264,7 @@ subroutine make_grid_coarse(ind_cell,ibound,boundary_region)
      end if
   end if
 #endif
-  do j=1,twondim
-     nbor(ind_grid_son,j)=1+ixn(j)+iyn(j)*nx+izn(j)*nxny
-  end do
+  ! nbor setting removed — computed from Morton keys
 
   ! Update cpu map
   if(boundary_region)then
@@ -689,13 +687,12 @@ subroutine make_grid_fine(ind_grid,ind_cell,ind,ilevel,nn,ibound,boundary_region
      father(ind_grid_son(i))=ind_cell(i)
   end do
 
-  ! Connect news grids to neighboring father cells
+  ! Check neighboring father cells (nbor no longer stored)
   call getnborgrids(ind_grid,igridn,nn)
   call getnborcells(igridn,ind,indn,nn)
   error=.false.
   do j=1,twondim
      do i=1,nn
-        nbor(ind_grid_son(i),j)=indn(i,j)
         if(indn(i,j)==0)then
            error=.true.
         end if
@@ -798,7 +795,7 @@ subroutine make_grid_fine(ind_grid,ind_cell,ind,ilevel,nn,ibound,boundary_region
      end do
      do j=1,twondim
         do i=1,nn
-           ind_fathers(i,j)=nbor(ind_grid_son(i),j)
+           ind_fathers(i,j)=morton_nbor_cell(ind_grid_son(i),ilevel,j)
         end do
      end do
      !============================
@@ -1036,11 +1033,7 @@ subroutine kill_grid(ind_cell,ilevel,nn,ibound,boundary_region)
   do i=1,nn
      father(ind_grid_son(i))=0
   end do
-  do j=1,twondim
-     do i=1,nn
-        nbor(ind_grid_son(i),j)=0
-     end do
-  end do
+  ! nbor reset removed — no longer stored
   if(pic)then
      do i=1,nn
         headp(ind_grid_son(i))=0

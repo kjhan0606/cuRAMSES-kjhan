@@ -200,6 +200,7 @@ subroutine backup_amr(filename)
   use amr_commons
   use hydro_commons
   use pm_commons
+  use morton_hash
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -358,7 +359,7 @@ subroutine backup_amr(filename)
            ! Write nbor index
            do ind=1,twondim
               do i=1,ncache
-                 iig(i)=nbor(ind_grid(i),ind)
+                 iig(i)=morton_nbor_cell(ind_grid(i),ilevel,ind)
               end do
               write(ilun)iig
            end do

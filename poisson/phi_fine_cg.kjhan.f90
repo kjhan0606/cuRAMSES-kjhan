@@ -259,6 +259,7 @@ subroutine sub_cmp_residual_cg(ilevel,icount, igrid,ngrid,iii,jjj,oneoversix,fac
   use pm_commons
   use hydro_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer::ilevel,icount
   !------------------------------------------------------------------
@@ -289,10 +290,10 @@ subroutine sub_cmp_residual_cg(ilevel,icount, igrid,ngrid,iii,jjj,oneoversix,fac
      end do
      do idim=1,ndim
         do i=1,ngrid
-           ind_left (i,idim)=nbor(ind_grid(i),2*idim-1)
-           ind_right(i,idim)=nbor(ind_grid(i),2*idim  )
-           igridn(i,2*idim-1)=son(ind_left (i,idim))
-           igridn(i,2*idim  )=son(ind_right(i,idim))
+           igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+           igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
+           ind_left (i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
+           ind_right(i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim  )
         end do
      end do
      
@@ -408,6 +409,7 @@ subroutine sub_cmp_Ap_cg(ilevel,iii,jjj,igrid,ngrid,oneoversix)
   use pm_commons
   use hydro_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer::ilevel
   !------------------------------------------------------------------
@@ -434,8 +436,8 @@ subroutine sub_cmp_Ap_cg(ilevel,iii,jjj,igrid,ngrid,oneoversix)
      end do
      do idim=1,ndim
         do i=1,ngrid
-           igridn(i,2*idim-1)=son(nbor(ind_grid(i),2*idim-1))
-           igridn(i,2*idim  )=son(nbor(ind_grid(i),2*idim  ))
+           igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+           igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
         end do
      end do
      

@@ -489,7 +489,7 @@ subroutine cmpmem(outmem)
   outmem_qdp=0.0
 
   outmem_dp =outmem_dp +ngridmax*ndim      ! xg
-  outmem_int=outmem_int+ngridmax*twondim   ! nbor
+  ! nbor removed — computed from Morton keys
   outmem_int=outmem_int+ngridmax           ! father
   outmem_int=outmem_int+ngridmax           ! next
   outmem_int=outmem_int+ngridmax           ! prev

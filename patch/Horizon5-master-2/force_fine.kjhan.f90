@@ -232,6 +232,7 @@ subroutine gradient_phi(ilevel,igrid,ngrid,icount)
   use pm_commons
   use hydro_commons
   use poisson_commons
+  use morton_hash
   implicit none
   integer::ngrid,ilevel,icount
   integer,dimension(1:nvector)::ind_grid
@@ -298,10 +299,10 @@ subroutine gradient_phi(ilevel,igrid,ngrid,icount)
   end do
   do idim=1,ndim
      do i=1,ngrid
-        ind_left (i,idim)=nbor(ind_grid(i),2*idim-1)
-        ind_right(i,idim)=nbor(ind_grid(i),2*idim  )
-        igridn(i,2*idim-1)=son(ind_left (i,idim))
-        igridn(i,2*idim  )=son(ind_right(i,idim))
+        igridn(i,2*idim-1)=morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+        igridn(i,2*idim  )=morton_nbor_grid(ind_grid(i),ilevel,2*idim  )
+        ind_left (i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
+        ind_right(i,idim)=morton_nbor_cell(ind_grid(i),ilevel,2*idim  )
      end do
   end do
 

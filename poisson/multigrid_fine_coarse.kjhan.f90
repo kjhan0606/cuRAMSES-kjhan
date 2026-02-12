@@ -147,6 +147,7 @@ subroutine cmp_residual_mg_coarse(ilevel)
    ! Computes the residual for pure MG levels, and stores it into active_mg(myid,ilevel)%u(:,3)
    use amr_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
 
@@ -198,8 +199,8 @@ subroutine cmp_residual_mg_coarse(ilevel)
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                     cpu_nbor_amr   = cpu_map(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
                   igrid_nbor_mg = lookup_mg(igrid_nbor_amr) 
                   ! Add up
@@ -222,8 +223,8 @@ subroutine cmp_residual_mg_coarse(ilevel)
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                     cpu_nbor_amr   = cpu_map(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -338,6 +339,7 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
    use amr_commons
    use pm_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
    logical, intent(in) :: safe
@@ -404,8 +406,8 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                     cpu_nbor_amr   = cpu_map(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
                   ! Get neighbor cpu
                   igrid_nbor_mg  = lookup_mg(igrid_nbor_amr)
@@ -436,8 +438,8 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                     cpu_nbor_amr   = cpu_map(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -755,6 +757,7 @@ end subroutine interpolate_and_correct_coarse
 subroutine set_scan_flag_coarse(ilevel)
    use amr_commons
    use poisson_commons
+   use morton_hash
    implicit none
 
    integer, intent(in) :: ilevel
@@ -793,8 +796,8 @@ subroutine set_scan_flag_coarse(ilevel)
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                     cpu_nbor_amr   = cpu_map(nbor(igrid_amr,igshift))
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
 
                   if(igrid_nbor_amr==0) then

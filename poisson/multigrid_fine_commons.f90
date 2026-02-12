@@ -955,6 +955,7 @@ subroutine make_fine_bc_rhs(ilevel,icount)
    use amr_commons
    use pm_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel,icount
 
@@ -1019,8 +1020,8 @@ subroutine make_fine_bc_rhs(ilevel,icount)
                   igrid_nbor_amr = igrid_amr
                   ifathercell_nbor_amr = father(igrid_nbor_amr)
                else
-                  igrid_nbor_amr = son(nbor(igrid_amr,igshift))
-                  ifathercell_nbor_amr = nbor(igrid_amr,igshift)
+                  igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                  ifathercell_nbor_amr = morton_nbor_cell(igrid_amr,ilevel,igshift)
                end if
 
                if(igrid_nbor_amr==0) then

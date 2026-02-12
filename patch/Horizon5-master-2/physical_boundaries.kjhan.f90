@@ -260,6 +260,7 @@ subroutine make_boundary_flag(ilevel)
   use amr_commons
   use hydro_commons
   use poisson_parameters
+  use morton_hash
   implicit none
   integer::ilevel
   ! -------------------------------------------------------------------
@@ -323,7 +324,7 @@ subroutine make_boundary_flag(ilevel)
         
         ! Gather neighboring reference grid
         do i=1,ngrid
-           ind_grid_ref(i)=son(nbor(ind_grid(i),inbor))
+           ind_grid_ref(i)=morton_nbor_grid(ind_grid(i),ilevel,inbor)
         end do
 
         ! Loop over cells
