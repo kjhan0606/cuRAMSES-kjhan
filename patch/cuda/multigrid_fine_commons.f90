@@ -165,6 +165,9 @@ subroutine multigrid_fine(ilevel,icount)
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
 
+   ! Pre-compute neighbor grids for fine-level stencil operations
+   call precompute_nbor_grid_fine(ilevel)
+
    iter = 0
    err = 1.0d0
    main_iteration_loop: do
@@ -248,6 +251,9 @@ subroutine multigrid_fine(ilevel,icount)
       end if
 
    end do main_iteration_loop
+
+   ! Free pre-computed neighbor grids
+   if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
 
    if(myid==1) print '(A,I5,A,I5,A,1pE10.3)','   ==> Level=',ilevel, ' Step=', &
             iter,' Error=',err

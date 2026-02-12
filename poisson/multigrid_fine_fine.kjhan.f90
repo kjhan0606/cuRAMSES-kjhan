@@ -169,9 +169,9 @@ subroutine cmp_residual_mg_fine(ilevel)
 !$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr,icell_amr,phi_c,nb_sum, inbor,idim,igshift, igrid_nbor_amr,icell_nbor_amr, j,nbor_grids_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
-      ! Precompute 6 neighbor grids for this grid (cached)
+      ! Load pre-computed neighbor grids from nbor_grid_fine
       do j=1,twondim
-         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
+         nbor_grids_cache(j) = nbor_grid_fine(j, igrid_mg)
       end do
       ! Loop over cells
       do ind=1,twotondim
@@ -371,9 +371,9 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
 !$omp parallel do private(igrid_mg,igrid_amr,ind0,ind,iskip_amr,icell_amr,nb_sum,inbor,idim, igshift, igrid_nbor_amr, icell_nbor_amr, weight, j,nbor_grids_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
-      ! Precompute 6 neighbor grids for this grid (cached)
+      ! Load pre-computed neighbor grids from nbor_grid_fine
       do j=1,twondim
-         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
+         nbor_grids_cache(j) = nbor_grid_fine(j, igrid_mg)
       end do
       ! Loop over cells, with red/black ordering
       do ind0=1,twotondim/2      ! Only half of the cells for a red or black sweep
@@ -844,3 +844,33 @@ subroutine set_scan_flag_fine(ilevel)
       end do
    end do
 end subroutine set_scan_flag_fine
+
+! ------------------------------------------------------------------------
+! Pre-compute neighbor grids for fine-level MG solver
+! Builds nbor_grid_fine(1:twondim, 1:ngrid) once before V-cycle iterations
+! so that gauss_seidel_mg_fine and cmp_residual_mg_fine use simple array
+! lookups instead of morton hash probes.
+! ------------------------------------------------------------------------
+subroutine precompute_nbor_grid_fine(ilevel)
+   use amr_commons
+   use poisson_commons
+   use morton_hash
+   implicit none
+   integer, intent(in) :: ilevel
+
+   integer :: ngrid, igrid_mg, igrid_amr, j
+
+   ngrid = active(ilevel)%ngrid
+
+   if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
+   allocate(nbor_grid_fine(1:twondim, 1:ngrid))
+
+!$omp parallel do private(igrid_mg, igrid_amr, j)
+   do igrid_mg = 1, ngrid
+      igrid_amr = active(ilevel)%igrid(igrid_mg)
+      do j = 1, twondim
+         nbor_grid_fine(j, igrid_mg) = morton_nbor_grid(igrid_amr, ilevel, j)
+      end do
+   end do
+
+end subroutine precompute_nbor_grid_fine

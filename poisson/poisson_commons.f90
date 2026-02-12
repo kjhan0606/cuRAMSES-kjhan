@@ -21,6 +21,10 @@ module poisson_commons
   ! Multigrid safety switch
   logical, allocatable, dimension(:) :: safe_mode
 
+  ! Pre-computed neighbor grids for fine-level MG solver
+  ! nbor_grid_fine(j, igrid_mg) = morton_nbor_grid(active(ilevel)%igrid(igrid_mg), ilevel, j)
+  integer, allocatable, dimension(:,:) :: nbor_grid_fine
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 
