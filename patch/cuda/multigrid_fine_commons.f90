@@ -172,10 +172,9 @@ subroutine multigrid_fine(ilevel,icount)
    err = 1.0d0
    main_iteration_loop: do
       iter=iter+1
-      ! Pre-smoothing
+      ! Pre-smoothing (merged exchange: red+black then exchange once)
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-         call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
@@ -216,10 +215,9 @@ subroutine multigrid_fine(ilevel,icount)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end if
 
-      ! Post-smoothing
+      ! Post-smoothing (merged exchange: red+black then exchange once)
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-         call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
