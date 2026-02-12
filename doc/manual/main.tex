@@ -106,6 +106,13 @@ The \textbf{k-section ordering} replaces the standard Hilbert curve domain decom
 The k-section tree enables \textbf{hierarchical MPI exchange} where communication follows the tree structure, achieving $O(\sum k_l)$ messages per exchange instead of $O(N_{\text{cpu}})$ all-to-all communication.
 \end{infobox}
 
+\begin{figure}[ht]
+\centering
+\includegraphics[width=0.85\textwidth]{ksection_domains_18ranks_wide.png}
+\caption{Example of k-section domain decomposition with a $3\times2\times2=12$ uniform partition. Each subbox surface shows the projected column density $\log_{10}(1+\Sigma)$ rendered with a distinct sequential colormap. The density field is computed on a $512^3$ grid from ${\sim}18.6$ million dark matter particles.}
+\label{fig:ksection_domains}
+\end{figure}
+
 \section{Hierarchical MPI Exchange}
 
 Two exchange routines are provided in \texttt{patch/cuda/ksection.f90}:

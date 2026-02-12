@@ -147,6 +147,8 @@ subroutine cmp_residual_mg_fine(ilevel)
    integer  :: ind, igrid_mg, idim, inbor
    integer  :: igrid_amr, icell_amr, iskip_amr
    integer  :: igshift, igrid_nbor_amr, icell_nbor_amr
+   integer  :: j
+   integer, dimension(1:twondim) :: nbor_grids_cache
 
    real(dp) :: dtwondim = (twondim)
 
@@ -164,9 +166,13 @@ subroutine cmp_residual_mg_fine(ilevel)
    ngrid=active(ilevel)%ngrid
 
    ! Loop over active grids
-!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr,icell_amr,phi_c,nb_sum, inbor,idim,igshift, igrid_nbor_amr,icell_nbor_amr)
+!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr,icell_amr,phi_c,nb_sum, inbor,idim,igshift, igrid_nbor_amr,icell_nbor_amr, j,nbor_grids_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
+      ! Precompute 6 neighbor grids for this grid (cached)
+      do j=1,twondim
+         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
+      end do
       ! Loop over cells
       do ind=1,twotondim
          iskip_amr = ncoarse+(ind-1)*ngridmax
@@ -184,7 +190,7 @@ subroutine cmp_residual_mg_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     igrid_nbor_amr = nbor_grids_cache(igshift)
                   end if
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
@@ -203,7 +209,7 @@ subroutine cmp_residual_mg_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     igrid_nbor_amr = nbor_grids_cache(igshift)
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -337,6 +343,8 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
    integer  :: ind, ind0, igrid_mg, idim, inbor
    integer  :: igrid_amr, icell_amr, iskip_amr
    integer  :: igshift, igrid_nbor_amr, icell_nbor_amr
+   integer  :: j
+   integer, dimension(1:twondim) :: nbor_grids_cache
 
    real(dp) :: dtwondim = (twondim)
 
@@ -360,9 +368,13 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
    ngrid=active(ilevel)%ngrid
 
    ! Loop over active grids
-!$omp parallel do private(igrid_mg,igrid_amr,ind0,ind,iskip_amr,icell_amr,nb_sum,inbor,idim, igshift, igrid_nbor_amr, icell_nbor_amr, weight)
+!$omp parallel do private(igrid_mg,igrid_amr,ind0,ind,iskip_amr,icell_amr,nb_sum,inbor,idim, igshift, igrid_nbor_amr, icell_nbor_amr, weight, j,nbor_grids_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
+      ! Precompute 6 neighbor grids for this grid (cached)
+      do j=1,twondim
+         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
+      end do
       ! Loop over cells, with red/black ordering
       do ind0=1,twotondim/2      ! Only half of the cells for a red or black sweep
          if(redstep) then
@@ -390,7 +402,7 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     igrid_nbor_amr = nbor_grids_cache(igshift)
                   end if
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
@@ -415,7 +427,7 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     igrid_nbor_amr = nbor_grids_cache(igshift)
                   end if
 
                   if(igrid_nbor_amr==0) then

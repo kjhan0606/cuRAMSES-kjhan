@@ -179,7 +179,7 @@ subroutine multigrid_fine(ilevel,icount)
 
       ! Compute residual and restrict into upper level RHS
       call cmp_residual_mg_fine(ilevel)
-      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+      ! f(1,1) ghost exchange removed: restriction and norm2 use local cells only
       if(iter==1) then
          call cmp_residual_norm2_fine(ilevel,i_res_norm2)
 #ifndef WITHOUTMPI
@@ -223,7 +223,7 @@ subroutine multigrid_fine(ilevel,icount)
 
       ! Update fine residual
       call cmp_residual_mg_fine(ilevel)
-      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+      ! f(1,1) ghost exchange removed: norm2 uses local cells only
       call cmp_residual_norm2_fine(ilevel,res_norm2)
 #ifndef WITHOUTMPI
       call MPI_ALLREDUCE(res_norm2,res_norm2_tot,1, &
