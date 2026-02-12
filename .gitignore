@@ -7,10 +7,12 @@ bin/write_makefile.f90
 # Test run outputs
 test_ksection/run_*/output_*
 test_ksection/run_*/log
-test_ksection/run_*/run.log
-test_ksection/run_cosmo_*/output_*
-test_ksection/run_cosmo_*/log
-test_ksection/run_cosmo_*/run.log
+test_ksection/run_*/*.log
+test_ksection/run_*/ramses_*
+test_ksection/run_*/*.out*
+test_ksection/run_*/*.txt
+test_ksection/run_*/*.nml
+test_ksection/run_*/*.asc
 
 # Claude session files
 .claude/
