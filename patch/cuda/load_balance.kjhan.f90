@@ -29,11 +29,13 @@ subroutine load_balance
   integer::countsend,countrecv
   integer,dimension(MPI_STATUS_SIZE,ncpu)::statuses
   integer,dimension(ncpu)::reqsend,reqrecv
+  real(dp)::t_lb_start,t_lb_end
 #endif
 
   if(ncpu==1)return
 
 #ifndef WITHOUTMPI
+  t_lb_start = MPI_WTIME()
   if(myid==1)write(*,*)'Load balancing AMR grid...'
 
   ! Put all particle in main tree trunk
@@ -342,6 +344,9 @@ subroutine load_balance
 
   balance=.false.
 
+  t_lb_end = MPI_WTIME()
+  if(myid==1) write(*,'(A,F8.3,A)') ' load_balance total: ', t_lb_end - t_lb_start, ' s'
+
   if(verbose)then
      write(*,*)'Output mesh structure'
      do ilevel=1,nlevelmax
@@ -614,8 +619,10 @@ subroutine cmp_new_cpu_map
   end if   ! end if not bisection/ksection
 
   ! Free on-demand histogram arrays (no longer needed after build_bisection/ksection)
-  if(allocated(bisec_ind_cell)) deallocate(bisec_ind_cell)
-  if(allocated(cell_level))     deallocate(cell_level)
+  if(allocated(bisec_ind_cell))  deallocate(bisec_ind_cell)
+  if(allocated(cell_level))      deallocate(cell_level)
+  if(allocated(bisec_cell_coord))deallocate(bisec_cell_coord)
+  if(allocated(bisec_cell_cost)) deallocate(bisec_cell_cost)
 
   !----------------------------------------
   ! Compute new cpu map
@@ -1061,13 +1068,22 @@ subroutine defrag
   use rt_hydro_commons
 #endif
   implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
 
   integer::ncache,ngrid2,igridmax,i,igrid,ibound,ilevel
   integer::iskip1,iskip2,igrid1,igrid2,ind1,ind2,icell1,icell2
   integer::ind,idim,ivar,istart
   real(dp),allocatable::defrag_dp(:)
   integer,allocatable::defrag_map(:)
+#ifndef WITHOUTMPI
+  real(dp)::t_defrag_start,t_defrag_end
+#endif
 
+#ifndef WITHOUTMPI
+  t_defrag_start = MPI_WTIME()
+#endif
   if(verbose)write(*,*)'Defragmenting main memory...'
 
   ngrid2=0
@@ -1562,7 +1578,12 @@ subroutine defrag
   end do
 
   ngrid_current=ngrid2
- 
+
+#ifndef WITHOUTMPI
+  t_defrag_end = MPI_WTIME()
+  if(myid==1) write(*,'(A,F8.3,A)') ' defrag total: ', t_defrag_end - t_defrag_start, ' s'
+#endif
+
 end subroutine defrag
 !#########################################################################
 !#########################################################################

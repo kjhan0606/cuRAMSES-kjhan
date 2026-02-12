@@ -98,6 +98,9 @@ contains
          ! init histogram
          call init_bisection_histogram
 
+         ! compute cell coordinates for current direction
+         call compute_bisec_cell_coords(dir)
+
          ! build top-level histogram in x dir to get total load for current cpu
          call build_bisection_histogram(0,dir,1)
 
@@ -119,7 +122,10 @@ contains
          nc  = 2**lvl
 
          ! Rebuild histograms if needed, level 0 is already done by init
-         if(update .and. lvl>0 .and. lvl<nbilevelmax) call build_bisection_histogram(lvl,dir,nc)
+         if(update .and. lvl>0 .and. lvl<nbilevelmax) then
+            call compute_bisec_cell_coords(dir)
+            call build_bisection_histogram(lvl,dir,nc)
+         end if
 
          ! WALL-FINDING
          start_bisec=.true.
@@ -404,59 +410,30 @@ contains
       ! rearranges ind_to_part and updates ind_min and ind_max according to a split of domains in
       ! direction dir at wall positions walls
       ! this effectively creates two subdomains ready for histogram building
+      ! Uses pre-computed bisec_cell_coord cache for coordinate lookups.
 
       real(dp), intent(in), dimension(:) :: walls
       integer, intent(in) :: dir, lev
-   
-      integer :: i, nc, lmost, rmost, tmp, nxny
-      real(dp) :: xc_lmost, subcell_c, dx, scale
 
-      integer :: ix,iy,iz
-      integer :: icell, igrid, isubcell, nx_loc
-      integer, dimension(1:3) :: iarray, icoarse_array
+      integer :: i, nc, lmost, rmost, tmp
+      real(dp) :: tmp_coord
+      integer(i8b) :: tmp_cost
 
       if(verbose) print *,'entering splitsort_bisection_histogram'
 
-      iarray=0; icoarse_array=(/ icoarse_min, jcoarse_min, kcoarse_min /)
-      nx_loc=icoarse_max-icoarse_min+1; scale=boxlen/dble(nx_loc)
-
       new_hist_bounds=0
 
-      nc=2**lev; nxny=nx*ny
+      nc=2**lev
       do i=1,nc
          lmost=bisec_hist_bounds(i); rmost=bisec_hist_bounds(i+1)-1       ! note the -1
          do while(rmost-lmost>0)
-            ! compute the dir coordinate of center of leftmost cell
-            ! corresponding cell id
-            icell=bisec_ind_cell(lmost)
-            dx = 0.5d0**cell_level(icell)
-            if(icell<=ncoarse) then
-               ! extract ix,iy,iz for coarse cells
-               iz=(icell-1)/nxny
-               iy=((icell-1)-iz*nxny)/nx
-               ix=((icell-1)-iy*nx-iz*nxny)
-
-               iarray = (/ ix, iy, iz /)
-               xc_lmost = scale*(dble(iarray(dir))+0.5d0-dble(icoarse_array(dir))) ! TODO : check
-            else
-               ! refined cell : extract grid id and subcell id
-               isubcell = ((icell-ncoarse)/ngridmax)+1
-               igrid = icell - ncoarse - ngridmax*(isubcell-1)
-               ! compute subcell center shift
-               iz=(isubcell-1)/4
-               iy=(isubcell-1-4*iz)/2
-               ix=(isubcell-1-2*iy-4*iz)
-   
-               iarray = (/ ix, iy, iz /)
-               subcell_c = (dble(iarray(dir))-0.5d0)*dx - dble(icoarse_array(dir)) 
-               xc_lmost = scale*( xg(igrid,dir) + subcell_c )
-            end if
-
-            if(xc_lmost<walls(i)) then    ! NOTE : strict inequality
+            if(bisec_cell_coord(lmost)<walls(i)) then    ! NOTE : strict inequality
                lmost=lmost+1
             else
-               ! swap lmost and rmost cells
+               ! swap lmost and rmost: ind_cell, coord, cost
                tmp=bisec_ind_cell(lmost); bisec_ind_cell(lmost)=bisec_ind_cell(rmost); bisec_ind_cell(rmost)=tmp
+               tmp_coord=bisec_cell_coord(lmost); bisec_cell_coord(lmost)=bisec_cell_coord(rmost); bisec_cell_coord(rmost)=tmp_coord
+               tmp_cost=bisec_cell_cost(lmost); bisec_cell_cost(lmost)=bisec_cell_cost(rmost); bisec_cell_cost(rmost)=tmp_cost
                rmost=rmost-1
             end if
          end do
@@ -484,8 +461,9 @@ contains
       integer::nc,ibcell,p,slot
 
       integer::nx_loc
-      integer::icpu,ncell,ncell_loc
+      integer::icpu,ncell,ncell_loc,ncell_max
       integer::nxny,ix,iy,iz,iskip
+      integer::icell_tmp,igrid_tmp,isubcell_tmp
   
       integer,dimension(1:nvector),save::ind_grid,ind_cell
 
@@ -500,9 +478,13 @@ contains
       scale=boxlen/dble(nx_loc)
       ncell=ncoarse+twotondim*ngridmax
 
-      ! On-demand allocation of bisec_ind_cell and cell_level
-      if(.not. allocated(bisec_ind_cell)) allocate(bisec_ind_cell(1:ncell))
-      if(.not. allocated(cell_level))     allocate(cell_level(1:ncell))
+      ncell_max=ncell
+
+      ! On-demand allocation of bisec_ind_cell, cell_level, and cache arrays
+      if(.not. allocated(bisec_ind_cell))  allocate(bisec_ind_cell(1:ncell_max))
+      if(.not. allocated(cell_level))      allocate(cell_level(1:ncell_max))
+      if(.not. allocated(bisec_cell_cost)) allocate(bisec_cell_cost(1:ncell_max))
+      if(.not. allocated(bisec_cell_coord))allocate(bisec_cell_coord(1:ncell_max))
 
       ! Init bisec_ind_cell (partitioned index space -> cell id mapping)
       bisec_ind_cell=0
@@ -517,7 +499,7 @@ contains
             ncell=ncell+1
             flag1(ncell)=ind
             bisec_ind_cell(ncell)=ind
-            cell_level(ncell)=0     ! 0 for coarse levels
+            cell_level(ind)=0       ! 0 for coarse levels (indexed by cell ID)
          end if
       end do
       end do
@@ -575,6 +557,24 @@ contains
       ! only one region (region id=1) at level 0
       bisec_hist_bounds(1)=1; bisec_hist_bounds(2)=ncell+1
 
+      ! Store local cell count for cache arrays
+      bisec_ncells_loc = ncell
+
+      ! Compute cell costs (direction-independent, done once)
+      do i = 1, bisec_ncells_loc
+         icell_tmp = bisec_ind_cell(i)
+         if (memory_balance) then
+            bisec_cell_cost(i) = mem_weight_grid / twotondim
+            if (icell_tmp > ncoarse .and. pic) then
+               isubcell_tmp = ((icell_tmp - ncoarse) / ngridmax) + 1
+               igrid_tmp = icell_tmp - ncoarse - ngridmax * (isubcell_tmp - 1)
+               bisec_cell_cost(i) = bisec_cell_cost(i) + numbp(igrid_tmp) * mem_weight_part / twotondim
+            end if
+         else
+            bisec_cell_cost(i) = 1
+         end if
+      end do
+
    end subroutine
 
 
@@ -582,24 +582,14 @@ contains
    subroutine build_bisection_histogram(lev,dir,nc_in)
       ! build the nc_in histograms of level lev, for a split in direction dir
       ! nc_in = number of domains at this level (2**lev for bisection, product of factors for ksection)
+      ! Uses pre-computed bisec_cell_coord and bisec_cell_cost cache arrays.
 
-#ifndef WITHOUTMPI
-      include 'mpif.h'
-#endif
       integer, intent(in) :: lev, dir, nc_in
-      integer :: ix,iy,iz
-      integer :: nc, nx_loc, nxny
-      integer :: i, ibicell, icell, igrid, isubcell
-      integer(i8b) :: cell_cost
-      integer, dimension(1:3) :: iarray, icoarse_array
+      integer :: nc
+      integer :: i, ibicell
+      integer :: cell_slot
 
-      real(dp) :: subcell_c, cell_coord, dx, scale
-      integer  :: cell_slot
-
-      nc=nc_in; nxny=nx*ny
-      iarray=0; icoarse_array=(/ icoarse_min, jcoarse_min, kcoarse_min /)
-
-      nx_loc=icoarse_max-icoarse_min+1; scale=boxlen/dble(nx_loc)
+      nc=nc_in
 
       ! reset histograms before adding up loads
       bisec_hist=0
@@ -607,49 +597,10 @@ contains
       ! This is the histogram-building loop on bisection cells
       bisection_domains_loop: do ibicell=1,nc
 
-         ! loop over all cells of the ibicell domain
+         ! loop over all cells of the ibicell domain using cached coord/cost
          do i=bisec_hist_bounds(ibicell),bisec_hist_bounds(ibicell+1)-1
-            ! corresponding cell id
-            icell=bisec_ind_cell(i)
-            dx = 0.5d0**cell_level(icell)
-
-            if(icell<=ncoarse) then
-               ! extract ix,iy,iz for coarse cells
-               iz=(icell-1)/nxny
-               iy=((icell-1)-iz*nxny)/nx
-               ix=((icell-1)-iy*nx-iz*nxny)
-
-               iarray = (/ ix, iy, iz /)
-               cell_coord = scale* ( dble(iarray(dir))-0.5d0 ) * dx
-            else
-               ! refined cell : extract grid id and subcell id
-               isubcell = ((icell-ncoarse)/ngridmax)+1
-               igrid = icell - ncoarse - ngridmax*(isubcell-1)
-               ! compute subcell center shift
-               iz=(isubcell-1)/4
-               iy=(isubcell-1-4*iz)/2
-               ix=(isubcell-1-2*iy-4*iz)
-
-               iarray = (/ ix, iy, iz /)
-               subcell_c = (dble(iarray(dir))-0.5d0)*dx - dble(icoarse_array(dir))
-               ! compute cell center
-               cell_coord = scale*( xg(igrid,dir) + subcell_c )
-            end if
-
-            cell_slot = floor(cell_coord/bisec_res)+1
-
-            ! Compute cell cost: memory-weighted or uniform
-            if (memory_balance) then
-               cell_cost = mem_weight_grid / twotondim
-               if (icell > ncoarse .and. pic) then
-                  cell_cost = cell_cost + numbp(igrid) * mem_weight_part / twotondim
-               end if
-            else
-               cell_cost = 1
-            end if
-
-            ! stack up the cell in the histogram
-            bisec_hist(ibicell,cell_slot) = bisec_hist(ibicell,cell_slot)+cell_cost
+            cell_slot = floor(bisec_cell_coord(i)/bisec_res)+1
+            bisec_hist(ibicell,cell_slot) = bisec_hist(ibicell,cell_slot)+bisec_cell_cost(i)
          end do
 
          ! cumulate histogram
@@ -659,5 +610,44 @@ contains
       end do bisection_domains_loop
 
    end subroutine build_bisection_histogram
+
+   subroutine compute_bisec_cell_coords(dir)
+      ! Compute bisec_cell_coord(1:bisec_ncells_loc) for the given split direction.
+      ! Must be called before build_bisection_histogram and splitsort at each level.
+      integer, intent(in) :: dir
+
+      integer :: i, ix, iy, iz, icell, igrid, isubcell, nx_loc, nxny
+      integer, dimension(1:3) :: iarray, icoarse_array
+      real(dp) :: dx, scale, subcell_c
+
+      nxny = nx * ny
+      icoarse_array = (/ icoarse_min, jcoarse_min, kcoarse_min /)
+      nx_loc = icoarse_max - icoarse_min + 1
+      scale = boxlen / dble(nx_loc)
+
+      do i = 1, bisec_ncells_loc
+         icell = bisec_ind_cell(i)
+         dx = 0.5d0**cell_level(icell)
+
+         if (icell <= ncoarse) then
+            iz = (icell - 1) / nxny
+            iy = ((icell - 1) - iz * nxny) / nx
+            ix = ((icell - 1) - iy * nx - iz * nxny)
+            iarray = (/ ix, iy, iz /)
+            bisec_cell_coord(i) = scale * (dble(iarray(dir)) - 0.5d0) * dx
+         else
+            isubcell = ((icell - ncoarse) / ngridmax) + 1
+            igrid = icell - ncoarse - ngridmax * (isubcell - 1)
+            iz = (isubcell - 1) / 4
+            iy = (isubcell - 1 - 4 * iz) / 2
+            ix = (isubcell - 1 - 2 * iy - 4 * iz)
+            iarray = (/ ix, iy, iz /)
+            subcell_c = (dble(iarray(dir)) - 0.5d0) * dx - dble(icoarse_array(dir))
+            bisec_cell_coord(i) = scale * (xg(igrid, dir) + subcell_c)
+         end if
+      end do
+
+   end subroutine compute_bisec_cell_coords
+
 end module bisection
 

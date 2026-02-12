@@ -7,7 +7,8 @@ module ksection
    use amr_parameters
    use amr_commons
    use bisection, only: round_to_bisec_res, &
-        init_bisection_histogram, build_bisection_histogram
+        init_bisection_histogram, build_bisection_histogram, &
+        compute_bisec_cell_coords
 
    implicit none
 
@@ -163,24 +164,16 @@ contains
    ! Generalizes splitsort_bisection_histogram from 2-way to k-way
    !================================================================
    subroutine splitsort_ksection_histogram(lev, dir, all_walls, kfac)
+      ! K-way splitsort using pre-computed bisec_cell_coord cache.
       integer, intent(in) :: lev, dir, kfac
       real(dp), intent(in), dimension(:,:) :: all_walls  ! (nc, 1:kfac-1)
 
-      integer :: i, nc, j, lmost, rmost, tmp, nxny
-      integer :: part, nparts_done
-      real(dp) :: xc_lmost, subcell_c, dx, scale
-
-      integer :: ix, iy, iz
-      integer :: icell, igrid, isubcell, nx_loc
-      integer, dimension(1:3) :: iarray, icoarse_array
+      integer :: i, nc, lmost, rmost, tmp
+      integer :: part
+      real(dp) :: tmp_coord
+      integer(i8b) :: tmp_cost
 
       if(verbose) print *,'entering splitsort_ksection_histogram'
-
-      iarray = 0
-      icoarse_array = (/ icoarse_min, jcoarse_min, kcoarse_min /)
-      nx_loc = icoarse_max - icoarse_min + 1
-      scale = boxlen / dble(nx_loc)
-      nxny = nx * ny
 
       ! Compute nc = nodes at level lev
       nc = 1
@@ -191,61 +184,30 @@ contains
       new_hist_bounds = 0
 
       do i = 1, nc
-         ! For each partition boundary (k-1 walls), split the domain
-         ! We do k-way split by iterating: for each wall, move cells
-         ! past the wall to the right end, then advance
-         nparts_done = 0
          lmost = bisec_hist_bounds(i)
 
          do part = 1, kfac - 1
-            ! Split at wall part: cells < wall go left, >= wall go right
-            rmost = bisec_hist_bounds(i + 1) - 1
-
-            ! But we only sort within the remaining unsorted range
-            ! lmost is the start of the current unsorted region
-            ! We want to separate cells < walls(i,part) to the left
-            rmost = bisec_hist_bounds(i + 1) - 1
-            ! Actually, count from lmost
-            ! Partition: all cells in [lmost, rmost] such that
-            ! coord < walls(i,part) go to [lmost, split_point-1]
-            ! coord >= walls(i,part) go to [split_point, rmost]
-
-            ! Find the split point using in-place partitioning
             rmost = bisec_hist_bounds(i + 1) - 1
             do while (rmost - lmost > 0)
-               ! Compute coordinate of leftmost cell
-               icell = bisec_ind_cell(lmost)
-               dx = 0.5d0**cell_level(icell)
-               if (icell <= ncoarse) then
-                  iz = (icell - 1) / nxny
-                  iy = ((icell - 1) - iz * nxny) / nx
-                  ix = ((icell - 1) - iy * nx - iz * nxny)
-                  iarray = (/ ix, iy, iz /)
-                  xc_lmost = scale * (dble(iarray(dir)) + 0.5d0 - dble(icoarse_array(dir)))
-               else
-                  isubcell = ((icell - ncoarse) / ngridmax) + 1
-                  igrid = icell - ncoarse - ngridmax * (isubcell - 1)
-                  iz = (isubcell - 1) / 4
-                  iy = (isubcell - 1 - 4 * iz) / 2
-                  ix = (isubcell - 1 - 2 * iy - 4 * iz)
-                  iarray = (/ ix, iy, iz /)
-                  subcell_c = (dble(iarray(dir)) - 0.5d0) * dx - dble(icoarse_array(dir))
-                  xc_lmost = scale * (xg(igrid, dir) + subcell_c)
-               end if
-
-               if (xc_lmost < all_walls(i, part)) then
+               if (bisec_cell_coord(lmost) < all_walls(i, part)) then
                   lmost = lmost + 1
                else
+                  ! swap lmost and rmost: ind_cell, coord, cost
                   tmp = bisec_ind_cell(lmost)
                   bisec_ind_cell(lmost) = bisec_ind_cell(rmost)
                   bisec_ind_cell(rmost) = tmp
+                  tmp_coord = bisec_cell_coord(lmost)
+                  bisec_cell_coord(lmost) = bisec_cell_coord(rmost)
+                  bisec_cell_coord(rmost) = tmp_coord
+                  tmp_cost = bisec_cell_cost(lmost)
+                  bisec_cell_cost(lmost) = bisec_cell_cost(rmost)
+                  bisec_cell_cost(rmost) = tmp_cost
                   rmost = rmost - 1
                end if
             end do
 
-            ! Record split point as end of partition 'part' / start of partition 'part+1'
+            ! Record split point
             new_hist_bounds(kfac * (i - 1) + part + 1) = lmost
-            ! lmost is already at the right position for the next partition
          end do
 
          ! First bound for domain i (start of partition 1)
@@ -296,6 +258,9 @@ contains
       integer :: base_ncpu, rem_ncpu, cum_ncpu
       integer, allocatable, dimension(:) :: ncpu_part
 
+      ! Timing variables
+      real(dp) :: t_total, t_init, t_coord, t_hist, t_dich, t_split, t0
+
       scale = boxlen / dble(icoarse_max - icoarse_min + 1)
 
       if(verbose) print *,'entering build_ksection with update = ', update
@@ -337,10 +302,40 @@ contains
 
       cur_levelstart = 1
 
+      ! Init timing accumulators
+      t_init = 0.0d0; t_coord = 0.0d0; t_hist = 0.0d0
+      t_dich = 0.0d0; t_split = 0.0d0
+#ifndef WITHOUTMPI
+      t_total = MPI_WTIME()
+#endif
+
       if (update) then
+#ifndef WITHOUTMPI
+         t0 = MPI_WTIME()
+#endif
          call init_bisection_histogram
+#ifndef WITHOUTMPI
+         t_init = MPI_WTIME() - t0
+#endif
+
          dir = ksec_dir(1)
+
+#ifndef WITHOUTMPI
+         t0 = MPI_WTIME()
+#endif
+         call compute_bisec_cell_coords(dir)
+#ifndef WITHOUTMPI
+         t_coord = t_coord + MPI_WTIME() - t0
+#endif
+
+#ifndef WITHOUTMPI
+         t0 = MPI_WTIME()
+#endif
          call build_bisection_histogram(0, dir, 1)
+#ifndef WITHOUTMPI
+         t_hist = t_hist + MPI_WTIME() - t0
+#endif
+
          mytmp = bisec_hist(1, bisec_nres)
 #ifndef WITHOUTMPI
          call MPI_ALLREDUCE(mytmp, tottmp, 1, MPI_INTEGER8, MPI_SUM, MPI_COMM_WORLD, ierr)
@@ -358,8 +353,21 @@ contains
          dir = ksec_dir(lvl + 1)
          nwalls_level = nc * (k - 1)
 
-         ! Rebuild histograms
-         if (update .and. lvl > 0) call build_bisection_histogram(lvl, dir, nc)
+         ! Rebuild histograms (with fresh coord cache for new direction)
+         if (update .and. lvl > 0) then
+#ifndef WITHOUTMPI
+            t0 = MPI_WTIME()
+#endif
+            call compute_bisec_cell_coords(dir)
+#ifndef WITHOUTMPI
+            t_coord = t_coord + MPI_WTIME() - t0
+            t0 = MPI_WTIME()
+#endif
+            call build_bisection_histogram(lvl, dir, nc)
+#ifndef WITHOUTMPI
+            t_hist = t_hist + MPI_WTIME() - t0
+#endif
+         end if
 
          ! Allocate per-node partition info
          allocate(ncpu_part(1:k))
@@ -426,6 +434,9 @@ contains
 
          ! UPDATE: iterative dichotomy for load balancing
          update_dichotomy: if (update) then
+#ifndef WITHOUTMPI
+            t0 = MPI_WTIME()
+#endif
 
             ! Compute target cumulative fractions
             do i = 1, nc
@@ -599,6 +610,10 @@ contains
                end do
             end do
 
+
+#ifndef WITHOUTMPI
+            t_dich = t_dich + MPI_WTIME() - t0
+#endif
          end if update_dichotomy
 
          ! CHILDREN CREATION AND LEAF PROCESSING
@@ -674,7 +689,15 @@ contains
          end do
 
          ! Splitsort for next histogram computation
-         if (update) call splitsort_ksection_histogram(lvl, dir, walls_2d, k)
+         if (update) then
+#ifndef WITHOUTMPI
+            t0 = MPI_WTIME()
+#endif
+            call splitsort_ksection_histogram(lvl, dir, walls_2d, k)
+#ifndef WITHOUTMPI
+            t_split = t_split + MPI_WTIME() - t0
+#endif
+         end if
 
          deallocate(ncpu_part)
          deallocate(walls_2d)
@@ -718,6 +741,19 @@ contains
          print *, "   Balancing accuracy   :", stdev / mean
          print *, "   Requested tolerance  :", bisec_tol
       end if
+
+#ifndef WITHOUTMPI
+      t_total = MPI_WTIME() - t_total
+      if (myid == 1 .and. update) then
+         write(*,'(A)')        ' build_ksection timing:'
+         write(*,'(A,F8.3,A)') '   init_histogram: ', t_init, ' s'
+         write(*,'(A,F8.3,A)') '   coord compute : ', t_coord, ' s'
+         write(*,'(A,F8.3,A)') '   histogram     : ', t_hist, ' s'
+         write(*,'(A,F8.3,A)') '   dichotomy     : ', t_dich, ' s'
+         write(*,'(A,F8.3,A)') '   splitsort     : ', t_split, ' s'
+         write(*,'(A,F8.3,A)') '   total         : ', t_total, ' s'
+      end if
+#endif
 
       ! Store CPU ranges for hierarchical exchange
       ksec_cpumin(1:ksec_nbinodes) = tmp_imin(1:ksec_nbinodes)

@@ -101,8 +101,11 @@ module amr_commons
   integer(i8b),allocatable,dimension(:,:)::bisec_hist       ! histograms for load computation         
   integer,allocatable,dimension(:)     ::bisec_hist_bounds  ! histogram splitting boundaries          
   integer,allocatable,dimension(:)     ::new_hist_bounds
-  integer,allocatable,dimension(:)     ::bisec_ind_cell     ! histo swap id -> cell id map (big)      
-  integer,allocatable,dimension(:)     ::cell_level         ! store the level of the cells (big)      
+  integer,allocatable,dimension(:)     ::bisec_ind_cell     ! histo swap id -> cell id map (big)
+  integer,allocatable,dimension(:)     ::cell_level         ! store the level of the cells (big)
+  real(dp),allocatable,dimension(:)    ::bisec_cell_coord   ! cached cell coordinate (split direction)
+  integer(i8b),allocatable,dimension(:)::bisec_cell_cost    ! cached cell cost (memory-weighted)
+  integer :: bisec_ncells_loc = 0                            ! local cell count for histogram
 
   real(dp)::bisec_res                                       ! resolution parameters
   integer ::bisec_nres
