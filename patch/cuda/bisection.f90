@@ -498,8 +498,11 @@ contains
       nxny=nx*ny
       nx_loc=icoarse_max-icoarse_min+1
       scale=boxlen/dble(nx_loc)
+      ncell=ncoarse+twotondim*ngridmax
 
-      ! Init ncell for current subroutine
+      ! On-demand allocation of bisec_ind_cell and cell_level
+      if(.not. allocated(bisec_ind_cell)) allocate(bisec_ind_cell(1:ncell))
+      if(.not. allocated(cell_level))     allocate(cell_level(1:ncell))
 
       ! Init bisec_ind_cell (partitioned index space -> cell id mapping)
       bisec_ind_cell=0

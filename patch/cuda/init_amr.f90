@@ -57,8 +57,13 @@ subroutine init_amr
   ! Allocate MPI cell-based arrays
   allocate(cpu_map    (1:ncell)) ! Cpu map
   allocate(cpu_map2   (1:ncell)) ! New cpu map for load balance
-  allocate(hilbert_key(1:ncell)) ! Ordering key
-  cpu_map=0; cpu_map2=0; hilbert_key=0.0d0
+  cpu_map=0; cpu_map2=0
+  if(ordering=='ksection') then
+     allocate(hilbert_key(1:1))     ! Defrag uses local scratch
+  else
+     allocate(hilbert_key(1:ncell)) ! Ordering key
+  end if
+  hilbert_key=0.0d0
 
   ! Bisection ordering: compute array boundaries and
   ! allocate arrays if needed
@@ -95,6 +100,7 @@ subroutine init_amr
     bisec_ind_cell=0; cell_level=0
 
   else if(ordering=='ksection') then
+
     use_cpubox_decomp=.true.
     ! Compute prime factorization and split sequence
     call compute_ksection_factorization(ncpu)
@@ -132,11 +138,9 @@ subroutine init_amr
     allocate(bisec_hist(1:nbileafnodes,1:bisec_nres))
     allocate(bisec_hist_bounds(1:(nbileafnodes+1)))
     allocate(new_hist_bounds  (1:(nbileafnodes+1)))
-    allocate(bisec_ind_cell(1:ncell))    ! big array
-    allocate(cell_level    (1:ncell))    ! big array
+    ! bisec_ind_cell and cell_level: on-demand in init_bisection_histogram
     bisec_hist=0
     bisec_hist_bounds=0; new_hist_bounds=0
-    bisec_ind_cell=0; cell_level=0
   end if
 
  bisection_or_ordering:if(.not.use_cpubox_decomp) then ! use usual ordering machinery

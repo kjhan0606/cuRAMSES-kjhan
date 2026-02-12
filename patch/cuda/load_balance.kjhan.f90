@@ -613,6 +613,10 @@ subroutine cmp_new_cpu_map
      call build_ksection(update=.true.)
   end if   ! end if not bisection/ksection
 
+  ! Free on-demand histogram arrays (no longer needed after build_bisection/ksection)
+  if(allocated(bisec_ind_cell)) deallocate(bisec_ind_cell)
+  if(allocated(cell_level))     deallocate(cell_level)
+
   !----------------------------------------
   ! Compute new cpu map
   !----------------------------------------
@@ -1061,6 +1065,8 @@ subroutine defrag
   integer::ncache,ngrid2,igridmax,i,igrid,ibound,ilevel
   integer::iskip1,iskip2,igrid1,igrid2,ind1,ind2,icell1,icell2
   integer::ind,idim,ivar,istart
+  real(dp),allocatable::defrag_dp(:)
+  integer,allocatable::defrag_map(:)
 
   if(verbose)write(*,*)'Defragmenting main memory...'
 
@@ -1078,7 +1084,6 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              cpu_map2(igrid)=ngrid2+i
               igridmax=max(igridmax,igrid)
               igrid=next(igrid)
            end do
@@ -1086,7 +1091,32 @@ subroutine defrag
         end if
      end do
   end do
-  
+
+  ! Allocate local scratch for old→new grid index mapping (replaces cpu_map2 in defrag)
+  allocate(defrag_map(1:igridmax))
+  defrag_map=0
+
+  ngrid2=0
+  do ilevel=1,nlevelmax
+     do ibound=1,nboundary+ncpu
+        if(ibound<=ncpu)then
+           ncache=numbl(ibound,ilevel)
+           istart=headl(ibound,ilevel)
+        else
+           ncache=numbb(ibound-ncpu,ilevel)
+           istart=headb(ibound-ncpu,ilevel)
+        end if
+        if(ncache>0)then
+           igrid=istart
+           do i=1,ncache
+              defrag_map(igrid)=ngrid2+i
+              igrid=next(igrid)
+           end do
+           ngrid2=ngrid2+ncache
+        end if
+     end do
+  end do
+
   ngrid2=0
   do igrid=1,igridmax
      flag2(igrid)=0
@@ -1108,7 +1138,7 @@ subroutine defrag
                  ind1=(icell1-ncoarse-1)/ngridmax+1
                  iskip1=ncoarse+(ind1-1)*ngridmax
                  igrid1=(icell1-iskip1)
-                 igrid2=cpu_map2(igrid1)
+                 igrid2=defrag_map(igrid1)
                  iskip2=ncoarse+(ind1-1)*ngridmax
                  icell2=iskip2+igrid2
               else
@@ -1127,10 +1157,13 @@ subroutine defrag
 
   ! nbor defrag remapping removed — computed from Morton keys
 
+  ! Allocate local scratch for defrag (replaces hilbert_key usage)
+  allocate(defrag_dp(1:igridmax))
+
   do idim=1,ndim
   ngrid2=0
   do igrid=1,igridmax
-     hilbert_key(igrid)=0.0D0
+     defrag_dp(igrid)=0.0D0
   end do
   do ilevel=1,nlevelmax
      do ibound=1,nboundary+ncpu
@@ -1144,7 +1177,7 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              hilbert_key(ngrid2+i)=real(xg(igrid,idim),kind=qdp)
+              defrag_dp(ngrid2+i)=xg(igrid,idim)
               igrid=next(igrid)
            end do
            ngrid2=ngrid2+ncache
@@ -1152,7 +1185,7 @@ subroutine defrag
      end do
   end do
   do igrid=1,igridmax
-     xg(igrid,idim)=real(hilbert_key(igrid),kind=8)
+     xg(igrid,idim)=defrag_dp(igrid)
   end do
   end do
 
@@ -1261,7 +1294,7 @@ subroutine defrag
            do i=1,ncache
               igrid1=son(iskip2+igrid)
               if(igrid1>0)then
-                 igrid2=cpu_map2(igrid1)
+                 igrid2=defrag_map(igrid1)
               else
                  igrid2=0
               end if
@@ -1348,7 +1381,7 @@ subroutine defrag
   iskip2=ncoarse+(ind-1)*ngridmax
   ngrid2=0
   do igrid=1,igridmax
-     hilbert_key(igrid)=0.0D0
+     defrag_dp(igrid)=0.0D0
   end do
   do ilevel=1,nlevelmax
      do ibound=1,nboundary+ncpu
@@ -1362,7 +1395,7 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              hilbert_key(ngrid2+i)=real(uold(iskip2+igrid,ivar),kind=qdp)
+              defrag_dp(ngrid2+i)=uold(iskip2+igrid,ivar)
               igrid=next(igrid)
            end do
            ngrid2=ngrid2+ncache
@@ -1370,7 +1403,7 @@ subroutine defrag
      end do
   end do
   do igrid=1,igridmax
-     uold(iskip2+igrid,ivar)=real(hilbert_key(igrid),kind=8)
+     uold(iskip2+igrid,ivar)=defrag_dp(igrid)
   end do
   end do
   end do
@@ -1385,7 +1418,7 @@ subroutine defrag
   iskip2=ncoarse+(ind-1)*ngridmax
   ngrid2=0
   do igrid=1,igridmax
-     hilbert_key(igrid)=0.0D0
+     defrag_dp(igrid)=0.0D0
   end do
   do ilevel=1,nlevelmax
      do ibound=1,nboundary+ncpu
@@ -1399,7 +1432,7 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              hilbert_key(ngrid2+i)=real(rtuold(iskip2+igrid,ivar),kind=qdp)
+              defrag_dp(ngrid2+i)=rtuold(iskip2+igrid,ivar)
               igrid=next(igrid)
            end do
            ngrid2=ngrid2+ncache
@@ -1407,7 +1440,7 @@ subroutine defrag
      end do
   end do
   do igrid=1,igridmax
-     rtuold(iskip2+igrid,ivar)=real(hilbert_key(igrid),kind=8)
+     rtuold(iskip2+igrid,ivar)=defrag_dp(igrid)
   end do
   end do
   end do
@@ -1421,7 +1454,7 @@ subroutine defrag
   iskip2=ncoarse+(ind-1)*ngridmax
   ngrid2=0
   do igrid=1,igridmax
-     hilbert_key(igrid)=0.0D0
+     defrag_dp(igrid)=0.0D0
   end do
   do ilevel=1,nlevelmax
      do ibound=1,nboundary+ncpu
@@ -1435,7 +1468,7 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              hilbert_key(ngrid2+i)=real(phi(iskip2+igrid),kind=qdp)
+              defrag_dp(ngrid2+i)=phi(iskip2+igrid)
               igrid=next(igrid)
            end do
            ngrid2=ngrid2+ncache
@@ -1443,7 +1476,7 @@ subroutine defrag
      end do
   end do
   do igrid=1,igridmax
-     phi(iskip2+igrid)=real(hilbert_key(igrid),kind=8)
+     phi(iskip2+igrid)=defrag_dp(igrid)
   end do
   end do
 
@@ -1452,7 +1485,7 @@ subroutine defrag
   iskip2=ncoarse+(ind-1)*ngridmax
   ngrid2=0
   do igrid=1,igridmax
-     hilbert_key(igrid)=0.0D0
+     defrag_dp(igrid)=0.0D0
   end do
   do ilevel=1,nlevelmax
      do ibound=1,nboundary+ncpu
@@ -1466,7 +1499,7 @@ subroutine defrag
         if(ncache>0)then
            igrid=istart
            do i=1,ncache
-              hilbert_key(ngrid2+i)=real(f(iskip2+igrid,idim),kind=qdp)
+              defrag_dp(ngrid2+i)=f(iskip2+igrid,idim)
               igrid=next(igrid)
            end do
            ngrid2=ngrid2+ncache
@@ -1474,12 +1507,15 @@ subroutine defrag
      end do
   end do
   do igrid=1,igridmax
-     f(iskip2+igrid,idim)=real(hilbert_key(igrid),kind=8)
+     f(iskip2+igrid,idim)=defrag_dp(igrid)
   end do
   end do
   end do
 
   end if
+
+  deallocate(defrag_dp)
+  deallocate(defrag_map)
 
   ngrid2=0
   do ilevel=1,nlevelmax
