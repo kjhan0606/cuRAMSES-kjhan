@@ -53,31 +53,21 @@ recursive subroutine amr_step(ilevel,icount)
               call make_virtual_fine_int(cpu_map(1),i)
               if(hydro)then
 #ifdef SOLVERmhd
-                 do ivar=1,nvar+3
+                 call make_virtual_fine_dp_bulk(uold,nvar+3,i)
 #else
-                 do ivar=1,nvar
-#endif
-                    call make_virtual_fine_dp(uold(1,ivar),i)
-#ifdef SOLVERmhd
-                 end do
-#else
-                 end do
+                 call make_virtual_fine_dp_bulk(uold,nvar,i)
 #endif
                  if(simple_boundary)call make_boundary_hydro(i)
               end if
 #ifdef RT
               if(rt)then
-                 do ivar=1,nrtvar
-                    call make_virtual_fine_dp(rtuold(1,ivar),i)
-                 end do
+                 call make_virtual_fine_dp_bulk(rtuold,nrtvar,i)
                  if(simple_boundary)call rt_make_boundary_hydro(i)
               end if
 #endif
               if(poisson)then
                  call make_virtual_fine_dp(phi(1),i)
-                 do idim=1,ndim
-                    call make_virtual_fine_dp(f(1,idim),i)
-                 end do
+                 call make_virtual_fine_dp_bulk(f,ndim,i)
                  if(simple_boundary)call make_boundary_force(i)
               end if
            end if
@@ -358,15 +348,9 @@ recursive subroutine amr_step(ilevel,icount)
         ! Update boundaries
                                call timer('hydro - ghostzones','start')
 #ifdef SOLVERmhd
-        do ivar=1,nvar+3
+        call make_virtual_fine_dp_bulk(uold,nvar+3,ilevel)
 #else
-        do ivar=1,nvar
-#endif
-           call make_virtual_fine_dp(uold(1,ivar),ilevel)
-#ifdef SOLVERmhd
-        end do
-#else
-        end do
+        call make_virtual_fine_dp_bulk(uold,nvar,ilevel)
 #endif
         if(simple_boundary)call make_boundary_hydro(ilevel)
         
@@ -438,15 +422,9 @@ recursive subroutine amr_step(ilevel,icount)
      ! Reverse update boundaries
                                call timer('hydro - rev ghostzones','start')
 #ifdef SOLVERmhd
-     do ivar=1,nvar+3
+     call make_virtual_reverse_dp_bulk(unew,nvar+3,ilevel)
 #else
-     do ivar=1,nvar
-#endif
-        call make_virtual_reverse_dp(unew(1,ivar),ilevel)
-#ifdef SOLVERmhd
-     end do
-#else
-     end do
+     call make_virtual_reverse_dp_bulk(unew,nvar,ilevel)
 #endif
      if(pressure_fix)then
         call make_virtual_reverse_dp(enew(1),ilevel)
@@ -523,15 +501,9 @@ recursive subroutine amr_step(ilevel,icount)
   if(hydro)then
                                call timer('hydro - ghostzones','start')
 #ifdef SOLVERmhd
-     do ivar=1,nvar+3
+     call make_virtual_fine_dp_bulk(uold,nvar+3,ilevel)
 #else
-     do ivar=1,nvar
-#endif
-        call make_virtual_fine_dp(uold(1,ivar),ilevel)
-#ifdef SOLVERmhd
-     end do
-#else
-     end do
+     call make_virtual_fine_dp_bulk(uold,nvar,ilevel)
 #endif
      if(simple_boundary)call make_boundary_hydro(ilevel)
   endif

@@ -1551,3 +1551,205 @@ end subroutine make_virtual_reverse_int_ksec
 !################################################################
 !################################################################
 !################################################################
+subroutine make_virtual_fine_dp_bulk(xx,ncols,ilevel)
+  use amr_commons
+  implicit none
+  integer,intent(in)::ncols,ilevel
+  real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
+  ! -------------------------------------------------------------------
+  ! Bulk forward ghost zone exchange for multiple columns of a 2D array.
+  ! Dispatches to ksec version or falls back to per-column calls.
+  ! -------------------------------------------------------------------
+  integer::ivar
+
+  if(numbtot(1,ilevel)==0)return
+
+  if(ordering=='ksection') then
+     call make_virtual_fine_dp_bulk_ksec(xx,ncols,ilevel)
+     return
+  end if
+
+  ! Fallback: call single-variable version for each column
+  do ivar=1,ncols
+     call make_virtual_fine_dp(xx(1,ivar),ilevel)
+  end do
+
+end subroutine make_virtual_fine_dp_bulk
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine make_virtual_fine_dp_bulk_ksec(xx,ncols,ilevel)
+  use amr_commons
+  use ksection
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ncols,ilevel
+  real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
+  ! -------------------------------------------------------------------
+  ! Ksection-based bulk forward ghost zone exchange.
+  ! Packs all ncols variables per emission grid into a single buffer,
+  ! exchanges once via ksection tree, then scatters to reception grids.
+  ! -------------------------------------------------------------------
+  integer::icpu,i,j,iv,idx,ntotal,nrecv,nprops_ksec,sender,ridx,igrid
+  real(dp),allocatable::sendbuf(:,:),recvbuf(:,:)
+  integer,allocatable::dest_cpu(:)
+
+#ifndef WITHOUTMPI
+  nprops_ksec = ncols * twotondim + 2
+
+  ! Count total emission items
+  ntotal = 0
+  do icpu = 1, ncpu
+     ntotal = ntotal + emission(icpu,ilevel)%ngrid
+  end do
+
+  ! Pack sendbuf + dest_cpu
+  allocate(sendbuf(1:nprops_ksec, 1:max(ntotal,1)))
+  allocate(dest_cpu(1:max(ntotal,1)))
+  idx = 0
+  do icpu = 1, ncpu
+     do i = 1, emission(icpu,ilevel)%ngrid
+        idx = idx + 1
+        dest_cpu(idx) = icpu
+        do iv = 1, ncols
+           do j = 1, twotondim
+              sendbuf((iv-1)*twotondim + j, idx) = &
+                   & xx(emission(icpu,ilevel)%igrid(i) &
+                   & + ncoarse + (j-1)*ngridmax, iv)
+           end do
+        end do
+        sendbuf(ncols*twotondim + 1, idx) = dble(myid)
+        sendbuf(ncols*twotondim + 2, idx) = dble(i)
+     end do
+  end do
+
+  ! Exchange via ksection tree
+  call ksection_exchange_dp(sendbuf, ntotal, dest_cpu, nprops_ksec, &
+       & recvbuf, nrecv)
+
+  ! Scatter received data to reception grids
+  do i = 1, nrecv
+     sender = nint(recvbuf(ncols*twotondim + 1, i))
+     ridx   = nint(recvbuf(ncols*twotondim + 2, i))
+     igrid  = reception(sender, ilevel)%igrid(ridx)
+     do iv = 1, ncols
+        do j = 1, twotondim
+           xx(igrid + ncoarse + (j-1)*ngridmax, iv) = &
+                & recvbuf((iv-1)*twotondim + j, i)
+        end do
+     end do
+  end do
+
+  deallocate(sendbuf, dest_cpu, recvbuf)
+#endif
+
+end subroutine make_virtual_fine_dp_bulk_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine make_virtual_reverse_dp_bulk(xx,ncols,ilevel)
+  use amr_commons
+  implicit none
+  integer,intent(in)::ncols,ilevel
+  real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
+  ! -------------------------------------------------------------------
+  ! Bulk reverse ghost zone exchange for multiple columns of a 2D array.
+  ! Dispatches to ksec version or falls back to per-column calls.
+  ! -------------------------------------------------------------------
+  integer::ivar
+
+  if(numbtot(1,ilevel)==0)return
+
+  if(ordering=='ksection') then
+     call make_virtual_reverse_dp_bulk_ksec(xx,ncols,ilevel)
+     return
+  end if
+
+  ! Fallback: call single-variable version for each column
+  do ivar=1,ncols
+     call make_virtual_reverse_dp(xx(1,ivar),ilevel)
+  end do
+
+end subroutine make_virtual_reverse_dp_bulk
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine make_virtual_reverse_dp_bulk_ksec(xx,ncols,ilevel)
+  use amr_commons
+  use ksection
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ncols,ilevel
+  real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
+  ! -------------------------------------------------------------------
+  ! Ksection-based bulk reverse ghost zone exchange.
+  ! Packs all ncols variables per reception grid into a single buffer,
+  ! exchanges once via ksection tree, then accumulates (+=) into
+  ! owner's emission grids.
+  ! -------------------------------------------------------------------
+  integer::icpu,i,j,iv,idx,ntotal,nrecv,nprops_ksec,sender,eidx,igrid
+  real(dp),allocatable::sendbuf(:,:),recvbuf(:,:)
+  integer,allocatable::dest_cpu(:)
+
+#ifndef WITHOUTMPI
+  nprops_ksec = ncols * twotondim + 2
+
+  ! Count total reception items
+  ntotal = 0
+  do icpu = 1, ncpu
+     ntotal = ntotal + reception(icpu,ilevel)%ngrid
+  end do
+
+  ! Pack sendbuf from reception grids + dest_cpu
+  allocate(sendbuf(1:nprops_ksec, 1:max(ntotal,1)))
+  allocate(dest_cpu(1:max(ntotal,1)))
+  idx = 0
+  do icpu = 1, ncpu
+     do i = 1, reception(icpu,ilevel)%ngrid
+        idx = idx + 1
+        dest_cpu(idx) = icpu
+        do iv = 1, ncols
+           do j = 1, twotondim
+              sendbuf((iv-1)*twotondim + j, idx) = &
+                   & xx(reception(icpu,ilevel)%igrid(i) &
+                   & + ncoarse + (j-1)*ngridmax, iv)
+           end do
+        end do
+        sendbuf(ncols*twotondim + 1, idx) = dble(myid)
+        sendbuf(ncols*twotondim + 2, idx) = dble(i)
+     end do
+  end do
+
+  ! Exchange via ksection tree
+  call ksection_exchange_dp(sendbuf, ntotal, dest_cpu, nprops_ksec, &
+       & recvbuf, nrecv)
+
+  ! Accumulate received data into emission grids
+  do i = 1, nrecv
+     sender = nint(recvbuf(ncols*twotondim + 1, i))
+     eidx   = nint(recvbuf(ncols*twotondim + 2, i))
+     igrid  = emission(sender, ilevel)%igrid(eidx)
+     do iv = 1, ncols
+        do j = 1, twotondim
+           xx(igrid + ncoarse + (j-1)*ngridmax, iv) = &
+                & xx(igrid + ncoarse + (j-1)*ngridmax, iv) + &
+                & recvbuf((iv-1)*twotondim + j, i)
+        end do
+     end do
+  end do
+
+  deallocate(sendbuf, dest_cpu, recvbuf)
+#endif
+
+end subroutine make_virtual_reverse_dp_bulk_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################

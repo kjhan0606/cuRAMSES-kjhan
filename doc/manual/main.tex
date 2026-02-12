@@ -1,175 +1,37 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% cuRAMSES-kjhan Technical Manual
-% Based on the Legrand Orange Book style
+% cuRAMSES-kjhan Technical Reference Manual
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%----------------------------------------------------------------------------------------
+%    PACKAGES AND OTHER DOCUMENT CONFIGURATIONS
+%----------------------------------------------------------------------------------------
+
 \documentclass[11pt,fleqn]{book}
 
-%------------------------------------------------------
-% Packages
-%------------------------------------------------------
+\usepackage[top=3cm,bottom=3cm,left=3.2cm,right=3.2cm,headsep=10pt,headheight=14pt,a4paper]{geometry}
+
+\usepackage{xcolor}
+\definecolor{ocre}{RGB}{52,177,201}
+
+% Font Settings
+\usepackage{avant}
+\usepackage{mathptmx}
+\usepackage{microtype}
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage{lmodern}
-\usepackage[english]{babel}
-\usepackage{amsmath,amsfonts,amssymb}
-\usepackage{graphicx}
-\usepackage{booktabs}
-\usepackage{longtable}
-\usepackage{tabularx}
-\usepackage{array}
-\usepackage{xcolor}
-\usepackage{listings}
-\usepackage{hyperref}
-\usepackage{fancyhdr}
-\usepackage{titlesec}
-\usepackage{titletoc}
-\usepackage{geometry}
-\usepackage{enumitem}
-\usepackage[framemethod=tikz]{mdframed}
-\usepackage{etoolbox}
 
-%------------------------------------------------------
-% Page geometry
-%------------------------------------------------------
-\geometry{
-  top=3cm, bottom=3cm,
-  left=3cm, right=2.5cm,
-  headsep=10pt,
-  headheight=14pt
-}
+% Bibliography
+\usepackage[style=alphabetic,sorting=nyt,sortcites=true,autopunct=true,hyperref=true,abbreviate=false,backref=true,backend=biber]{biblatex}
+\addbibresource{bibliography.bib}
+\defbibheading{bibempty}{}
 
-%------------------------------------------------------
-% Colors (Legrand Orange Book palette)
-%------------------------------------------------------
-\definecolor{ocre}{RGB}{243,102,25}
-\definecolor{darkocre}{RGB}{200,80,20}
-\definecolor{lightocre}{RGB}{255,230,210}
-\definecolor{codegreen}{RGB}{0,120,0}
-\definecolor{codegray}{RGB}{100,100,100}
-\definecolor{codebg}{RGB}{248,248,248}
-\definecolor{darkblue}{RGB}{0,51,102}
+\input{structure}
 
-%------------------------------------------------------
-% Hyperref
-%------------------------------------------------------
-\hypersetup{
-  colorlinks=true,
-  linkcolor=ocre,
-  urlcolor=darkocre,
-  citecolor=darkocre
-}
+%----------------------------------------------------------------------------------------
+%    Definitions of new commands
+%----------------------------------------------------------------------------------------
 
-%------------------------------------------------------
-% Headers and footers
-%------------------------------------------------------
-\pagestyle{fancy}
-\fancyhf{}
-\fancyhead[LE]{\sffamily\bfseries\thepage}
-\fancyhead[RE]{\sffamily\leftmark}
-\fancyhead[LO]{\sffamily\rightmark}
-\fancyhead[RO]{\sffamily\bfseries\thepage}
-\renewcommand{\headrulewidth}{0.5pt}
-\renewcommand{\headrule}{\hbox to\headwidth{\color{ocre}\leaders\hrule height \headrulewidth\hfill}}
-
-%------------------------------------------------------
-% Chapter and section formatting
-%------------------------------------------------------
-\titleformat{\chapter}[display]
-  {\normalfont\huge\bfseries\sffamily\color{ocre}}
-  {\flushright\fontsize{80}{90}\selectfont\color{ocre!30}\thechapter}
-  {-20pt}
-  {\flushright\Huge}
-  [\vspace{-20pt}\color{ocre}\titlerule[2pt]]
-
-\titleformat{\section}
-  {\normalfont\Large\bfseries\sffamily\color{ocre}}
-  {\thesection}{1em}{}
-
-\titleformat{\subsection}
-  {\normalfont\large\bfseries\sffamily\color{darkocre}}
-  {\thesubsection}{1em}{}
-
-\titleformat{\subsubsection}
-  {\normalfont\normalsize\bfseries\sffamily}
-  {\thesubsubsection}{1em}{}
-
-%------------------------------------------------------
-% Table of Contents styling
-%------------------------------------------------------
-\titlecontents{chapter}[0em]
-  {\addvspace{12pt}\large\sffamily\bfseries\color{ocre}}
-  {\contentslabel{2em}}{}
-  {\hfill\contentspage}
-
-\titlecontents{section}[2em]
-  {\addvspace{2pt}\sffamily}
-  {\contentslabel{2.3em}}{}
-  {\titlerule*[8pt]{.}\contentspage}
-
-\titlecontents{subsection}[4.6em]
-  {\sffamily\small}
-  {\contentslabel{2.5em}}{}
-  {\titlerule*[8pt]{.}\contentspage}
-
-%------------------------------------------------------
-% Custom environments
-%------------------------------------------------------
-\newmdenv[
-  backgroundcolor=lightocre,
-  linecolor=ocre,
-  linewidth=1pt,
-  roundcorner=3pt,
-  innertopmargin=8pt,
-  innerbottommargin=8pt,
-  frametitlebackgroundcolor=ocre!80,
-  frametitlefont=\bfseries\sffamily\color{white},
-  frametitlerulewidth=0pt
-]{infobox}
-
-\newmdenv[
-  backgroundcolor=codebg,
-  linecolor=codegray!60,
-  linewidth=0.5pt,
-  roundcorner=2pt,
-  innerleftmargin=4pt,
-  innerrightmargin=4pt,
-  innertopmargin=4pt,
-  innerbottommargin=4pt,
-  frametitlebackgroundcolor=codegray!20,
-  frametitlefont=\bfseries\sffamily\small,
-  frametitlerulewidth=0pt
-]{codebox}
-
-%------------------------------------------------------
-% Listings (Fortran)
-%------------------------------------------------------
-\lstdefinestyle{fortran}{
-  language=[90]Fortran,
-  basicstyle=\small\ttfamily,
-  keywordstyle=\color{darkblue}\bfseries,
-  commentstyle=\color{codegreen}\itshape,
-  stringstyle=\color{darkocre},
-  numbers=left,
-  numberstyle=\tiny\color{codegray},
-  numbersep=8pt,
-  backgroundcolor=\color{codebg},
-  frame=single,
-  framerule=0.4pt,
-  rulecolor=\color{codegray!40},
-  breaklines=true,
-  showstringspaces=false,
-  tabsize=3,
-  morekeywords={integer,real,logical,character,allocatable,intent,
-    use,implicit,none,subroutine,end,call,do,if,then,else,endif,
-    module,contains,type,include}
-}
-\lstset{style=fortran}
-
-%------------------------------------------------------
-% Namelist parameter table helper
-%------------------------------------------------------
-\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
-\newcolumntype{C}[1]{>{\centering\arraybackslash}p{#1}}
+\def\R{\mathbb{R}}
 
 %------------------------------------------------------
 % Document
@@ -180,52 +42,52 @@
 % Title page
 %------------------------------------------------------
 \begin{titlepage}
+\begin{tikzpicture}[remember picture,overlay]
+  % Top colored area
+  \fill[ocre] (current page.north west) rectangle ([yshift=-9cm]current page.north east);
+  % Bottom accent strip
+  \fill[ocre!10] (current page.south west) rectangle ([yshift=2.5cm]current page.south east);
+  \draw[ocre,line width=1.5pt] ([yshift=2.5cm]current page.south west) -- ([yshift=2.5cm]current page.south east);
+\end{tikzpicture}
+
+\vspace*{1cm}
+
 \begin{center}
-\vspace*{2cm}
+{\fontsize{42}{50}\selectfont\sffamily\bfseries\color{white}cuRAMSES-kjhan}\\[1cm]
+{\fontsize{20}{24}\selectfont\sffamily\color{white!80}Technical Reference Manual}
+\end{center}
 
-{\color{ocre}\rule{\textwidth}{3pt}}
+\vspace{5cm}
 
-\vspace{1.5cm}
-
-{\fontsize{40}{48}\selectfont\sffamily\bfseries\color{darkblue}
-cuRAMSES-kjhan}
-
-\vspace{0.5cm}
-
-{\fontsize{20}{24}\selectfont\sffamily\color{ocre}
-Technical Reference Manual}
-
-\vspace{1.5cm}
-
-{\color{ocre}\rule{\textwidth}{3pt}}
-
-\vspace{2cm}
-
+\begin{center}
 {\Large\sffamily
-K-Section Ordering, Morton Key Octree,\\[6pt]
-Memory-Based Load Balancing, and\\[6pt]
+K-Section Ordering, Morton Key Octree,\\[8pt]
+Memory-Based Load Balancing, and\\[8pt]
 Performance Optimizations}
 
-\vspace{2cm}
+\vspace{3cm}
 
-{\large\sffamily Jaehyun~Han}
-
-\vspace{1cm}
-
+{\large\sffamily Jaehyun~Han}\\[0.5cm]
 {\sffamily February 2026}
+\end{center}
 
 \vfill
 
+\begin{center}
 {\small\sffamily
 Based on RAMSES (R.~Teyssier)\\[3pt]
-Repository: \texttt{git@github.com:kjhan0606/cuRAMSES-kjhan.git}}
+\texttt{git@github.com:kjhan0606/cuRAMSES-kjhan.git}}
 \end{center}
+\vspace{1cm}
 \end{titlepage}
 
 %------------------------------------------------------
 % Table of Contents
 %------------------------------------------------------
+
+\pagestyle{empty}
 \tableofcontents
+\pagestyle{fancy}
 
 %------------------------------------------------------
 % PART I: Modifications Overview
@@ -322,12 +184,35 @@ The metadata (sender ID, emission index) allows the receiver to scatter data to 
 \subsection{Dispatch}
 
 Dispatch is automatic via:
-\begin{lstlisting}
+\begin{lstlisting}[style=fortran,numbers=none]
 if(ordering=='ksection') then
    call make_virtual_fine_dp_ksec(xx, ilevel)
    return
 end if
 \end{lstlisting}
+
+\subsection{Bulk Exchange}
+
+Four bulk variants exchange all columns of a 2D array (e.g., \texttt{uold}, \texttt{f}, \texttt{unew}) in a single \texttt{ksection\_exchange\_dp} call:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Subroutine} & \textbf{Description} \\
+\midrule
+\texttt{make\_virtual\_fine\_dp\_bulk} & Forward bulk exchange \\
+\texttt{make\_virtual\_fine\_dp\_bulk\_ksec} & Forward bulk (ksection impl.) \\
+\texttt{make\_virtual\_reverse\_dp\_bulk} & Reverse bulk exchange \\
+\texttt{make\_virtual\_reverse\_dp\_bulk\_ksec} & Reverse bulk (ksection impl.) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Buffer layout for \texttt{ncols} variables:
+\[
+\texttt{sendbuf}\bigl((v{-}1) \cdot 2^{3} + j,\;\text{idx}\bigr) = \texttt{xx}(\text{icell},\; v) \quad v=1{\ldots}\text{ncols},\; j=1{\ldots}8
+\]
+plus 2 metadata words (sender ID, index). This reduces MPI exchanges from $N_{\text{var}}$ per level to 1 per array.
 
 \section{build\_comm via K-Section}
 
@@ -523,7 +408,7 @@ Sequential Fortran I/O requires reading all preceding planes to reach a target p
 
 Fortran 2003 \texttt{ACCESS='STREAM'} is used with computed byte offsets:
 
-\begin{lstlisting}
+\begin{lstlisting}[style=fortran,numbers=none]
 hdr_bytes = 52 + (i3-1)*plane_bytes + 5
 plane_bytes = n1*n2*4 + 8  ! data + 2 record markers
 \end{lstlisting}
@@ -885,7 +770,7 @@ yieldtablefilename='yield_table.asc'
 \section{Build}
 
 \begin{codebox}[Build Commands]
-\begin{lstlisting}[language=bash,numbers=none,keywordstyle=\color{darkblue}]
+\begin{lstlisting}[style=bash,numbers=none]
 cd bin
 make clean
 make
@@ -949,7 +834,7 @@ nomembal & 80M & 3.77E-03 & $-$1.88E-06 & 1.23E-06 & $-$1.84E-16 \\
 \section{Running Tests}
 
 \begin{codebox}[Membal Test]
-\begin{lstlisting}[language=bash,numbers=none,keywordstyle=\color{darkblue}]
+\begin{lstlisting}[style=bash,numbers=none]
 cd test_ksection/run_cosmo_membal
 cp ../../bin/ramses_final3d .
 mpirun -np 12 ./ramses_final3d \
@@ -979,12 +864,12 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{read\_params.jaehyun.f90} & Read new namelist params \\
 \texttt{bisection.f90} & nc\_in parameter, 64-bit histograms \\
 \texttt{ksection.f90} & K-section tree + exchange routines \\
-\texttt{load\_balance.kjhan.f90} & numbp sync, internal timing \\
-\texttt{virtual\_boundaries.kjhan.f90} & Ksec ghost exchange + build\_comm \\
+\texttt{load\_balance.kjhan.f90} & numbp sync, bulk exchange, internal timing \\
+\texttt{virtual\_boundaries.kjhan.f90} & Ksec ghost exchange + bulk + build\_comm \\
 \texttt{multigrid\_fine\_commons.f90} & MG ksection communication \\
 \texttt{init\_amr.f90} & Memory savings, Morton init \\
 \texttt{update\_time.f90} & Memory reporting \\
-\texttt{adaptive\_loop.jaehyun.f90} & writemem\_minmax, Morton rebuild \\
+\texttt{adaptive\_loop.jaehyun.f90} & writemem\_minmax, Morton rebuild, bulk exchange \\
 \midrule
 \multicolumn{2}{l}{\textit{patch/oct\_tree/}} \\
 \midrule
@@ -999,7 +884,7 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{init\_flow\_fine.f90} & Stream access IC reading \\
 \texttt{init\_part.f90} & Stream access particle IC \\
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
-\texttt{multigrid\_fine\_commons.f90} & build\_parent\_comms\_mg ksection \\
+\texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
 \bottomrule
 \end{longtable}
 

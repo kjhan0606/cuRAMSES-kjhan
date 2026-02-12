@@ -103,31 +103,21 @@ subroutine adaptive_loop
            call make_virtual_fine_int(cpu_map(1),ilevel)
            if(hydro)then
 #ifdef SOLVERmhd
-              do ivar=1,nvar+3
+              call make_virtual_fine_dp_bulk(uold,nvar+3,ilevel)
 #else
-              do ivar=1,nvar
-#endif
-                 call make_virtual_fine_dp(uold(1,ivar),ilevel)
-#ifdef SOLVERmhd
-              end do
-#else
-              end do
+              call make_virtual_fine_dp_bulk(uold,nvar,ilevel)
 #endif
               if(simple_boundary)call make_boundary_hydro(ilevel)
            endif
 #ifdef RT
            if(rt)then
-              do ivar=1,nrtvar
-                 call make_virtual_fine_dp(rtuold(1,ivar),ilevel)
-              end do
+              call make_virtual_fine_dp_bulk(rtuold,nrtvar,ilevel)
               if(simple_boundary)call rt_make_boundary_hydro(ilevel)
            endif
 #endif
            if(poisson)then
               call make_virtual_fine_dp(phi(1),ilevel)
-              do idim=1,ndim
-                 call make_virtual_fine_dp(f(1,idim),ilevel)
-              end do
+              call make_virtual_fine_dp_bulk(f,ndim,ilevel)
            end if
            if(ilevel<levelmin)call refine_fine(ilevel)
         end do
@@ -149,15 +139,9 @@ subroutine adaptive_loop
            if(hydro)then
               call upload_fine(ilevel)
 #ifdef SOLVERmhd
-              do ivar=1,nvar+3
+              call make_virtual_fine_dp_bulk(uold,nvar+3,ilevel)
 #else
-              do ivar=1,nvar
-#endif
-                 call make_virtual_fine_dp(uold(1,ivar),ilevel)
-#ifdef SOLVERmhd
-              end do
-#else
-              end do
+              call make_virtual_fine_dp_bulk(uold,nvar,ilevel)
 #endif
               if(simple_boundary)call make_boundary_hydro(ilevel)
            end if
@@ -165,18 +149,14 @@ subroutine adaptive_loop
            ! Radiation book-keeping
            if(rt)then
               call rt_upload_fine(ilevel)
-              do ivar=1,nrtvar
-                 call make_virtual_fine_dp(rtuold(1,ivar),ilevel)
-              end do
+              call make_virtual_fine_dp_bulk(rtuold,nrtvar,ilevel)
               if(simple_boundary)call rt_make_boundary_hydro(ilevel)
            end if
 #endif
            ! Gravity book-keeping
            if(poisson)then
               call make_virtual_fine_dp(phi(1),ilevel)
-              do idim=1,ndim
-                 call make_virtual_fine_dp(f(1,idim),ilevel)
-              end do
+              call make_virtual_fine_dp_bulk(f,ndim,ilevel)
            end if
         end do
         

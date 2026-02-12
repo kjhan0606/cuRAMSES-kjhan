@@ -167,15 +167,9 @@ subroutine load_balance
   do ilevel=nlevelmax,1,-1
      if(hydro)then
 #ifdef SOLVERmhd
-        do ivar=1,nvar+3
+        call make_virtual_fine_dp_bulk(uold,nvar+3,ilevel)
 #else
-        do ivar=1,nvar
-#endif
-           call make_virtual_fine_dp(uold(1,ivar),ilevel)
-#ifdef SOLVERmhd
-        end do
-#else
-        end do
+        call make_virtual_fine_dp_bulk(uold,nvar,ilevel)
 #endif
         if(simple_boundary)then
            call make_boundary_hydro(ilevel)
@@ -183,9 +177,7 @@ subroutine load_balance
      end if
 #ifdef RT
      if(rt)then
-        do ivar=1,nrtvar
-           call make_virtual_fine_dp(rtuold(1,ivar),ilevel)
-        end do
+        call make_virtual_fine_dp_bulk(rtuold,nrtvar,ilevel)
         if(simple_boundary)then
            call rt_make_boundary_hydro(ilevel)
         end if
@@ -193,9 +185,7 @@ subroutine load_balance
 #endif
      if(poisson)then
         call make_virtual_fine_dp(phi(1),ilevel)
-        do idim=1,ndim
-           call make_virtual_fine_dp(f(1,idim),ilevel)
-        end do
+        call make_virtual_fine_dp_bulk(f,ndim,ilevel)
      end if
   end do
 
