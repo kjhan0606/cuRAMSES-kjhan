@@ -818,6 +818,11 @@ subroutine make_virtual_reverse_int(xx,ilevel)
 
   if(numbtot(1,ilevel)==0)return
 
+  if(ordering=='ksection') then
+     call make_virtual_reverse_int_ksec(xx,ilevel)
+     return
+  end if
+
 #ifndef WITHOUTMPI
 
   if(ilevel.le.switchlevel) then
@@ -1473,6 +1478,72 @@ subroutine make_virtual_fine_int_ksec(xx,ilevel)
 #endif
 
 end subroutine make_virtual_fine_int_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine make_virtual_reverse_int_ksec(xx,ilevel)
+  use amr_commons
+  use ksection
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer::ilevel
+  integer,dimension(1:ncoarse+ngridmax*twotondim)::xx
+  ! -------------------------------------------------------------------
+  ! Ksection-based reverse ghost zone exchange for integer arrays.
+  ! Converts int to dp, exchanges via ksection tree, then accumulates.
+  ! -------------------------------------------------------------------
+  integer::icpu,i,j,idx,ntotal,nrecv,nprops_ksec,sender,eidx,igrid
+  real(dp),allocatable::sendbuf(:,:),recvbuf(:,:)
+  integer,allocatable::dest_cpu(:)
+
+#ifndef WITHOUTMPI
+  nprops_ksec = twotondim + 2
+
+  ! Count total reception items
+  ntotal = 0
+  do icpu = 1, ncpu
+     ntotal = ntotal + reception(icpu,ilevel)%ngrid
+  end do
+
+  ! Pack sendbuf from reception grids (int->dp) + dest_cpu
+  allocate(sendbuf(1:nprops_ksec, 1:max(ntotal,1)))
+  allocate(dest_cpu(1:max(ntotal,1)))
+  idx = 0
+  do icpu = 1, ncpu
+     do i = 1, reception(icpu,ilevel)%ngrid
+        idx = idx + 1
+        dest_cpu(idx) = icpu
+        do j = 1, twotondim
+           sendbuf(j, idx) = dble(xx(reception(icpu,ilevel)%igrid(i) &
+                & + ncoarse + (j-1)*ngridmax))
+        end do
+        sendbuf(twotondim+1, idx) = dble(myid)
+        sendbuf(twotondim+2, idx) = dble(i)
+     end do
+  end do
+
+  ! Exchange via ksection tree
+  call ksection_exchange_dp(sendbuf, ntotal, dest_cpu, nprops_ksec, &
+       & recvbuf, nrecv)
+
+  ! Accumulate received data (dp->int) into emission grids
+  do i = 1, nrecv
+     sender = nint(recvbuf(twotondim+1, i))
+     eidx   = nint(recvbuf(twotondim+2, i))
+     igrid  = emission(sender, ilevel)%igrid(eidx)
+     do j = 1, twotondim
+        xx(igrid + ncoarse + (j-1)*ngridmax) = &
+             & xx(igrid + ncoarse + (j-1)*ngridmax) + nint(recvbuf(j, i))
+     end do
+  end do
+
+  deallocate(sendbuf, dest_cpu, recvbuf)
+#endif
+
+end subroutine make_virtual_reverse_int_ksec
 !################################################################
 !################################################################
 !################################################################

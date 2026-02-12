@@ -891,15 +891,9 @@ contains
             wdest_new(idx) = wdest(i)
          end do
 
-         ! Swap working buffers
-         deallocate(wbuf, wdest)
-         allocate(wbuf(1:nprops, 1:max(wnitem,1)))
-         allocate(wdest(1:max(wnitem,1)))
-         if(wnitem > 0) then
-            wbuf(1:nprops, 1:wnitem) = wbuf_new(1:nprops, 1:wnitem)
-            wdest(1:wnitem) = wdest_new(1:wnitem)
-         end if
-         deallocate(wbuf_new, wdest_new)
+         ! Swap working buffers (zero-copy)
+         call move_alloc(wbuf_new, wbuf)
+         call move_alloc(wdest_new, wdest)
 
          ! --- 2. Determine correspondents ---
          npeers = k - 1
@@ -1024,16 +1018,10 @@ contains
          end if
 #endif
 
-         ! Update working set
+         ! Update working set (zero-copy)
          wnitem = idx
-         deallocate(wbuf, wdest)
-         allocate(wbuf(1:nprops, 1:max(wnitem,1)))
-         allocate(wdest(1:max(wnitem,1)))
-         if(wnitem > 0) then
-            wbuf(1:nprops, 1:wnitem) = wbuf_new(1:nprops, 1:wnitem)
-            wdest(1:wnitem) = wdest_new(1:wnitem)
-         end if
-         deallocate(wbuf_new, wdest_new)
+         call move_alloc(wbuf_new, wbuf)
+         call move_alloc(wdest_new, wdest)
 
          ! Cleanup level arrays
          deallocate(child_count, child_offset)
@@ -1044,15 +1032,15 @@ contains
          node = ksec_next(node, my_child)
       end do
 
-      ! Output
+      ! Output (zero-copy)
       nrecv = wnitem
+      deallocate(wdest)
       if(nrecv > 0) then
-         allocate(recvbuf(1:nprops, 1:nrecv))
-         recvbuf(1:nprops, 1:nrecv) = wbuf(1:nprops, 1:nrecv)
+         call move_alloc(wbuf, recvbuf)
       else
+         deallocate(wbuf)
          allocate(recvbuf(1:nprops, 1:1))
       end if
-      deallocate(wbuf, wdest)
 
    end subroutine ksection_exchange_dp
 
@@ -1180,10 +1168,7 @@ contains
             end do
 
             wnitem = wnitem + nextra
-            deallocate(wpacked)
-            allocate(wpacked(1:npack, 1:max(wnitem,1)))
-            wpacked(1:npack, 1:wnitem) = wpacked_new(1:npack, 1:wnitem)
-            deallocate(wpacked_new)
+            call move_alloc(wpacked_new, wpacked)
          end if
       end if
 
@@ -1351,12 +1336,9 @@ contains
          end if
 #endif
 
-         ! Update working set
+         ! Update working set (zero-copy)
          wnitem = idx
-         deallocate(wpacked)
-         allocate(wpacked(1:npack, 1:max(wnitem,1)))
-         if(wnitem > 0) wpacked(1:npack, 1:wnitem) = wpacked_new(1:npack, 1:wnitem)
-         deallocate(wpacked_new)
+         call move_alloc(wpacked_new, wpacked)
 
          ! Update node bounding box for my_child
          if(my_child > 1) cur_bxmin(dir) = ksec_wall(node, my_child - 1)
