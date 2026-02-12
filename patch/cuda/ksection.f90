@@ -817,34 +817,57 @@ contains
       real(dp), allocatable, intent(out) :: recvbuf(:,:)
       integer, intent(out) :: nrecv
 
-      ! Working buffers
-      real(dp), allocatable :: wbuf(:,:)     ! working data buffer
-      integer, allocatable :: wdest(:)       ! working dest array
+      ! Working buffers (dynamic, managed with move_alloc)
+      real(dp), allocatable :: wbuf(:,:)
+      integer, allocatable :: wdest(:)
       real(dp), allocatable :: wbuf_new(:,:)
       integer, allocatable :: wdest_new(:)
-      integer :: wnitem  ! working item count
+      integer :: wnitem
 
-      ! Per-child counts and offsets
-      integer, allocatable :: child_count(:), child_offset(:)
-
-      ! Correspondent exchange arrays
-      integer, allocatable :: send_count(:), recv_count(:)
-      real(dp), allocatable :: peer_recv_data(:,:)
-      integer, allocatable :: peer_recv_dest(:)
-
-      ! MPI request arrays
+      ! Pre-allocated per-level arrays (persistent across calls)
+      integer, allocatable, save :: child_count(:), child_offset(:)
+      integer, allocatable, save :: peer_list(:), peer_child(:)
+      integer, allocatable, save :: send_count(:), recv_count(:)
+      integer, allocatable, save :: peer_recv_offset(:)
 #ifndef WITHOUTMPI
-      integer, allocatable :: req_send_cnt(:), req_recv_cnt(:)
-      integer, allocatable :: req_send_data(:), req_recv_data(:)
-      integer, allocatable :: req_send_dest(:), req_recv_dest(:)
-      integer, allocatable :: mpi_stat(:,:)
+      integer, allocatable, save :: req_send_cnt(:), req_recv_cnt(:)
+      integer, allocatable, save :: req_send_data(:), req_recv_data(:)
+      integer, allocatable, save :: req_send_dest(:), req_recv_dest(:)
+      integer, allocatable, save :: mpi_stat(:,:)
 #endif
+      integer, save :: kmax_alloc = 0
+
+      ! Pre-allocated peer receive buffers (grow-only across calls)
+      real(dp), allocatable, save :: peer_recv_data(:,:)
+      integer, allocatable, save :: peer_recv_dest(:)
+      integer, save :: prv_cap = 0, prv_np = 0
 
       integer :: lvl, k, node, my_child, j, c, p
       integer :: my_pos, child_size, peer, npeers
       integer :: isend_offset, irecv_total, irecv_offset
       integer :: i, idx, ierr
-      integer, allocatable :: peer_list(:), peer_child(:), peer_recv_offset(:)
+
+      ! Ensure per-level arrays are allocated to ksec_kmax
+      if(ksec_kmax > kmax_alloc) then
+         kmax_alloc = ksec_kmax
+         if(allocated(child_count)) deallocate(child_count, child_offset)
+         allocate(child_count(kmax_alloc), child_offset(kmax_alloc))
+         if(allocated(peer_list)) deallocate(peer_list, peer_child, &
+              send_count, recv_count, peer_recv_offset)
+         allocate(peer_list(kmax_alloc-1), peer_child(kmax_alloc-1))
+         allocate(send_count(kmax_alloc-1), recv_count(kmax_alloc-1))
+         allocate(peer_recv_offset(kmax_alloc-1))
+#ifndef WITHOUTMPI
+         if(allocated(req_send_cnt)) deallocate(req_send_cnt, req_recv_cnt)
+         if(allocated(req_send_data)) deallocate(req_send_data, req_recv_data, &
+              req_send_dest, req_recv_dest)
+         if(allocated(mpi_stat)) deallocate(mpi_stat)
+         allocate(req_send_cnt(kmax_alloc-1), req_recv_cnt(kmax_alloc-1))
+         allocate(req_send_data(kmax_alloc-1), req_recv_data(kmax_alloc-1))
+         allocate(req_send_dest(kmax_alloc-1), req_recv_dest(kmax_alloc-1))
+         allocate(mpi_stat(MPI_STATUS_SIZE, 4*(kmax_alloc-1)))
+#endif
+      end if
 
       ! Copy input to working buffers
       wnitem = nitem
@@ -862,9 +885,7 @@ contains
          my_child = ksec_cpu_path(myid, lvl)
 
          ! --- 1. Classify items by child index ---
-         allocate(child_count(1:k))
-         allocate(child_offset(1:k))
-         child_count = 0
+         child_count(1:k) = 0
 
          ! Count items per child
          do i = 1, wnitem
@@ -882,7 +903,7 @@ contains
          allocate(wbuf_new(1:nprops, 1:max(wnitem,1)))
          allocate(wdest_new(1:max(wnitem,1)))
          ! Reset child_count for use as running index
-         child_count = 0
+         child_count(1:k) = 0
          do i = 1, wnitem
             c = ksec_cpu_path(wdest(i), lvl)
             child_count(c) = child_count(c) + 1
@@ -897,10 +918,6 @@ contains
 
          ! --- 2. Determine correspondents ---
          npeers = k - 1
-         allocate(peer_list(1:npeers))
-         allocate(peer_child(1:npeers))
-         allocate(send_count(1:npeers))
-         allocate(recv_count(1:npeers))
 
          ! My position within my child group (0-based)
          my_pos = myid - ksec_cpumin(ksec_next(node, my_child))
@@ -919,10 +936,6 @@ contains
 
 #ifndef WITHOUTMPI
          ! --- 3. Exchange counts ---
-         allocate(req_send_cnt(1:npeers))
-         allocate(req_recv_cnt(1:npeers))
-         allocate(mpi_stat(MPI_STATUS_SIZE, 1:2*npeers))
-
          do p = 1, npeers
             call MPI_ISEND(send_count(p), 1, MPI_INTEGER, &
                  peer_list(p)-1, 100+lvl, MPI_COMM_WORLD, req_send_cnt(p), ierr)
@@ -933,26 +946,25 @@ contains
             call MPI_WAITALL(npeers, req_send_cnt, mpi_stat, ierr)
             call MPI_WAITALL(npeers, req_recv_cnt, mpi_stat, ierr)
          end if
-         deallocate(req_send_cnt, req_recv_cnt, mpi_stat)
 
          ! --- 4. Exchange data ---
          irecv_total = sum(recv_count(1:npeers))
-         allocate(peer_recv_offset(1:npeers))
          peer_recv_offset(1) = 0
          do p = 2, npeers
             peer_recv_offset(p) = peer_recv_offset(p-1) + recv_count(p-1)
          end do
 
+         ! Ensure peer receive buffers are large enough (grow-only on capacity)
+         ! First dimension must match nprops exactly (MPI stride requirement)
          if(irecv_total > 0) then
-            allocate(peer_recv_data(1:nprops, 1:irecv_total))
-            allocate(peer_recv_dest(1:irecv_total))
+            if(irecv_total > prv_cap .or. nprops /= prv_np) then
+               prv_cap = max(irecv_total, prv_cap)
+               prv_np = nprops
+               if(allocated(peer_recv_data)) deallocate(peer_recv_data, peer_recv_dest)
+               allocate(peer_recv_data(1:nprops, 1:prv_cap))
+               allocate(peer_recv_dest(1:prv_cap))
+            end if
          end if
-
-         allocate(req_send_data(1:npeers))
-         allocate(req_recv_data(1:npeers))
-         allocate(req_send_dest(1:npeers))
-         allocate(req_recv_dest(1:npeers))
-         allocate(mpi_stat(MPI_STATUS_SIZE, 1:4*npeers))
 
          do p = 1, npeers
             ! Send data for child peer_child(p)
@@ -990,7 +1002,6 @@ contains
             call MPI_WAITALL(npeers, req_recv_data, mpi_stat, ierr)
             call MPI_WAITALL(npeers, req_recv_dest, mpi_stat, ierr)
          end if
-         deallocate(req_send_data, req_recv_data, req_send_dest, req_recv_dest, mpi_stat)
 #else
          irecv_total = 0
 #endif
@@ -1014,7 +1025,6 @@ contains
                wbuf_new(1:nprops, child_count(my_child)+i) = peer_recv_data(1:nprops, i)
                wdest_new(child_count(my_child)+i) = peer_recv_dest(i)
             end do
-            deallocate(peer_recv_data, peer_recv_dest)
          end if
 #endif
 
@@ -1022,11 +1032,6 @@ contains
          wnitem = idx
          call move_alloc(wbuf_new, wbuf)
          call move_alloc(wdest_new, wdest)
-
-         ! Cleanup level arrays
-         deallocate(child_count, child_offset)
-         deallocate(peer_list, peer_child, send_count, recv_count)
-         if(allocated(peer_recv_offset)) deallocate(peer_recv_offset)
 
          ! Advance to my child node for next level
          node = ksec_next(node, my_child)
@@ -1068,21 +1073,26 @@ contains
       real(dp), allocatable :: wpacked(:,:), wpacked_new(:,:)
       integer :: wnitem
 
-      ! Per-child / per-peer arrays
+      ! Per-child / per-peer arrays (dynamic per level)
       integer, allocatable :: my_child_idx(:)
       integer :: my_count
-      integer, allocatable :: peer_list(:), peer_child_idx(:)
-      integer, allocatable :: send_count(:), recv_count(:)
-      integer, allocatable :: send_offset(:)
-      real(dp), allocatable :: send_buf(:,:), recv_buf(:,:)
-      integer, allocatable :: recv_offset(:)
+      real(dp), allocatable :: send_buf(:,:)
       integer :: total_send, total_recv
 
+      ! Pre-allocated per-level arrays (persistent across calls)
+      integer, allocatable, save :: peer_list(:), peer_child_idx(:)
+      integer, allocatable, save :: send_count(:), recv_count(:)
+      integer, allocatable, save :: send_offset(:), recv_offset(:)
 #ifndef WITHOUTMPI
-      integer, allocatable :: req_sc(:), req_rc(:)
-      integer, allocatable :: req_sd(:), req_rd(:)
-      integer, allocatable :: mpi_stat(:,:)
+      integer, allocatable, save :: req_sc(:), req_rc(:)
+      integer, allocatable, save :: req_sd(:), req_rd(:)
+      integer, allocatable, save :: mpi_stat(:,:)
 #endif
+      integer, save :: kmax_alloc = 0
+
+      ! Pre-allocated receive buffer (grow-only across calls)
+      real(dp), allocatable, save :: recv_buf(:,:)
+      integer, save :: rv_cap = 0, rv_np = 0
 
       integer :: lvl, k, dir, node, my_child, j, p
       integer :: my_pos, child_size, npeers
@@ -1095,6 +1105,23 @@ contains
       integer :: nextra, nwrap_dims, nsubsets, mask, bit, d
       integer :: wrap_d(1:3)
       real(dp) :: wrap_shift(1:3)
+
+      ! Ensure per-level arrays are allocated to ksec_kmax
+      if(ksec_kmax > kmax_alloc) then
+         kmax_alloc = ksec_kmax
+         if(allocated(peer_list)) deallocate(peer_list, peer_child_idx, &
+              send_count, recv_count, send_offset, recv_offset)
+         allocate(peer_list(kmax_alloc-1), peer_child_idx(kmax_alloc-1))
+         allocate(send_count(kmax_alloc-1), recv_count(kmax_alloc-1))
+         allocate(send_offset(kmax_alloc-1), recv_offset(kmax_alloc-1))
+#ifndef WITHOUTMPI
+         if(allocated(req_sc)) deallocate(req_sc, req_rc, req_sd, req_rd)
+         if(allocated(mpi_stat)) deallocate(mpi_stat)
+         allocate(req_sc(kmax_alloc-1), req_rc(kmax_alloc-1))
+         allocate(req_sd(kmax_alloc-1), req_rd(kmax_alloc-1))
+         allocate(mpi_stat(MPI_STATUS_SIZE, 2*(kmax_alloc-1)))
+#endif
+      end if
 
       npack = nprops + 2 * ndim
       nx_loc = icoarse_max - icoarse_min + 1
@@ -1185,10 +1212,6 @@ contains
 
          ! --- Determine correspondents ---
          npeers = k - 1
-         allocate(peer_list(1:npeers))
-         allocate(peer_child_idx(1:npeers))
-         allocate(send_count(1:npeers))
-         allocate(recv_count(1:npeers))
 
          my_pos = myid - ksec_cpumin(ksec_next(node, my_child))
          p = 0
@@ -1204,7 +1227,7 @@ contains
 
          ! --- First pass: count overlaps ---
          my_count = 0
-         send_count = 0
+         send_count(1:npeers) = 0
          do i = 1, wnitem
             xlo = wpacked(nprops + dir, i)
             xhi = wpacked(nprops + ndim + dir, i)
@@ -1232,7 +1255,6 @@ contains
 
          ! --- Allocate buffers ---
          total_send = sum(send_count(1:npeers))
-         allocate(send_offset(1:npeers))
          send_offset(1) = 0
          do p = 2, npeers
             send_offset(p) = send_offset(p-1) + send_count(p-1)
@@ -1242,7 +1264,7 @@ contains
 
          ! --- Second pass: fill buffers ---
          my_count = 0
-         send_count = 0
+         send_count(1:npeers) = 0
          do i = 1, wnitem
             xlo = wpacked(nprops + dir, i)
             xhi = wpacked(nprops + ndim + dir, i)
@@ -1271,8 +1293,6 @@ contains
 
 #ifndef WITHOUTMPI
          ! --- Exchange counts ---
-         allocate(req_sc(1:npeers), req_rc(1:npeers))
-         allocate(mpi_stat(MPI_STATUS_SIZE, 1:2*npeers))
          do p = 1, npeers
             call MPI_ISEND(send_count(p), 1, MPI_INTEGER, &
                  peer_list(p)-1, 400+lvl, MPI_COMM_WORLD, req_sc(p), ierr)
@@ -1283,19 +1303,25 @@ contains
             call MPI_WAITALL(npeers, req_sc, mpi_stat, ierr)
             call MPI_WAITALL(npeers, req_rc, mpi_stat, ierr)
          end if
-         deallocate(req_sc, req_rc, mpi_stat)
 
          ! --- Exchange data ---
          total_recv = sum(recv_count(1:npeers))
-         allocate(recv_offset(1:npeers))
          recv_offset(1) = 0
          do p = 2, npeers
             recv_offset(p) = recv_offset(p-1) + recv_count(p-1)
          end do
-         if(total_recv > 0) allocate(recv_buf(1:npack, 1:total_recv))
 
-         allocate(req_sd(1:npeers), req_rd(1:npeers))
-         allocate(mpi_stat(MPI_STATUS_SIZE, 1:2*npeers))
+         ! Ensure receive buffer is large enough (grow-only on capacity)
+         ! First dimension must match npack exactly (MPI stride requirement)
+         if(total_recv > 0) then
+            if(total_recv > rv_cap .or. npack /= rv_np) then
+               rv_cap = max(total_recv, rv_cap)
+               rv_np = npack
+               if(allocated(recv_buf)) deallocate(recv_buf)
+               allocate(recv_buf(1:npack, 1:rv_cap))
+            end if
+         end if
+
          do p = 1, npeers
             if(send_count(p) > 0) then
                call MPI_ISEND(send_buf(1, send_offset(p)+1), &
@@ -1316,7 +1342,6 @@ contains
             call MPI_WAITALL(npeers, req_sd, mpi_stat, ierr)
             call MPI_WAITALL(npeers, req_rd, mpi_stat, ierr)
          end if
-         deallocate(req_sd, req_rd, mpi_stat)
 #else
          total_recv = 0
 #endif
@@ -1332,7 +1357,6 @@ contains
             do i = 1, total_recv
                wpacked_new(1:npack, my_count+i) = recv_buf(1:npack, i)
             end do
-            deallocate(recv_buf)
          end if
 #endif
 
@@ -1344,11 +1368,9 @@ contains
          if(my_child > 1) cur_bxmin(dir) = ksec_wall(node, my_child - 1)
          if(my_child < k) cur_bxmax(dir) = ksec_wall(node, my_child)
 
-         ! Cleanup
-         deallocate(my_child_idx, send_offset)
+         ! Cleanup (only dynamic per-level arrays)
+         deallocate(my_child_idx)
          if(allocated(send_buf)) deallocate(send_buf)
-         deallocate(peer_list, peer_child_idx, send_count, recv_count)
-         if(allocated(recv_offset)) deallocate(recv_offset)
 
          ! Advance to my child node
          node = ksec_next(node, my_child)
