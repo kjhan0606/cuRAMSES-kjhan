@@ -30,12 +30,14 @@ subroutine load_balance
   integer,dimension(MPI_STATUS_SIZE,ncpu)::statuses
   integer,dimension(ncpu)::reqsend,reqrecv
   real(dp)::t_lb_start,t_lb_end
+  real(dp)::t0,t1,t2,t3,t4,t5,t6
 #endif
 
   if(ncpu==1)return
 
 #ifndef WITHOUTMPI
   t_lb_start = MPI_WTIME()
+  t0 = t_lb_start
   if(myid==1)write(*,*)'Load balancing AMR grid...'
 
   ! Put all particle in main tree trunk
@@ -107,6 +109,8 @@ subroutine load_balance
      end do
   end if
 
+  t1 = MPI_WTIME()
+
   balance=.true.
 
   if(verbose)then
@@ -138,6 +142,8 @@ subroutine load_balance
      end do
      if(allocated(numbp_save)) deallocate(numbp_save)
   end if
+
+  t2 = MPI_WTIME()
 
   !------------------------------------------------------
   ! Expand boundaries to account for new mesh partition
@@ -192,6 +198,8 @@ subroutine load_balance
         end do
      end if
   end do
+
+  t3 = MPI_WTIME()
 
   !--------------------------------------
   ! Rearrange octs between cpus
@@ -260,6 +268,8 @@ subroutine load_balance
         end do
      end do
   end do
+  t4 = MPI_WTIME()
+
   !--------------------------------------
   ! Compute new grid number statistics
   !--------------------------------------
@@ -328,6 +338,8 @@ subroutine load_balance
      end do
   end if
 
+  t5 = MPI_WTIME()
+
   !--------------------------------------------
   ! Shrink boundaries around new mesh partition
   !--------------------------------------------
@@ -344,8 +356,17 @@ subroutine load_balance
 
   balance=.false.
 
-  t_lb_end = MPI_WTIME()
-  if(myid==1) write(*,'(A,F8.3,A)') ' load_balance total: ', t_lb_end - t_lb_start, ' s'
+  t6 = MPI_WTIME()
+  t_lb_end = t6
+  if(myid==1) then
+     write(*,'(A,F8.3,A)') ' load_balance total:         ', t_lb_end - t_lb_start, ' s'
+     write(*,'(A,F8.3,A)') '   numbp_sync:               ', t1 - t0, ' s'
+     write(*,'(A,F8.3,A)') '   cmp_new_cpu_map:          ', t2 - t1, ' s'
+     write(*,'(A,F8.3,A)') '   expand_pass:              ', t3 - t2, ' s'
+     write(*,'(A,F8.3,A)') '   grid_migration:           ', t4 - t3, ' s'
+     write(*,'(A,F8.3,A)') '   allreduce+cpumap_update:  ', t5 - t4, ' s'
+     write(*,'(A,F8.3,A)') '   shrink_pass:              ', t6 - t5, ' s'
+  end if
 
   if(verbose)then
      write(*,*)'Output mesh structure'
