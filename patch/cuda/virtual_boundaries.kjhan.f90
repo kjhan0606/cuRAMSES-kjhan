@@ -962,6 +962,7 @@ end subroutine make_virtual_reverse_int
 subroutine build_comm(ilevel)
   use amr_commons
   use poisson_commons, only: lookup_mg
+  use ksection
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -981,6 +982,10 @@ subroutine build_comm(ilevel)
   integer,dimension(ncpu)::sendbuf,recvbuf
   integer,dimension(MPI_STATUS_SIZE,ncpu)::statuses
   integer::countsend,countrecv
+  ! Ksection variables
+  integer::ntotal_bc,nrecv_bc,idx_bc,sender_bc
+  real(dp),allocatable::sendbuf_bc(:,:),recvbuf_bc(:,:)
+  integer,allocatable::destcpu_bc(:),emit_count(:)
 #endif
   integer,dimension(1:nvector),save::ind_grid,ind_cell
 
@@ -1153,6 +1158,59 @@ subroutine build_comm(ilevel)
   !--------------------------------------------------------
   ! Communicate virtual grid number and index to parent cpu
   !--------------------------------------------------------
+  if(ordering=='ksection') then
+
+  ! Ksection version: exchange grid indices via tree routing
+  ! Pack: (sender_id, reception_index, global_grid_address) for each reception grid
+  ntotal_bc = 0
+  do icpu = 1, ncpu
+     ntotal_bc = ntotal_bc + reception(icpu,ilevel)%ngrid
+  end do
+
+  allocate(sendbuf_bc(1:3, 1:max(ntotal_bc,1)))
+  allocate(destcpu_bc(1:max(ntotal_bc,1)))
+  idx_bc = 0
+  do icpu = 1, ncpu
+     do i = 1, reception(icpu,ilevel)%ngrid
+        idx_bc = idx_bc + 1
+        destcpu_bc(idx_bc) = icpu
+        sendbuf_bc(1, idx_bc) = dble(myid)
+        sendbuf_bc(2, idx_bc) = dble(i)
+        sendbuf_bc(3, idx_bc) = dble(reception(icpu,ilevel)%f(i,1))
+     end do
+  end do
+
+  call ksection_exchange_dp(sendbuf_bc, ntotal_bc, destcpu_bc, 3, &
+       & recvbuf_bc, nrecv_bc)
+  deallocate(sendbuf_bc, destcpu_bc)
+
+  ! Count emission grids per sender
+  allocate(emit_count(1:ncpu))
+  emit_count = 0
+  do i = 1, nrecv_bc
+     sender_bc = nint(recvbuf_bc(1, i))
+     emit_count(sender_bc) = emit_count(sender_bc) + 1
+  end do
+
+  ! Allocate emission igrid
+  do icpu = 1, ncpu
+     emission(icpu, ilevel)%ngrid = emit_count(icpu)
+     if(emit_count(icpu) > 0) &
+          & allocate(emission(icpu, ilevel)%igrid(1:emit_count(icpu)))
+  end do
+  deallocate(emit_count)
+
+  ! Fill emission igrid using reception index as position
+  do i = 1, nrecv_bc
+     sender_bc = nint(recvbuf_bc(1, i))
+     j = nint(recvbuf_bc(2, i))
+     emission(sender_bc, ilevel)%igrid(j) = nint(recvbuf_bc(3, i))
+  end do
+  deallocate(recvbuf_bc)
+
+  else
+
+  ! Original MPI_ALLTOALL version
   call MPI_ALLTOALL(sendbuf,1,MPI_INTEGER,recvbuf,1,MPI_INTEGER,MPI_COMM_WORLD,info)
 
   ! Allocate grid index
@@ -1162,7 +1220,7 @@ subroutine build_comm(ilevel)
      if(ncache>0)allocate(emission(icpu,ilevel)%igrid(1:ncache))
   end do
 
-  ! Receive grid list    
+  ! Receive grid list
   countrecv=0
   do icpu=1,ncpu
      ncache=emission(icpu,ilevel)%ngrid
@@ -1189,6 +1247,8 @@ subroutine build_comm(ilevel)
 
   ! Wait for full completion of receives
   call MPI_WAITALL(countrecv,reqrecv,statuses,info)
+
+  end if
 
   ! Deallocate temporary communication buffers
   do icpu=1,ncpu
