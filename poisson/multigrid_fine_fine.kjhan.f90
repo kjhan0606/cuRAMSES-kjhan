@@ -132,29 +132,37 @@ end subroutine restrict_mask_fine_reverse
 ! Residual computation
 ! ------------------------------------------------------------------------
 
-subroutine cmp_residual_mg_fine(ilevel)
+subroutine cmp_residual_mg_fine(ilevel, norm2)
    ! Computes the residual the fine (AMR) level, and stores it into f(:,1)
+   ! If norm2 is present, also computes the L2 norm of the residual in one pass
    use amr_commons
    use poisson_commons
    use morton_hash
    implicit none
    integer, intent(in) :: ilevel
+   real(dp), intent(out), optional :: norm2
 
    integer, dimension(1:3,1:2,1:8) :: iii, jjj
 
-   real(dp) :: dx, oneoverdx2, phi_c, nb_sum
+   real(dp) :: dx, oneoverdx2, phi_c, nb_sum, dx2_norm, local_norm2, res_val
    integer  :: ngrid
    integer  :: ind, igrid_mg, idim, inbor
    integer  :: igrid_amr, icell_amr, iskip_amr
-   integer  :: igshift, igrid_nbor_amr, icell_nbor_amr
+   integer  :: igrid_nbor_amr, icell_nbor_amr
    integer  :: j
-   integer, dimension(1:twondim) :: nbor_grids_cache
+   integer, dimension(0:twondim) :: nbor_grids_cache
+   logical  :: compute_norm
 
    real(dp) :: dtwondim = (twondim)
 
    ! Set constants
    dx  = 0.5d0**ilevel
    oneoverdx2 = 1.0d0/(dx*dx)
+   compute_norm = present(norm2)
+   if(compute_norm) then
+      dx2_norm = (0.5d0**ilevel)**ndim
+      local_norm2 = 0.0d0
+   end if
 
    iii(1,1,1:8)=(/1,0,1,0,1,0,1,0/); jjj(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
    iii(1,2,1:8)=(/0,2,0,2,0,2,0,2/); jjj(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
@@ -166,11 +174,11 @@ subroutine cmp_residual_mg_fine(ilevel)
    ngrid=active(ilevel)%ngrid
 
    ! Loop over active grids
-!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr,icell_amr,phi_c,nb_sum, inbor,idim,igshift, igrid_nbor_amr,icell_nbor_amr, j,nbor_grids_cache)
+!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr,icell_amr,phi_c,nb_sum, inbor,idim, igrid_nbor_amr,icell_nbor_amr, j,nbor_grids_cache,res_val) reduction(+:local_norm2)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
-      ! Load pre-computed neighbor grids from nbor_grid_fine
-      do j=1,twondim
+      ! Load pre-computed neighbor grids from nbor_grid_fine (0=self)
+      do j=0,twondim
          nbor_grids_cache(j) = nbor_grid_fine(j, igrid_mg)
       end do
       ! Loop over cells
@@ -185,13 +193,8 @@ subroutine cmp_residual_mg_fine(ilevel)
          if(flag2(icell_amr)/ngridmax==0) then
             do inbor=1,2
                do idim=1,ndim
-                  ! Get neighbor grid
-                  igshift = iii(idim,inbor,ind)
-                  if(igshift==0) then
-                     igrid_nbor_amr = igrid_amr
-                  else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                  end if
+                  ! Get neighbor grid (igshift==0 maps to self via index 0)
+                  igrid_nbor_amr = nbor_grids_cache(iii(idim,inbor,ind))
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
                   nb_sum = nb_sum + phi(icell_nbor_amr)
@@ -204,13 +207,8 @@ subroutine cmp_residual_mg_fine(ilevel)
             end if
             do idim=1,ndim
                do inbor=1,2
-                  ! Get neighbor grid
-                  igshift = iii(idim,inbor,ind)
-                  if(igshift==0) then
-                     igrid_nbor_amr = igrid_amr
-                  else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                  end if
+                  ! Get neighbor grid (igshift==0 maps to self via index 0)
+                  igrid_nbor_amr = nbor_grids_cache(iii(idim,inbor,ind))
 
                   if(igrid_nbor_amr==0) then
                      ! No neighbor cell !
@@ -237,9 +235,16 @@ subroutine cmp_residual_mg_fine(ilevel)
          end if ! END SCAN TEST
 
          ! Store ***MINUS THE RESIDUAL*** in f(:,1), using BC-modified RHS
-         f(icell_amr,1) = -oneoverdx2*( nb_sum - dtwondim*phi_c )+f(icell_amr,2)
+         res_val = -oneoverdx2*( nb_sum - dtwondim*phi_c )+f(icell_amr,2)
+         f(icell_amr,1) = res_val
+         ! Accumulate norm if requested (only for unmasked cells)
+         if(compute_norm .and. f(icell_amr,3)>0.0) then
+            local_norm2 = local_norm2 + res_val**2
+         end if
       end do
    end do
+
+   if(compute_norm) norm2 = dx2_norm * local_norm2
 
 end subroutine cmp_residual_mg_fine
 
@@ -338,18 +343,19 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
    integer, dimension(1:3,1:2,1:8) :: iii, jjj
    integer, dimension(1:3,1:4)     :: ired, iblack
 
-   real(dp) :: dx2, nb_sum, weight
+   real(dp) :: dx2, nb_sum, weight, oneoverdtwondim
    integer  :: ngrid
    integer  :: ind, ind0, igrid_mg, idim, inbor
    integer  :: igrid_amr, icell_amr, iskip_amr
-   integer  :: igshift, igrid_nbor_amr, icell_nbor_amr
+   integer  :: igrid_nbor_amr, icell_nbor_amr
    integer  :: j
-   integer, dimension(1:twondim) :: nbor_grids_cache
+   integer, dimension(0:twondim) :: nbor_grids_cache
 
    real(dp) :: dtwondim = (twondim)
 
    ! Set constants
    dx2  = (0.5d0**ilevel)**2
+   oneoverdtwondim = 1.0d0 / dtwondim
 
    ired  (1,1:4)=(/1,0,0,0/)
    iblack(1,1:4)=(/2,0,0,0/)
@@ -368,11 +374,11 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
    ngrid=active(ilevel)%ngrid
 
    ! Loop over active grids
-!$omp parallel do private(igrid_mg,igrid_amr,ind0,ind,iskip_amr,icell_amr,nb_sum,inbor,idim, igshift, igrid_nbor_amr, icell_nbor_amr, weight, j,nbor_grids_cache)
+!$omp parallel do private(igrid_mg,igrid_amr,ind0,ind,iskip_amr,icell_amr,nb_sum,inbor,idim, igrid_nbor_amr, icell_nbor_amr, weight, j,nbor_grids_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
-      ! Load pre-computed neighbor grids from nbor_grid_fine
-      do j=1,twondim
+      ! Load pre-computed neighbor grids from nbor_grid_fine (0=self)
+      do j=0,twondim
          nbor_grids_cache(j) = nbor_grid_fine(j, igrid_mg)
       end do
       ! Loop over cells, with red/black ordering
@@ -396,21 +402,15 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
             ! and all neighbors are in the AMR+MG trees
             do inbor=1,2
                do idim=1,ndim
-                  ! Get neighbor grid shift
-                  igshift = iii(idim,inbor,ind)
-                  ! Get neighbor grid
-                  if(igshift==0) then
-                     igrid_nbor_amr = igrid_amr
-                  else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                  end if
+                  ! Get neighbor grid (igshift==0 maps to self via index 0)
+                  igrid_nbor_amr = nbor_grids_cache(iii(idim,inbor,ind))
                   icell_nbor_amr = igrid_nbor_amr + &
                       (ncoarse + (jjj(idim,inbor,ind)-1)*ngridmax)
                   nb_sum = nb_sum + phi(icell_nbor_amr)
                end do
             end do
             ! Update the potential, solving for potential on icell_amr
-            phi(icell_amr) = (nb_sum - dx2*f(icell_amr,2)) / dtwondim
+            phi(icell_amr) = (nb_sum - dx2*f(icell_amr,2)) * oneoverdtwondim
          else
             ! Use the finer "solve" Gauss-Seidel near boundaries,
             ! with all necessary checks
@@ -420,15 +420,8 @@ subroutine gauss_seidel_mg_fine(ilevel,redstep)
             weight=0.0d0 ! Central weight for "Solve G-S"
             do inbor=1,2
                do idim=1,ndim
-                  ! Get neighbor grid shift
-                  igshift = iii(idim,inbor,ind)
-
-                  ! Get neighbor grid
-                  if(igshift==0) then
-                     igrid_nbor_amr = igrid_amr
-                  else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                  end if
+                  ! Get neighbor grid (igshift==0 maps to self via index 0)
+                  igrid_nbor_amr = nbor_grids_cache(iii(idim,inbor,ind))
 
                   if(igrid_nbor_amr==0) then
                      ! No neighbor cell,
@@ -784,7 +777,7 @@ subroutine set_scan_flag_fine(ilevel)
    integer, intent(in) :: ilevel
 
    integer :: ind, ngrid, scan_flag
-   integer :: igrid_mg, inbor, idim, igshift
+   integer :: igrid_mg, inbor, idim
    integer :: igrid_amr, igrid_nbor_amr
 
    integer :: iskip_amr, icell_amr, icell_nbor_amr
@@ -800,7 +793,7 @@ subroutine set_scan_flag_fine(ilevel)
 
    ngrid = active(ilevel)%ngrid
 
-!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr, icell_amr, scan_flag, idim, igshift, igrid_nbor_amr,icell_nbor_amr)
+!$omp parallel do private(igrid_mg,igrid_amr,ind,iskip_amr, icell_amr, scan_flag, idim, igrid_nbor_amr,icell_nbor_amr)
    do igrid_mg=1,ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
       ! Loop over cells and set fine SCAN flag
@@ -812,12 +805,8 @@ subroutine set_scan_flag_fine(ilevel)
             scan_flag=0       ! Init flag to 'no scan needed'
             scan_flag_loop: do inbor=1,2
                do idim=1,ndim
-                  igshift = iii(idim,inbor,ind)
-                  if(igshift==0) then
-                     igrid_nbor_amr = igrid_amr
-                  else
-                     igrid_nbor_amr = nbor_grid_fine(igshift, igrid_mg)
-                  end if
+                  ! Get neighbor grid (igshift==0 maps to self via index 0)
+                  igrid_nbor_amr = nbor_grid_fine(iii(idim,inbor,ind), igrid_mg)
 
                   if(igrid_nbor_amr==0) then
                      scan_flag=1
@@ -863,11 +852,12 @@ subroutine precompute_nbor_grid_fine(ilevel)
    ngrid = active(ilevel)%ngrid
 
    if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
-   allocate(nbor_grid_fine(1:twondim, 1:ngrid))
+   allocate(nbor_grid_fine(0:twondim, 1:ngrid))
 
 !$omp parallel do private(igrid_mg, igrid_amr, j)
    do igrid_mg = 1, ngrid
       igrid_amr = active(ilevel)%igrid(igrid_mg)
+      nbor_grid_fine(0, igrid_mg) = igrid_amr  ! Self-reference for igshift==0
       do j = 1, twondim
          nbor_grid_fine(j, igrid_mg) = morton_nbor_grid(igrid_amr, ilevel, j)
       end do

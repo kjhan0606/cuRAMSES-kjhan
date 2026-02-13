@@ -35,6 +35,14 @@ subroutine multigrid_fine(ilevel,icount)
 
    integer, intent(in) :: ilevel,icount
 
+   interface
+      subroutine cmp_residual_mg_fine(ilevel, norm2)
+         use amr_commons, only: dp
+         integer, intent(in) :: ilevel
+         real(dp), intent(out), optional :: norm2
+      end subroutine
+   end interface
+
    integer, parameter  :: MAXITER  = 10
    real(dp), parameter :: SAFE_FACTOR = 0.5
 
@@ -180,15 +188,16 @@ subroutine multigrid_fine(ilevel,icount)
       end do
 
       ! Compute residual and restrict into upper level RHS
-      call cmp_residual_mg_fine(ilevel)
-      ! f(1,1) ghost exchange removed: restriction and norm2 use local cells only
+      ! Fuse residual + norm computation on first iteration
       if(iter==1) then
-         call cmp_residual_norm2_fine(ilevel,i_res_norm2)
+         call cmp_residual_mg_fine(ilevel, i_res_norm2)
 #ifndef WITHOUTMPI
          call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
                  & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
          i_res_norm2=i_res_norm2_tot
 #endif
+      else
+         call cmp_residual_mg_fine(ilevel)
       end if
 
       ! First clear the rhs in coarser reception comms
@@ -222,10 +231,8 @@ subroutine multigrid_fine(ilevel,icount)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
 
-      ! Update fine residual
-      call cmp_residual_mg_fine(ilevel)
-      ! f(1,1) ghost exchange removed: norm2 uses local cells only
-      call cmp_residual_norm2_fine(ilevel,res_norm2)
+      ! Update fine residual (fused with norm computation)
+      call cmp_residual_mg_fine(ilevel, res_norm2)
 #ifndef WITHOUTMPI
       call MPI_ALLREDUCE(res_norm2,res_norm2_tot,1, &
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)

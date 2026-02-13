@@ -27,6 +27,7 @@ subroutine init_refine
 #ifdef RT
      if(rt)call rt_init_flow
 #endif
+     if(myid==1)write(*,*)'DEBUG init_refine: ilevel=',ilevel,' ivar_refine=',ivar_refine,' initfile=',TRIM(initfile(ilevel))
      if(ivar_refine==0)call init_refmap
      call flag
      call refine

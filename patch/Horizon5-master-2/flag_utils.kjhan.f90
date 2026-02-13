@@ -550,9 +550,17 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
   if(poisson)then
 
      if(.not. init) then
-        do i=1,ncell
-           ok(i)=ok(i).or.(cpu_map2(ind_cell(i))==1)
-        end do
+        if(ivar_refine < 0 .and. m_refine(ilevel) > 0.0d0)then
+           ! Zoom-in: use density criterion (quasi-Lagrangian)
+           d_scale=mass_sph/vol_loc
+           do i=1,ncell
+              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine(ilevel)*d_scale)
+           end do
+        else
+           do i=1,ncell
+              ok(i)=ok(i).or.(cpu_map2(ind_cell(i))==1)
+           end do
+        end if
      else
         if(ivar_refine==0)then
            do i=1,ncell
@@ -568,10 +576,16 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
            do i=1,ncell
               ok(i)=.true.
            end do
+        else
+           ! ivar_refine<0, m_refine>0: density-based (zoom-in init)
+           d_scale=mass_sph/vol_loc
+           do i=1,ncell
+              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine(ilevel)*d_scale)
+           end do
         endif
      endif
 
-  else 
+  else
 
      if(hydro)then
         d_scale=mass_sph/vol_loc

@@ -504,28 +504,30 @@ subroutine init_part
               else
                  ! Parallel IC reading with stream access: jump directly to needed planes
                  if(active(ilevel)%ngrid>0)then
+                    init_array=0d0
                     open(10,file=filename,access='stream',form='unformatted',status='old')
                     hdr_bytes = 52_8   ! 4 + 44 + 4 (GRAFIC2 header record)
                     plane_bytes = int(n1(ilevel),8) * int(n2(ilevel),8) * 4_8 + 8_8
-                    do i3=i3_min,i3_max
+                    do i3=max(1,i3_min),min(n3(ilevel),i3_max)
                        byte_pos = hdr_bytes + int(i3-1,8)*plane_bytes + 5_8
                        read(10, pos=byte_pos)((init_plane(i1,i2),i1=1,n1(ilevel)),i2=1,n2(ilevel))
-                       init_array(i1_min:i1_max,i2_min:i2_max,i3) = &
-                            & init_plane(i1_min:i1_max,i2_min:i2_max)
+                       init_array(max(1,i1_min):min(n1(ilevel),i1_max),max(1,i2_min):min(n2(ilevel),i2_max),i3) = &
+                            & init_plane(max(1,i1_min):min(n1(ilevel),i1_max),max(1,i2_min):min(n2(ilevel),i2_max))
                     end do
                     close(10)
                  endif
 
                  if(read_pos) then
                     if(active(ilevel)%ngrid>0)then
+                       init_array_x=0d0
                        open(10,file=filename_x,access='stream',form='unformatted',status='old')
                        hdr_bytes = 52_8
                        plane_bytes = int(n1(ilevel),8) * int(n2(ilevel),8) * 4_8 + 8_8
-                       do i3=i3_min,i3_max
+                       do i3=max(1,i3_min),min(n3(ilevel),i3_max)
                           byte_pos = hdr_bytes + int(i3-1,8)*plane_bytes + 5_8
                           read(10, pos=byte_pos)((init_plane_x(i1,i2),i1=1,n1(ilevel)),i2=1,n2(ilevel))
-                          init_array_x(i1_min:i1_max,i2_min:i2_max,i3) = &
-                               & init_plane_x(i1_min:i1_max,i2_min:i2_max)
+                          init_array_x(max(1,i1_min):min(n1(ilevel),i1_max),max(1,i2_min):min(n2(ilevel),i2_max),i3) = &
+                               & init_plane_x(max(1,i1_min):min(n1(ilevel),i1_max),max(1,i2_min):min(n2(ilevel),i2_max))
                        end do
                        close(10)
                     endif

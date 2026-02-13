@@ -154,7 +154,8 @@ subroutine read_params
   rewind(1)
   read(1,NML=amr_params)
   rewind(1)
-  read(1,NML=lightcone_params)
+  read(1,NML=lightcone_params,END=84)
+84 continue
   rewind(1)
   read(1,NML=spherical_region_params,END=83)
 83 continue

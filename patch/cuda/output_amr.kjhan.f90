@@ -38,10 +38,12 @@ subroutine dump_all
 
      filecmd='mkdir -p '//TRIM(filedir)
      
-     if (.not.withoutmkdir) then 
+     if (.not.withoutmkdir) then
 #ifdef NOSYSTEM
 !jhshin1
-        call PXFMKDIR(TRIM(filedirini),LEN(TRIM(filedirini)),O'775',info)
+        if(IOGROUPSIZEREP>0) then
+           call PXFMKDIR(TRIM(filedirini),LEN(TRIM(filedirini)),O'775',info)
+        endif
         call PXFMKDIR(TRIM(filedir),LEN(TRIM(filedir)),O'775',info)
 !jhshin2
 #else
