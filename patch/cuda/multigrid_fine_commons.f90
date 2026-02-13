@@ -291,10 +291,9 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    integer :: i, icpu, info, icycle, ncycle
 
    if(ifinelevel<=levelmin_mg) then
-      ! Solve 'directly' :
+      ! Solve 'directly' (merged exchange: red+black then exchange once)
       do i=1,2*ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
@@ -309,17 +308,16 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
 
    do icycle=1,ncycle
 
-      ! Pre-smoothing
+      ! Pre-smoothing (merged exchange: red+black then exchange once)
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
 
       ! Compute residual and restrict into upper level RHS
       call cmp_residual_mg_coarse(ifinelevel)
-      call make_virtual_mg_dp(3,ifinelevel)  ! Communicate residual
+      ! Residual exchange removed: restriction uses local cells only
 
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
@@ -344,10 +342,9 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       call interpolate_and_correct_coarse(ifinelevel)
       call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
 
-      ! Post-smoothing
+      ! Post-smoothing (merged exchange: red+black then exchange once)
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
