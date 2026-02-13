@@ -155,7 +155,10 @@ subroutine multigrid_fine(ilevel,icount)
    end if
    if(nboundary>0)levelmin_mg=max(levelmin_mg,2)
 
-   ! Update flag with scan flag
+   ! Pre-compute neighbor grids for fine-level stencil operations
+   call precompute_nbor_grid_fine(ilevel)
+
+   ! Update flag with scan flag (uses nbor_grid_fine if available)
    call set_scan_flag_fine(ilevel)
    do ifine=levelmin_mg,ilevel-1
       call set_scan_flag_coarse(ifine)
@@ -165,14 +168,11 @@ subroutine multigrid_fine(ilevel,icount)
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
 
-   ! Pre-compute neighbor grids for fine-level stencil operations
-   call precompute_nbor_grid_fine(ilevel)
-
    iter = 0
    err = 1.0d0
    main_iteration_loop: do
       iter=iter+1
-      ! Pre-smoothing (merged exchange: red+black then exchange once)
+      ! Pre-smoothing
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
@@ -215,7 +215,7 @@ subroutine multigrid_fine(ilevel,icount)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end if
 
-      ! Post-smoothing (merged exchange: red+black then exchange once)
+      ! Post-smoothing
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
@@ -291,7 +291,7 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    integer :: i, icpu, info, icycle, ncycle
 
    if(ifinelevel<=levelmin_mg) then
-      ! Solve 'directly' (merged exchange: red+black then exchange once)
+      ! Solve 'directly'
       do i=1,2*ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
@@ -308,7 +308,7 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
 
    do icycle=1,ncycle
 
-      ! Pre-smoothing (merged exchange: red+black then exchange once)
+      ! Pre-smoothing
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
@@ -342,7 +342,7 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       call interpolate_and_correct_coarse(ifinelevel)
       call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
 
-      ! Post-smoothing (merged exchange: red+black then exchange once)
+      ! Post-smoothing
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step

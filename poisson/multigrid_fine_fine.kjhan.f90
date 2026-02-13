@@ -816,7 +816,7 @@ subroutine set_scan_flag_fine(ilevel)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                   else
-                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     igrid_nbor_amr = nbor_grid_fine(igshift, igrid_mg)
                   end if
 
                   if(igrid_nbor_amr==0) then
