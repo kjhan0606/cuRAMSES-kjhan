@@ -95,6 +95,218 @@ Based on RAMSES (R.~Teyssier)\\[3pt]
 \part{Code Modifications}
 
 %======================================================
+\chapter{Quick Start Guide}
+\label{ch:quickstart}
+%======================================================
+
+This chapter provides a practical step-by-step guide to building cuRAMSES and running a cosmological zoom-in simulation. For detailed explanations of the underlying algorithms and parameters, refer to the subsequent chapters.
+
+\section{Prerequisites}
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Intel Fortran Compiler} (\texttt{ifx} or \texttt{ifort}) with MPI wrapper (\texttt{mpiifx})
+  \item \textbf{OpenMP} support (enabled via \texttt{-qopenmp})
+  \item \textbf{MUSIC} --- Multi-Scale Initial Conditions generator (\texttt{https://bitbucket.org/ohahn/music})
+  \item \textbf{Python 3} with \texttt{numpy} (for utility scripts such as \texttt{create\_pvar006.py})
+\end{itemize}
+
+\section{Building cuRAMSES}
+
+\begin{codebox}[Build Commands]
+\begin{lstlisting}[style=bash,numbers=none]
+cd bin
+make clean
+make
+\end{lstlisting}
+\end{codebox}
+
+The binary is produced as \texttt{bin/ramses\_final3d}. Key compile-time options (\texttt{-DNVAR=11}, \texttt{-DNPRE=8}, \texttt{-DLONGINT}, etc.) are set in the Makefile. See Chapter~\ref{ch:build} for details on compile-time flags.
+
+\section{Setting Up a Zoom-In Simulation}
+
+The following steps walk through a complete zoom-in cosmological simulation with star formation, targeting ${\sim}1$\,kpc resolution in a 10\,$h^{-1}$\,Mpc box.
+
+\subsection{Step 1: Generate Initial Conditions with MUSIC}
+
+Create a MUSIC configuration file. The key settings for a zoom-in are \texttt{levelmin} (base grid), \texttt{levelmax} (finest zoom level), and \texttt{ref\_extent} (zoom region fraction).
+
+\begin{codebox}[zoomin\_10Mpc.conf (excerpt)]
+\begin{lstlisting}[style=bash,numbers=none]
+[setup]
+boxlength       = 10          # Box size in Mpc/h
+zstart          = 50          # Starting redshift
+levelmin        = 7           # Base grid: 128^3
+levelmax        = 11          # Zoom finest: 2048^3 effective
+ref_center      = 0.5, 0.5, 0.5
+ref_extent      = 0.04, 0.04, 0.04
+baryons         = yes
+use_2LPT        = yes
+
+[cosmology]
+Omega_m         = 0.3111
+Omega_L         = 0.6889
+Omega_b         = 0.04
+H0              = 67.66
+sigma_8         = 0.8102
+nspec           = 0.9665
+transfer        = eisenstein
+
+[output]
+format          = grafic2
+filename        = IC_zoomin
+\end{lstlisting}
+\end{codebox}
+
+Run MUSIC:
+\begin{codebox}[Generate ICs]
+\begin{lstlisting}[style=bash,numbers=none]
+./MUSIC zoomin_10Mpc.conf
+\end{lstlisting}
+\end{codebox}
+
+This produces \texttt{IC\_zoomin/level\_007} through \texttt{IC\_zoomin/level\_011}, each containing GRAFIC2 binary files (\texttt{ic\_deltab}, \texttt{ic\_velcx/y/z}, \texttt{ic\_poscx/y/z}, etc.).
+
+\subsection{Step 2: Create Zoom Geometry Scalar}
+
+The zoom geometry scalar (\texttt{ic\_pvar\_00006}) is a passive variable that marks which cells belong to the zoom region. This is essential when using \texttt{ivar\_refine=11} to control AMR refinement during initialization. See Chapter~\ref{ch:zoomin} for a detailed explanation.
+
+\begin{codebox}[Create pvar006]
+\begin{lstlisting}[style=bash,numbers=none]
+cd test_ksection
+python3 create_pvar006.py
+\end{lstlisting}
+\end{codebox}
+
+Edit the script's \texttt{IC\_DIR} and \texttt{LEVELS} variables to match your IC directory.
+
+\subsection{Step 3: Create Run Directory}
+
+\begin{codebox}[Setup Run Directory]
+\begin{lstlisting}[style=bash,numbers=none]
+mkdir -p run_zoomin
+cd run_zoomin
+ln -s ../IC_zoomin .
+cp ../../bin/ramses_final3d .
+cp ../cosmo_zoomin_physics.nml namelist.nml
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Step 4: Configure Namelist}
+
+The most important parameters to set correctly in the namelist:
+
+\begin{codebox}[Key namelist parameters]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+ordering='ksection'     ! hierarchical domain decomposition
+memory_balance=.true.   ! memory-weighted load balancing
+nremap=5                ! load balance every 5 coarse steps
+/
+
+&AMR_PARAMS
+levelmin=7              ! must match MUSIC levelmin
+levelmax=20             ! maximum AMR level allowed
+ngridtot=200000000      ! total grids (see memory sizing)
+nparttot=200000000      ! total particles
+/
+
+&REFINE_PARAMS
+m_refine=13*8.          ! Lagrangian refinement threshold
+ivar_refine=11          ! use passive scalar for zoom mask
+var_cut_refine=0.01     ! threshold for zoom scalar
+mass_cut_refine=-1      ! set per IC level (see table below)
+/
+
+&INIT_PARAMS
+filetype='grafic'
+initfile(1)='IC_zoomin/level_007'
+initfile(2)='IC_zoomin/level_008'
+initfile(3)='IC_zoomin/level_009'
+initfile(4)='IC_zoomin/level_010'
+initfile(5)='IC_zoomin/level_011'
+/
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Step 5: Run}
+
+\begin{codebox}[Launch Simulation]
+\begin{lstlisting}[style=bash,numbers=none]
+mpirun -np 12 ./ramses_final3d namelist.nml 2>&1 | tee run.log
+\end{lstlisting}
+\end{codebox}
+
+\section{Key Parameters Quick Reference}
+
+\begin{center}
+\begin{longtable}{L{3.8cm} C{2.5cm} L{6.5cm}}
+\toprule
+\textbf{Parameter} & \textbf{Recommended} & \textbf{Purpose} \\
+\midrule
+\endhead
+\texttt{ordering} & \texttt{'ksection'} & Hierarchical domain decomposition \\
+\texttt{memory\_balance} & \texttt{.true.} & Memory-weighted load balancing \\
+\texttt{nremap} & \texttt{5} & Load balance frequency (optimal) \\
+\midrule
+\texttt{ivar\_refine} & \texttt{11} (=NVAR) & Passive scalar index for zoom mask \\
+\texttt{var\_cut\_refine} & \texttt{0.01} & Threshold for zoom scalar refinement \\
+\texttt{mass\_cut\_refine} & see table & Particle mass filter for \texttt{cpu\_map2} \\
+\midrule
+\texttt{ngridtot} & see sizing & Total grids; keep virtual mem $<$ CommitLimit \\
+\texttt{nparttot} & see sizing & Total particles across all ranks \\
+\texttt{levelmin} & IC levelmin & Must match MUSIC base level \\
+\texttt{levelmax} & 14--20 & Maximum AMR refinement \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{mass\_cut\_refine Reference}
+
+The \texttt{mass\_cut\_refine} parameter filters out heavy (background) dark matter particles from the \texttt{cpu\_map2} density computation in \texttt{rho\_fine}. Set it to a value between the zoom-region particle mass and the coarser-level particle mass. Recommended values by IC finest level:
+
+\begin{center}
+\begin{tabular}{cccc}
+\toprule
+\textbf{IC finest level} & \textbf{Zoom $m_{\text{DM}}$} & \textbf{Coarse $m_{\text{DM}}$} & \textbf{mass\_cut\_refine} \\
+\midrule
+9 & $\sim 4.6 \times 10^7$ & $\sim 3.7 \times 10^8$ & $1.0 \times 10^8$ \\
+10 & $\sim 5.8 \times 10^6$ & $\sim 4.6 \times 10^7$ & $1.5 \times 10^7$ \\
+11 & $\sim 7.2 \times 10^5$ & $\sim 5.8 \times 10^6$ & $2.0 \times 10^6$ \\
+12 & $\sim 9.0 \times 10^4$ & $\sim 7.2 \times 10^5$ & $2.5 \times 10^5$ \\
+13 & $\sim 1.1 \times 10^4$ & $\sim 9.0 \times 10^4$ & $3.0 \times 10^4$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{infobox}[Units]
+Masses are in $M_\odot/h$ for a 10\,$h^{-1}$\,Mpc box with Planck 2018 cosmology ($\Omega_m=0.3111$, $\Omega_b=0.04$, $h=0.6766$). The exact values depend on the box size and cosmological parameters.
+\end{infobox}
+
+\section{Troubleshooting}
+
+\begin{center}
+\begin{longtable}{L{4.5cm} L{8.5cm}}
+\toprule
+\textbf{Error / Symptom} & \textbf{Solution} \\
+\midrule
+\endhead
+\texttt{No more free memory} & Increase \texttt{ngridtot} (or \texttt{ngridmax}) in \texttt{\&AMR\_PARAMS}. \\
+\midrule
+\texttt{No more free memory for particles} & Increase \texttt{nparttot} (or \texttt{npartmax}) in \texttt{\&AMR\_PARAMS}. \\
+\midrule
+Process killed (SIGNAL 9, OOM) & \texttt{ngridtot} is too large for available RAM. RAMSES allocates the full array at startup (virtual memory). Check \texttt{CommitLimit} in \texttt{/proc/meminfo} and reduce \texttt{ngridtot} so that total virtual memory stays below it. \\
+\midrule
+Background AMR explosion (entire box refined, memory exhausted) & Verify \texttt{ivar\_refine=11} and that \texttt{ic\_pvar\_00006} files exist in each IC level directory. Without the zoom geometry scalar, \texttt{cpu\_map2} marks the entire domain for refinement. \\
+\midrule
+Refinement does not extend beyond IC levels & Check that \texttt{m\_refine} has enough entries (one per extra level above IC finest) and that \texttt{mass\_cut\_refine} is set correctly to exclude heavy background particles. \\
+\midrule
+Very slow Poisson solver & Increase \texttt{cg\_levelmin} in \texttt{\&POISSON\_PARAMS} to switch from multigrid to conjugate-gradient at the finest levels. Typical: \texttt{cg\_levelmin=14}. \\
+\bottomrule
+\end{longtable}
+\end{center}
+
+
+%======================================================
 \chapter{K-Section Ordering}
 %======================================================
 
@@ -478,6 +690,297 @@ The \texttt{nremap} parameter controls load balancing frequency (every $N$ coars
 The \texttt{writemem\_minmax} subroutine prints per-step min/max memory usage across all MPI ranks.
 
 
+%======================================================
+\chapter{Zoom-In Simulation Setup}
+\label{ch:zoomin}
+%======================================================
+
+\section{Overview}
+
+This chapter describes how to configure and run a cosmological zoom-in simulation with cuRAMSES, targeting ${\sim}1$\,kpc physical resolution within a selected sub-region of a larger cosmological volume. The setup uses:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Box size}: 10\,$h^{-1}$\,Mpc (comoving)
+  \item \textbf{Zoom region}: ${\sim}1.25$\,$h^{-1}$\,Mpc (centered, with padding from MUSIC)
+  \item \textbf{IC levels}: 7--11 (generated by MUSIC), corresponding to base $128^3$ up to effective $2048^3$
+  \item \textbf{AMR levels}: up to 14 (adaptive refinement beyond IC levels)
+  \item \textbf{Physics}: hydrodynamics, gravity, radiative cooling, star formation, and AGN feedback
+\end{itemize}
+
+The main challenge in zoom-in simulations is preventing the AMR machinery from refining the entire box (which would exhaust memory). This is solved by using a passive scalar variable as a \emph{zoom geometry mask} that restricts refinement to the zoom region during initialization.
+
+
+\section{Initial Conditions}
+
+\subsection{MUSIC Configuration}
+
+Initial conditions are generated by the MUSIC code with a multi-level zoom setup. The MUSIC configuration file specifies the base resolution, zoom region, and cosmological parameters.
+
+\begin{codebox}[zoomin\_10Mpc.conf]
+\begin{lstlisting}[style=bash,numbers=none]
+[setup]
+boxlength       = 10          # Box size in Mpc/h
+zstart          = 50          # Starting redshift
+levelmin        = 7           # Base grid: 2^7 = 128^3
+levelmin_TF     = 7           # Transfer function grid
+levelmax        = 11          # Zoom finest: 2^11 = 2048^3 effective
+padding         = 8
+overlap         = 4
+ref_center      = 0.5, 0.5, 0.5
+ref_extent      = 0.04, 0.04, 0.04
+align_top       = yes
+baryons         = yes
+use_2LPT        = yes
+periodic_TF     = yes
+
+[cosmology]
+# Planck 2018 (TT,TE,EE+lowE+lensing)
+Omega_m         = 0.3111
+Omega_L         = 0.6889
+Omega_b         = 0.04
+H0              = 67.66
+sigma_8         = 0.8102
+nspec           = 0.9665
+transfer        = eisenstein
+
+[output]
+format          = grafic2
+filename        = IC_zoomin
+\end{lstlisting}
+\end{codebox}
+
+\subsection{Generated IC Structure}
+
+MUSIC produces a directory hierarchy with one sub-directory per refinement level:
+
+\begin{center}
+\begin{tabular}{cccl}
+\toprule
+\textbf{Level} & \textbf{Grid Size} & \textbf{Resolution} & \textbf{Coverage} \\
+\midrule
+7 & $128^3$ & ${\sim}78$\,kpc/$h$ & Entire box \\
+8 & variable & ${\sim}39$\,kpc/$h$ & Zoom region + padding \\
+9 & variable & ${\sim}20$\,kpc/$h$ & Zoom region + padding \\
+10 & variable & ${\sim}10$\,kpc/$h$ & Zoom region + padding \\
+11 & variable & ${\sim}5$\,kpc/$h$ & Zoom region (finest IC) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Each level directory contains GRAFIC2 binary files: \texttt{ic\_deltab} (baryon overdensity), \texttt{ic\_velcx/y/z} (baryon velocities), \texttt{ic\_velcdx/y/z} (dark matter velocities), \texttt{ic\_poscdx/y/z} (dark matter position offsets), and \texttt{ic\_refmap} (refinement map, level~7 only).
+
+
+\section{Zoom Geometry Scalar (\texttt{ic\_pvar\_00006})}
+
+\begin{important}
+This is the single most critical aspect of the zoom-in setup. Incorrect configuration of the zoom geometry scalar will cause the entire box to be refined, leading to immediate memory exhaustion.
+\end{important}
+
+\subsection{The Problem}
+
+In a standard RAMSES simulation, the \texttt{init\_refmap} subroutine (called when \texttt{ivar\_refine=0}) reads the \texttt{ic\_refmap} file and sets \texttt{cpu\_map2=1} for cells that should be refined. However, the default \texttt{flag\_utils} logic using \texttt{cpu\_map2} applies refinement uniformly wherever the map is set, without distinguishing between zoom and background regions at higher AMR levels. This causes the entire box to be recursively refined, rapidly exhausting memory.
+
+\subsection{The Solution: Passive Scalar Mask}
+
+The solution uses the 6th passive scalar variable (\texttt{ic\_pvar\_00006}) as a zoom geometry indicator. With \texttt{NVAR=11} (5~hydro + 1~metal + 5~passive), the 6th passive scalar corresponds to hydro variable index 11. Setting \texttt{ivar\_refine=11} activates a different refinement criterion in \texttt{flag\_utils}:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+! In flag_utils.kjhan.f90 (during init):
+if(ivar_refine > 0) then
+   do i=1,ncell
+      ok(i) = ok(i) .or. &
+           (uold(ind_cell(i),ivar_refine) / uold(ind_cell(i),1) &
+            > var_cut_refine)
+   end do
+end if
+\end{lstlisting}
+
+This checks whether the passive scalar (divided by density for the conserved-to-primitive conversion) exceeds \texttt{var\_cut\_refine} (typically 0.01). Cells in the zoom region have a scalar value of 1.0 and pass the test; background cells have 0.0 and are skipped.
+
+\subsection{How It Works at Each Stage}
+
+\begin{enumerate}
+  \item \textbf{During initialization} (\texttt{init=.true.}): When \texttt{ivar\_refine} is nonzero, \texttt{init\_refmap} is \emph{not} called (line~31 of \texttt{amr/init\_refine.f90}):
+\begin{lstlisting}[style=fortran,numbers=none]
+if(ivar_refine==0) call init_refmap
+\end{lstlisting}
+  Instead, \texttt{init\_flow} loads the hydro IC (including \texttt{ic\_pvar\_00006}) and the refinement flag is set by the passive scalar criterion: $\texttt{uold}(\text{cell},11)/\texttt{uold}(\text{cell},1) > 0.01$.
+
+  \item \textbf{After initialization} (\texttt{init=.false.}): The refinement criterion switches to the standard density-based Lagrangian criterion (\texttt{m\_refine}). The \texttt{cpu\_map2} array is set by \texttt{rho\_fine} with the \texttt{mass\_cut\_refine} parameter filtering out heavy background dark matter particles, ensuring that only the zoom region (populated by light, high-resolution particles) triggers further refinement.
+\end{enumerate}
+
+\subsection{Creating \texttt{ic\_pvar\_00006}}
+
+The Python script \texttt{test\_ksection/create\_pvar006.py} generates the zoom geometry scalar for each IC level:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Level 7} (base): Reads \texttt{ic\_refmap} from the level~7 directory. Nonzero entries (zoom cells) are set to 1.0; zero entries (background) are set to 0.0. The result is written in GRAFIC2 format as \texttt{ic\_pvar\_00006}.
+  \item \textbf{Levels 8+} (zoom sub-levels): All cells are set to 1.0, since the entire grid at these levels lies within the zoom region by construction.
+\end{itemize}
+
+\begin{codebox}[create\_pvar006.py (core logic)]
+\begin{lstlisting}[style=bash,numbers=none]
+for level in LEVELS:
+    if level == base_level:
+        # Read ic_refmap, convert: nonzero -> 1.0, zero -> 0.0
+        refmap = read_grafic2_data(refmap_file, n1, n2, n3)
+        pvar = np.where(refmap != 0, 1.0, 0.0).astype(np.float32)
+    else:
+        # Zoom sub-levels: all cells = 1.0
+        pvar = np.ones((n3, n2, n1), dtype=np.float32)
+    write_grafic2(pvar_file, header_bytes, pvar)
+\end{lstlisting}
+\end{codebox}
+
+\begin{infobox}[Editing the Script]
+Before running, edit the \texttt{IC\_DIR} variable in \texttt{create\_pvar006.py} to point to your IC directory, and adjust \texttt{LEVELS} to match the levels generated by MUSIC.
+\end{infobox}
+
+\subsection{mass\_cut\_refine}
+
+After initialization, \texttt{rho\_fine} computes the density field used to set \texttt{cpu\_map2} for refinement flagging. The \texttt{mass\_cut\_refine} parameter acts as a mass filter:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+! In rho_fine.f90:
+if(mass_cut_refine > 0.0) then
+   do j = 1, np
+      if(ttt(j) == 0d0) then          ! dark matter only
+         ok(j) = ok(j) .and. mmm(j) < mass_cut_refine
+      endif
+   end do
+endif
+\end{lstlisting}
+
+Particles heavier than \texttt{mass\_cut\_refine} are excluded from the density computation, so only high-resolution zoom particles contribute to the refinement map. Set \texttt{mass\_cut\_refine} to a value between the zoom-region DM particle mass and the next-coarser level's DM particle mass. Refer to the table in Chapter~\ref{ch:quickstart} for recommended values.
+
+
+\section{Memory Considerations}
+
+\subsection{ngridtot Sizing}
+
+RAMSES allocates all grid-related arrays at startup based on \texttt{ngridmax} (per-CPU maximum grids). When \texttt{ngridtot} is specified, \texttt{ngridmax} is computed as \texttt{ngridtot/ncpu}. The critical constraint is:
+
+\begin{important}
+The \textbf{total virtual memory} allocated by all MPI ranks on a node must not exceed the kernel's \texttt{CommitLimit}. Exceeding this causes the OOM killer to terminate the process (SIGNAL~9).
+\end{important}
+
+\subsection{CommitLimit}
+
+The Linux kernel's \texttt{CommitLimit} determines the maximum total virtual memory that can be allocated:
+\[
+\texttt{CommitLimit} = \texttt{RAM} \times \frac{\texttt{overcommit\_ratio}}{100} + \texttt{swap}
+\]
+
+Check the current value:
+\begin{codebox}[Check CommitLimit]
+\begin{lstlisting}[style=bash,numbers=none]
+grep CommitLimit /proc/meminfo
+\end{lstlisting}
+\end{codebox}
+
+On systems without swap (common for HPC nodes), \texttt{CommitLimit = RAM $\times$ overcommit\_ratio/100}. The default \texttt{overcommit\_ratio} is 50, so a 256\,GB node has ${\sim}128$\,GB CommitLimit.
+
+\subsection{Virtual vs. Physical Memory}
+
+RAMSES allocates the full \texttt{ngridmax}-sized arrays at startup, consuming virtual memory immediately. Physical (resident) memory grows as grids are actually created during the simulation. The key arrays that dominate virtual memory usage are:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Array} & \textbf{Size} & \textbf{Per-grid bytes} \\
+\midrule
+\texttt{uold(1:ncell,1:nvar)} & $8 \times 8 \times \text{nvar}$ & $8 \times 8 \times 11 = 704$ \\
+\texttt{unew(1:ncell,1:nvar)} & same & 704 \\
+\texttt{f(1:ncell,1:3)} & $8 \times 8 \times 3$ & 192 \\
+\texttt{son/father/next/prev} & $8 \times 8$ each & $4 \times 64 = 256$ \\
+\texttt{phi/rho} & $8 \times 8$ each & $2 \times 64 = 128$ \\
+\texttt{flag1/flag2/cpu\_map/map2} & $4 \times 8$ each & $4 \times 32 = 128$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{remark}[Rule of Thumb]
+As a rough estimate, each grid (oct = 8 cells) requires ${\sim}2$--$3$\,kB of virtual memory across all arrays. For \texttt{ngridmax}=25\,million (i.e., \texttt{ngridtot}=200M with 8~CPUs), each rank allocates ${\sim}50$--75\,GB of virtual memory. Ensure that \texttt{ncpu $\times$ per\_rank\_virtual $<$ CommitLimit}.
+\end{remark}
+
+
+\section{Poisson MG Fine-Level Optimization}
+
+The multigrid Poisson solver (\texttt{poisson-mg}) is typically the single largest time consumer, accounting for 29--55\% of total runtime. Several optimizations were applied to the fine-level V-cycle in \texttt{poisson/multigrid\_fine\_fine.kjhan.f90}:
+
+\subsection{Precomputed Neighbor Grid Array}
+
+Before entering the V-cycle iteration loop, all 6-directional neighbor grids are precomputed and stored in a contiguous array:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+! nbor_grid_fine(0:twondim, 1:ngrid)
+!   index 0 = self (igrid_amr)
+!   index 1..6 = neighbor grids in -x,+x,-y,+y,-z,+z
+call precompute_nbor_grid_fine(ilevel)
+\end{lstlisting}
+
+This replaces per-cell \texttt{morton\_nbor\_grid} calls inside the Gauss-Seidel and residual loops with simple array lookups, eliminating hash table probes from the innermost loops.
+
+\subsection{Merged Red-Black Gauss-Seidel Exchange}
+
+The standard multigrid implementation performs a ghost zone exchange after each half-sweep of the red-black Gauss-Seidel smoother:
+\begin{center}
+\texttt{red} $\to$ \texttt{exchange} $\to$ \texttt{black} $\to$ \texttt{exchange}
+\end{center}
+
+This was simplified to:
+\begin{center}
+\texttt{red} $\to$ \texttt{black} $\to$ \texttt{exchange}
+\end{center}
+
+The black sweep uses slightly stale ghost values from the red sweep (``chaotic relaxation''), which does not affect multigrid convergence. This reduces the number of MPI exchanges per iteration from 9 to 5 (a 44\% reduction in communication calls).
+
+\subsection{Residual and Norm Single Pass}
+
+The residual computation and the $L^2$ norm reduction were fused into a single pass:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+! Optional norm2 argument: if present, compute
+! both residual and L2 norm in one sweep
+call cmp_residual_mg_fine(ilevel, norm2)
+\end{lstlisting}
+
+This eliminates a redundant loop over all cells when both the residual and its norm are needed (at the first iteration and after post-smoothing).
+
+\subsection{Division to Multiplication}
+
+In the Gauss-Seidel fast path, the division by \texttt{dtwondim} was replaced with multiplication by a precomputed reciprocal:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+real(dp) :: oneoverdtwondim
+oneoverdtwondim = 1.0d0 / dble(twondim)
+! In loop:
+phi = sum_neighbors * oneoverdtwondim   ! was: / dtwondim
+\end{lstlisting}
+
+\subsection{Performance Impact}
+
+These optimizations combined reduce the Poisson solver's share of total runtime:
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Before optimization & 55.1\% of runtime \\
+After optimization & 38.6\% of runtime \\
+MPI exchange reduction & 44\% fewer calls \\
+Iteration count & unchanged (Level~8: 5, Level~9: 4) \\
+Convergence & verified (econs = 3.79E-03 at step~10) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{infobox}[Chaotic Relaxation]
+The merged red-black exchange introduces a minor change in the energy conservation value (3.77E-03 $\to$ 3.79E-03) due to the slightly different relaxation path. This is well within the multigrid tolerance and does not affect physical results. The membal and nomembal tests produce identical values.
+\end{infobox}
+
+
 %------------------------------------------------------
 % PART II: Namelist Reference
 %------------------------------------------------------
@@ -765,6 +1268,7 @@ yieldtablefilename='yield_table.asc'
 
 %======================================================
 \chapter{Build Instructions}
+\label{ch:build}
 %======================================================
 
 \section{Prerequisites}

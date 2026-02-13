@@ -1,0 +1,1631 @@
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+% RAMSES / cuRAMSES-kjhan  --  Namelist Parameter Reference
+%
+% Standalone-compilable:   pdflatex namelist_reference.tex
+% Includable from main.tex:  \input{namelist_reference}
+%   (when included, comment out the \documentclass .. \begin{document}
+%    and \end{document} lines, or wrap them with \ifx\STANDALONE\undefined)
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\documentclass[11pt]{article}
+
+%----------------------------------------------------------------------
+%  Packages
+%----------------------------------------------------------------------
+\usepackage[top=2.5cm,bottom=2.5cm,left=2.8cm,right=2.8cm,a4paper]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{fancyhdr}
+\usepackage{titlesec}
+\usepackage{parskip}
+\usepackage{listings}
+
+%----------------------------------------------------------------------
+%  Colour palette (CAMB-readthedocs inspired)
+%----------------------------------------------------------------------
+\definecolor{apibg}{RGB}{248,249,251}       % light background
+\definecolor{apiborder}{RGB}{200,210,225}    % border
+\definecolor{apiname}{RGB}{0,64,128}         % parameter name
+\definecolor{apitype}{RGB}{100,100,100}      % type annotation
+\definecolor{apidefault}{RGB}{60,130,60}     % default value
+\definecolor{apinote}{RGB}{180,80,40}        % warning / note
+\definecolor{sectioncolor}{RGB}{0,80,160}    % section headings
+\definecolor{codebg}{RGB}{243,245,248}
+\definecolor{codeframe}{RGB}{190,200,215}
+
+%----------------------------------------------------------------------
+%  Hyperref
+%----------------------------------------------------------------------
+\hypersetup{
+  colorlinks=true,
+  linkcolor=sectioncolor,
+  urlcolor=sectioncolor!80!black,
+  citecolor=sectioncolor,
+  pdfauthor={Jaehyun Han},
+  pdftitle={RAMSES Namelist Parameter Reference},
+}
+
+%----------------------------------------------------------------------
+%  Section formatting
+%----------------------------------------------------------------------
+\titleformat{\section}
+  {\Large\bfseries\sffamily\color{sectioncolor}}
+  {\thesection}{1em}{}
+  [\vspace{-0.6em}\textcolor{sectioncolor!40}{\rule{\linewidth}{0.8pt}}]
+
+\titleformat{\subsection}
+  {\large\bfseries\sffamily\color{sectioncolor!80!black}}
+  {\thesubsection}{0.8em}{}
+
+%----------------------------------------------------------------------
+%  Header / footer
+%----------------------------------------------------------------------
+\pagestyle{fancy}
+\fancyhf{}
+\fancyhead[L]{\small\sffamily\textcolor{apitype}{RAMSES Namelist Reference}}
+\fancyhead[R]{\small\sffamily\textcolor{apitype}{\nouppercase{\leftmark}}}
+\fancyfoot[C]{\small\sffamily\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+%----------------------------------------------------------------------
+%  Code listings
+%----------------------------------------------------------------------
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  rulecolor=\color{codeframe},
+  framesep=4pt,
+  xleftmargin=6pt,
+  xrightmargin=6pt,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  showstringspaces=false,
+}
+
+%----------------------------------------------------------------------
+%  Custom environments for parameter documentation.
+%
+%  We use a "paramblock" environment instead of a macro so that
+%  verbatim-like content (lstlisting) can appear inside parameter
+%  descriptions.
+%----------------------------------------------------------------------
+
+% --- parameter header bar (name + type + default) ---
+\newcommand{\paramheader}[3]{%
+  \vspace{0.7em}%
+  \noindent
+  \colorbox{apibg}{%
+    \parbox{\dimexpr\linewidth-2\fboxsep}{%
+      \vspace{4pt}%
+      \hspace{2pt}%
+      {\large\textcolor{apiname}{\texttt{\textbf{#1}}}}%
+      \hfill
+      {\small\textcolor{apitype}{\textsf{#2}}}%
+      \quad
+      {\small\textcolor{apidefault}{\textsf{default:~\texttt{#3}}}}%
+      \vspace{4pt}%
+    }%
+  }%
+  \nopagebreak[4]\par\nopagebreak[4]\vspace{0.25em}%
+}
+
+% --- required parameter header bar (no default) ---
+\newcommand{\paramheaderreq}[2]{%
+  \vspace{0.7em}%
+  \noindent
+  \colorbox{apibg}{%
+    \parbox{\dimexpr\linewidth-2\fboxsep}{%
+      \vspace{4pt}%
+      \hspace{2pt}%
+      {\large\textcolor{apiname}{\texttt{\textbf{#1}}}}%
+      \hfill
+      {\small\textcolor{apitype}{\textsf{#2}}}%
+      \quad
+      {\small\textcolor{apinote}{\textsf{required}}}%
+      \vspace{4pt}%
+    }%
+  }%
+  \nopagebreak[4]\par\nopagebreak[4]\vspace{0.25em}%
+}
+
+%----------------------------------------------------------------------
+%  Note / Warning / Example helpers (usable at top level)
+%----------------------------------------------------------------------
+\newcommand{\apinote}[1]{%
+  \par\vspace{0.3em}%
+  \noindent\textcolor{sectioncolor}{\textsf{\textbf{Note:}}} #1%
+  \par\vspace{0.2em}%
+}
+
+\newcommand{\apiwarning}[1]{%
+  \par\vspace{0.3em}%
+  \noindent\textcolor{apinote}{\textsf{\textbf{Warning:}}} #1%
+  \par\vspace{0.2em}%
+}
+
+%----------------------------------------------------------------------
+%  Cross-reference helper
+%  Usage: \paramref{cosmo}  or  \paramref{memory_balance}
+%  The label name uses the raw form (with literal underscores);
+%  the displayed text uses \texttt with escaped underscores.
+%----------------------------------------------------------------------
+\makeatletter
+\newcommand{\paramref}[1]{%
+  \begingroup
+  \def\tmp{#1}%
+  \hyperref[param:\tmp]{\texttt{\detokenize{#1}}}%
+  \endgroup
+}
+\makeatother
+
+%======================================================================
+\begin{document}
+
+%----------------------------------------------------------------------
+%  Title
+%----------------------------------------------------------------------
+\begin{center}
+{\fontsize{28}{34}\selectfont\sffamily\bfseries
+  \textcolor{sectioncolor}{RAMSES Namelist Parameter Reference}}\\[0.8cm]
+{\large\sffamily cuRAMSES-kjhan -- February 2026}\\[0.3cm]
+{\normalsize\sffamily Jaehyun Han}\\[0.2cm]
+{\small\sffamily\textcolor{apitype}{%
+  Based on RAMSES by Romain Teyssier}}
+\end{center}
+
+\vspace{0.5cm}
+\noindent\textcolor{sectioncolor!40}{\rule{\linewidth}{1pt}}
+
+\vspace{0.6cm}
+\noindent
+This document provides a complete reference for every namelist parameter
+accepted by RAMSES and the cuRAMSES-kjhan extensions.  Parameters are
+grouped by their Fortran namelist block (\texttt{\&RUN\_PARAMS},
+\texttt{\&AMR\_PARAMS}, etc.).  Each entry specifies the parameter name,
+Fortran type, default value, and a detailed description including valid
+ranges and interactions with other parameters.
+
+The namelist file uses standard Fortran namelist syntax.  Each block
+begins with \texttt{\&BLOCK\_NAME} and ends with a single~\texttt{/}.
+
+\vspace{0.4cm}
+\tableofcontents
+\newpage
+
+%======================================================================
+\section{\texttt{\&RUN\_PARAMS} -- Global Run Control}
+\label{sec:run_params}
+%======================================================================
+
+This mandatory block controls the physics modules to activate, restart
+behaviour, domain decomposition strategy, and general simulation
+parameters.
+
+% ------------------------------------------------------------------
+\paramheader{cosmo}{logical}{.false.}
+\label{param:cosmo}
+
+\begin{quote}
+Enable cosmological mode.  When \texttt{.true.}, RAMSES uses comoving
+(super-comoving) coordinates with the expansion factor $a(t)$ as the
+time variable.  The box length is interpreted in $h^{-1}\,$Mpc.
+Friedmann equations are integrated internally.
+
+Enabling this flag also activates expansion-factor--based output
+scheduling (see \paramref{aout} in
+Section~\ref{sec:output_params}).  Cosmological initial conditions
+(GRAFIC2 format) must be provided via \paramref{initfile}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{pic}{logical}{.false.}
+\label{param:pic}
+
+\begin{quote}
+Enable the Particle-In-Cell (PIC) method for collisionless $N$-body
+dynamics (dark matter, stars).  Particles are deposited onto the AMR
+grid using cloud-in-cell (CIC) interpolation, and forces are
+interpolated back to particle positions.
+
+Required for any simulation containing dark matter particles.  Usually
+combined with \paramref{poisson}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{poisson}{logical}{.false.}
+\label{param:poisson}
+
+\begin{quote}
+Enable the self-gravity Poisson solver.  RAMSES uses an adaptive
+multigrid (MG) method on the AMR hierarchy with V-cycles and
+red--black Gauss--Seidel smoothing.  Convergence is controlled by
+\paramref{epsilon} in \texttt{\&POISSON\_PARAMS}.
+
+Must be \texttt{.true.}\ whenever \paramref{pic}\texttt{=.true.}\ or
+whenever gas self-gravity is desired.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{hydro}{logical}{.false.}
+\label{param:hydro}
+
+\begin{quote}
+Enable the hydrodynamics (or MHD) solver.  RAMSES employs a
+second-order MUSCL--Hancock scheme with approximate Riemann solvers
+(see \paramref{scheme}, \paramref{riemann} in
+Section~\ref{sec:hydro_params}).
+
+Set to \texttt{.true.}\ for any simulation involving baryonic gas.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nrestart}{integer}{0}
+\label{param:nrestart}
+
+\begin{quote}
+Restart from checkpoint (output snapshot) number \texttt{nrestart}.
+\begin{itemize}[nosep]
+  \item \texttt{nrestart=0} -- fresh start from initial conditions.
+  \item \texttt{nrestart=}$N$ -- load \texttt{output\_}$N$\texttt{/} and resume.
+\end{itemize}
+The number of MPI processes must match the run that produced the
+checkpoint.  RAMSES reads all AMR, hydro, particle, and gravity data
+from the snapshot directory.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nremap}{integer}{5}
+\label{param:nremap}
+
+\begin{quote}
+Load-balancing frequency: perform domain decomposition every
+\texttt{nremap} coarse time steps.  Recommended value: \textbf{5}
+(balances redistribution overhead against growing load imbalance).
+Set to \texttt{0} to disable load balancing entirely.
+
+\apinote{Benchmarks (200\,M particles, 12~ranks, 10~steps) show that
+\texttt{nremap=5} reduces total runtime by 18\%\ compared to
+\texttt{nremap=1}, with load-balance overhead at 6.3\%\ of wall time.
+Larger values (e.g.\ 10) save overhead but allow imbalance to grow.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nsubcycle}{integer array}{1,1,2}
+\label{param:nsubcycle}
+
+\begin{quote}
+Time sub-cycling factors per AMR level.  The $i$-th entry gives the
+number of fine time steps per coarse step at level
+$\texttt{levelmin}+i-1$.  Typical usage:
+\begin{itemize}[nosep]
+  \item \texttt{1} for coarse levels (no sub-cycling).
+  \item \texttt{2} for fine levels (halve the time step at each
+        finer level).
+\end{itemize}
+The array has up to \texttt{levelmax\,--\,levelmin+1} entries.  Any
+unspecified trailing entries default to~\texttt{1}.
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\begin{lstlisting}
+nsubcycle = 1, 1, 1, 2, 2, 2, 2
+\end{lstlisting}
+
+% ------------------------------------------------------------------
+\paramheader{ncontrol}{integer}{1}
+\label{param:ncontrol}
+
+\begin{quote}
+Print control output (energy diagnostics, timing) every
+\texttt{ncontrol} coarse time steps to standard output.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nstepmax}{integer}{1000000}
+\label{param:nstepmax}
+
+\begin{quote}
+Maximum number of coarse time steps.  The simulation stops when
+\texttt{nstep} reaches this value, even if the final output time has
+not been reached.  Useful for short test runs.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{ordering}{character}{`hilbert'}
+\label{param:ordering}
+
+\begin{quote}
+Domain decomposition ordering strategy.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`hilbert'] Hilbert space-filling curve.  Standard choice for
+    moderate core counts ($\lesssim 1000$).
+  \item[`ksection'] K-section tree-based decomposition.  Provides
+    $O(k)$~message scaling (where $k$ is the branching factor) for
+    large core counts.  Enables hierarchical MPI exchanges and
+    memory-based load balancing (see \paramref{memory_balance}).
+\end{description}
+When \texttt{ordering='ksection'}, the communication pattern in ghost
+zone exchanges, multigrid solvers, and \texttt{build\_comm} all switch
+to ksection tree routing automatically.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{memory\_balance}{logical}{.false.}
+\label{param:memory_balance}
+
+\begin{quote}
+Enable memory-based load balancing.  When \texttt{.true.}, the
+bisection histogram weights each cell by its memory footprint (grid
+metadata + attached particles) instead of uniform cell count.
+
+\textbf{Requires} \paramref{ordering}\texttt{='ksection'}.
+
+The cell cost function is:
+\[
+  C_{\text{cell}} = \frac{\texttt{mem\_weight\_grid}}{\texttt{twotondim}}
+                + n_{\text{part}} \times
+                  \frac{\texttt{mem\_weight\_part}}{\texttt{twotondim}}
+\]
+where $n_{\text{part}}$ is the number of particles attached to the parent
+grid.  The weight parameters \texttt{mem\_weight\_grid} (default~270) and
+\texttt{mem\_weight\_part} (default~12) are set in the same namelist block.
+
+\apinote{All histogram variables (\texttt{bisec\_hist},
+\texttt{bisec\_cpu\_load}, \texttt{cell\_cost}) use 64-bit integers
+(\texttt{integer(i8b)}) and \texttt{MPI\_INTEGER8} to avoid overflow at
+high particle counts.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sink}{logical}{.false.}
+\label{param:sink}
+
+\begin{quote}
+Enable sink particle formation and evolution.  Sink particles represent
+compact objects (e.g.\ black holes, protostars) that accrete gas from
+their surroundings.  When active, cells exceeding a density threshold
+at \texttt{levelmax} can spawn sink particles.
+
+See also \paramref{sink_AGN}, \paramref{bondi}, \paramref{Mseed} in
+Section~\ref{sec:physics_params}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sinkprops}{logical}{.false.}
+\label{param:sinkprops}
+
+\begin{quote}
+Output detailed sink particle properties (mass, position, velocity,
+accretion rate, spin) to dedicated files at each snapshot.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{lightcone}{logical}{.false.}
+\label{param:lightcone}
+
+\begin{quote}
+Enable lightcone output mode.  When \texttt{.true.}, particles and/or
+cells crossing the observer's past lightcone are written to special
+output files during the simulation.  See
+Section~\ref{sec:lightcone_params} for additional parameters.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{verbose}{logical}{.false.}
+\label{param:verbose}
+
+\begin{quote}
+Enable verbose output during initialization and evolution.  Prints
+additional diagnostics (grid counts, memory usage, load balance
+statistics) to standard output at each coarse step.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&AMR\_PARAMS} -- Adaptive Mesh Refinement}
+\label{sec:amr_params}
+%======================================================================
+
+This mandatory block controls the AMR grid hierarchy, memory allocation
+sizes, and the simulation box geometry.
+
+% ------------------------------------------------------------------
+\paramheaderreq{levelmin}{integer}
+\label{param:levelmin}
+
+\begin{quote}
+Minimum (base) AMR level.  The base grid has $2^{\texttt{levelmin}}$
+cells per dimension.
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\texttt{levelmin=7} produces a $128^3$ base grid.
+\texttt{levelmin=9} produces a $512^3$ base grid.
+
+This level is fully covered -- every cell at \texttt{levelmin} exists
+on exactly one MPI process.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheaderreq{levelmax}{integer}
+\label{param:levelmax}
+
+\begin{quote}
+Maximum AMR level.  Determines the finest attainable resolution:
+\[
+  \Delta x_{\min} = \frac{L_{\text{box}}}{2^{\texttt{levelmax}}}
+\]
+For cosmological zoom-in simulations, this controls the physical
+resolution at $z=0$.  The number of refinement levels beyond
+\texttt{levelmin} is \texttt{levelmax\,--\,levelmin}.
+
+Refinement criteria (\paramref{m_refine}, \paramref{ivar_refine})
+determine which cells actually refine up to this level.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nexpand}{integer array}{1}
+\label{param:nexpand}
+
+\begin{quote}
+Number of buffer (guard) cell layers per level to ensure smooth
+transitions between refinement levels.  The $i$-th entry applies to
+level $\texttt{levelmin}+i-1$.  Typical value: \texttt{1} for all
+levels.
+
+Larger values produce wider buffer zones around refined patches,
+improving solution quality at the cost of more cells.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheaderreq{ngridtot}{integer(i8b)}
+\label{param:ngridtot}
+
+\begin{quote}
+Total number of AMR grids (octs) allocated across all MPI processes.
+Each process receives $\texttt{ngridmax} = \texttt{ngridtot} /
+\texttt{ncpu}$ grids.  Each grid (oct) contains $2^{\texttt{ndim}}$
+cells (8~cells in 3D).
+
+\apiwarning{RAMSES allocates full arrays at startup based on
+\texttt{ngridmax}.  The virtual memory footprint is approximately
+$\texttt{ngridmax} \times 20\;\text{bytes} \times \texttt{nvar}$.
+This must not exceed the system's \texttt{CommitLimit} (typically
+RAM~$\times$~\texttt{overcommit\_ratio}/100).}
+
+\textbf{Rule of thumb:} For $N$~processes on a node with $M$\,GB of
+RAM,
+\[
+  \texttt{ngridtot} < \frac{M \times 0.5}{20 \times \texttt{nvar}}
+  \times N
+\]
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheaderreq{nparttot}{integer(i8b)}
+\label{param:nparttot}
+
+\begin{quote}
+Total particle allocation across all MPI processes.  Each process gets
+$\texttt{npartmax} = \texttt{nparttot} / \texttt{ncpu}$.  Should be
+at least $2\times$ the total number of DM + star particles expected
+during the simulation (to accommodate load imbalance and new star
+particle creation).
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\begin{lstlisting}
+! 100M DM particles, allow for stars
+nparttot = 300000000
+\end{lstlisting}
+
+% ------------------------------------------------------------------
+\paramheader{boxlen}{real(dp)}{1.0}
+\label{param:boxlen}
+
+\begin{quote}
+Box length in code units.  For cosmological runs, the box size is
+typically read from the IC header (in $h^{-1}\,$Mpc) and this
+parameter is overridden.  For non-cosmological (idealised) setups,
+\texttt{boxlen} defines the physical domain extent.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&OUTPUT\_PARAMS} -- Snapshot Output}
+\label{sec:output_params}
+%======================================================================
+
+Controls when and how simulation snapshots are written to disk.
+
+% ------------------------------------------------------------------
+\paramheader{noutput}{integer}{1}
+\label{param:noutput}
+
+\begin{quote}
+Number of output snapshots requested.  The corresponding times or
+expansion factors must be listed in \paramref{tout} (non-cosmological)
+or \paramref{aout} (cosmological).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{aout}{real(dp) array}{---}
+\label{param:aout}
+
+\begin{quote}
+Scale factors at which to write output snapshots (cosmological mode
+only, i.e.\ when \paramref{cosmo}\texttt{=.true.}).  The array must
+contain \paramref{noutput} entries, in ascending order.
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\begin{lstlisting}
+noutput = 4
+aout    = 0.1, 0.2, 0.5, 1.0
+! Outputs at z = 9, 4, 1, 0
+\end{lstlisting}
+
+% ------------------------------------------------------------------
+\paramheader{tout}{real(dp) array}{---}
+\label{param:tout}
+
+\begin{quote}
+Output times in code units (non-cosmological mode).  The array must
+contain \paramref{noutput} entries, in ascending order.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{foutput}{integer}{1000000}
+\label{param:foutput}
+
+\begin{quote}
+Write an output snapshot every \texttt{foutput} coarse time steps,
+regardless of the \paramref{aout}/\paramref{tout} schedule.  Useful
+for periodic checkpointing in long runs.  Set to a very large number
+to effectively disable.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&INIT\_PARAMS} -- Initial Conditions}
+\label{sec:init_params}
+%======================================================================
+
+Specifies the format and location of initial condition files.
+
+% ------------------------------------------------------------------
+\paramheader{filetype}{character}{`grafic'}
+\label{param:filetype}
+
+\begin{quote}
+Initial condition file format.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`grafic'] GRAFIC2 binary format (Bertschinger 2001).  Each
+    level's IC directory contains binary files for density
+    perturbations, velocities, and (optionally) particle
+    displacements.
+  \item[`ascii'] Text-based initial conditions (for simple test
+    problems).
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{initfile}{character array}{---}
+\label{param:initfile}
+
+\begin{quote}
+Paths to IC directories, one per AMR level.
+\texttt{initfile(1)} corresponds to \paramref{levelmin},
+\texttt{initfile(2)} to $\texttt{levelmin}+1$, and so on.
+
+Each directory must contain the following binary files:
+\begin{itemize}[nosep]
+  \item \texttt{ic\_deltab} -- baryon density perturbation field
+  \item \texttt{ic\_velbx}, \texttt{ic\_velby}, \texttt{ic\_velbz}
+        -- baryon velocity fields
+  \item \texttt{ic\_velcx}, \texttt{ic\_velcy}, \texttt{ic\_velcz}
+        -- dark matter (CDM) velocity fields
+  \item \texttt{ic\_poscx}, \texttt{ic\_poscy}, \texttt{ic\_poscz}
+        -- dark matter displacement fields (optional, for multi-level
+        zoom-in)
+  \item \texttt{ic\_tempb} -- baryon temperature perturbation
+        (optional)
+  \item \texttt{ic\_pvar\_00001}, \ldots\ -- passive scalar fields
+        (optional, for zoom-in refinement tagging;
+        see \paramref{ivar_refine})
+  \item \texttt{ic\_refmap} -- refinement map (optional)
+\end{itemize}
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\begin{lstlisting}
+initfile = '/data/IC/level_07'
+         , '/data/IC/level_08'
+         , '/data/IC/level_09'
+\end{lstlisting}
+
+
+%======================================================================
+\section{\texttt{\&REFINE\_PARAMS} -- Refinement Criteria}
+\label{sec:refine_params}
+%======================================================================
+
+Controls which cells are refined in the AMR hierarchy.  These
+parameters are \textbf{critical for zoom-in simulations}, where
+background regions must remain coarse while the zoom region refines
+to high resolution.
+
+% ------------------------------------------------------------------
+\paramheader{m\_refine}{real(dp) array}{$-1$}
+\label{param:m_refine}
+
+\begin{quote}
+Quasi-Lagrangian mass threshold per level.  The $i$-th entry applies
+to level $\texttt{levelmin}+i-1$.  A cell is flagged for refinement
+when the effective mass indicator $\phi \geq \texttt{m\_refine}(i)$.
+
+Typical value: \textbf{8.0} for all levels (refine when the
+equivalent of $\geq 8$ particles occupies a cell).  Provide one
+entry for each level from \texttt{levelmin} to \texttt{levelmax}.
+
+Interacts with \paramref{ivar_refine} and
+\paramref{mass_cut_refine} to determine which particles contribute
+to the density used for the refinement decision.
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Example:}}}
+\begin{lstlisting}
+! 6 levels of refinement (levelmin=7, levelmax=13)
+m_refine = 8., 8., 8., 8., 8., 8., 8.
+\end{lstlisting}
+
+% ------------------------------------------------------------------
+\paramheader{ivar\_refine}{integer}{$-1$}
+\label{param:ivar_refine}
+
+\begin{quote}
+Variable index controlling the refinement criterion in
+\texttt{poisson\_refine}.  This parameter fundamentally changes how
+refinement regions are selected:
+\begin{description}[style=nextline,leftmargin=1em]
+  \item[\texttt{ivar\_refine = 0}:]
+    Use \texttt{cpu\_map2} for refinement control.  During
+    initialization, \texttt{cpu\_map2} is set by
+    \texttt{init\_refmap} from \texttt{ic\_refmap} (if present);
+    during evolution, it is updated by \texttt{rho\_fine} based on
+    the local density field.  This is the standard quasi-Lagrangian
+    approach.
+
+    \apiwarning{In zoom-in simulations, this can cause uncontrolled
+    AMR expansion into background regions if \texttt{cpu\_map2} is
+    not properly restricted by \paramref{mass_cut_refine}.}
+
+  \item[\texttt{ivar\_refine > 0} (e.g.\ 11):]
+    During initialization, use passive scalar criterion:
+    \texttt{uold(cell, ivar\_refine) / uold(cell, 1)} $>$
+    \paramref{var_cut_refine}.
+
+    \textbf{Recommended for zoom-in:} set
+    \texttt{ivar\_refine=NVAR} (the last hydro variable), and create
+    \texttt{ic\_pvar\_NNNNN} files with value 1.0 inside the zoom
+    region and 0.0 in the background.  After initialization,
+    \texttt{cpu\_map2} (set by \texttt{rho\_fine} with
+    \paramref{mass_cut_refine} filtering) takes over.
+
+  \item[\texttt{ivar\_refine < 0} (default):]
+    Pure density-based refinement at both initialization and runtime.
+    A cell is refined when
+    \texttt{uold(cell, 1)} $\geq$ \texttt{m\_refine}
+    $\times\; m_{\text{sph}} / V_{\text{cell}}$.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{var\_cut\_refine}{real(dp)}{$-1$}
+\label{param:var_cut_refine}
+
+\begin{quote}
+Threshold for passive-scalar-based refinement when
+\paramref{ivar_refine} $> 0$.  A cell is refined only if
+\[
+  \frac{\texttt{uold}(\text{cell},\;\texttt{ivar\_refine})}%
+       {\texttt{uold}(\text{cell},\;1)}
+  > \texttt{var\_cut\_refine}
+\]
+Typical value: \textbf{0.01} for zoom geometry tagging (the passive
+scalar is 1.0 inside the zoom region, 0.0 outside).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mass\_cut\_refine}{real(dp)}{$-1$}
+\label{param:mass_cut_refine}
+
+\begin{quote}
+Particle mass threshold for quasi-Lagrangian refinement.  In
+\texttt{rho\_fine}, dark matter particles with mass
+$\geq \texttt{mass\_cut\_refine}$ are \emph{excluded} from the
+density computation that drives cell refinement.  This prevents
+heavy (coarse-level) background particles from triggering spurious
+refinement.
+
+Set this to the DM particle mass at the finest IC level.  Reference
+values for a $100\,h^{-1}\,$Mpc box
+($\Omega_m = 0.3$, $h = 0.68$):
+
+\begin{center}
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{IC finest level} & \textbf{mass\_cut\_refine} \\
+\midrule
+8  & \texttt{1.19209e-07} \\
+9  & \texttt{1.49012e-08} \\
+10 & \texttt{1.86265e-09} \\
+11 & \texttt{2.32831e-10} \\
+12 & \texttt{2.91038e-11} \\
+13 & \texttt{3.63798e-12} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\apinote{This parameter interacts with \paramref{ivar_refine} and
+\paramref{m_refine}.  All three should be set consistently for
+zoom-in simulations.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{interpol\_var}{integer}{0}
+\label{param:interpol_var}
+
+\begin{quote}
+Interpolation variable type used when prolongating (interpolating)
+data from coarse to fine grids.
+\begin{description}[style=nextline,leftmargin=1.5cm,font=\ttfamily]
+  \item[0] Conservative variables ($\rho$, $\rho v$, $E$).
+  \item[1] Primitive variables ($\rho$, $v$, $P$).
+        \textbf{Recommended} for cosmological simulations to avoid
+        interpolation artefacts in low-density regions.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{interpol\_type}{integer}{1}
+\label{param:interpol_type}
+
+\begin{quote}
+Interpolation slope limiter for prolongation.
+\begin{description}[style=nextline,leftmargin=1.5cm,font=\ttfamily]
+  \item[0] MinMod limiter -- more diffusive, more robust.
+  \item[1] MonCen (monotonised central) limiter -- less diffusive.
+        \textbf{Recommended}.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sink\_refine}{logical}{.false.}
+\label{param:sink_refine}
+
+\begin{quote}
+Force maximum refinement around sink particles.  When \texttt{.true.},
+a contribution equal to \paramref{m_refine} is added to the
+refinement indicator $\phi$ for every cell containing a sink particle,
+ensuring refinement up to \paramref{levelmax}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{jeans\_ncells}{real(dp)}{$-1$}
+\label{param:jeans_ncells}
+
+\begin{quote}
+Jeans refinement criterion.  If $> 0$, cells are refined to resolve
+the local Jeans length by at least this many cells:
+\[
+  \Delta x < \frac{\lambda_J}{\texttt{jeans\_ncells}}
+\]
+Enabling this also activates a polytropic equation-of-state floor to
+prevent artificial fragmentation (Truelove criterion).  Typical
+value: \textbf{4} (minimum of 4 cells per Jeans length).
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&HYDRO\_PARAMS} -- Hydrodynamics Solver}
+\label{sec:hydro_params}
+%======================================================================
+
+Controls the gas dynamics solver configuration.
+
+% ------------------------------------------------------------------
+\paramheader{gamma}{real(dp)}{$5/3$}
+\label{param:gamma}
+
+\begin{quote}
+Adiabatic index $\gamma$ of the ideal gas equation of state,
+$P = (\gamma - 1) \rho e$.
+Standard value: $5/3$ for a monatomic ideal gas.  Use $7/5$ for
+diatomic gas or $4/3$ for radiation-dominated flow.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{courant\_factor}{real(dp)}{0.8}
+\label{param:courant_factor}
+
+\begin{quote}
+Courant--Friedrichs--Lewy (CFL) number for time step control.  The
+time step at each level is
+$\Delta t = \texttt{courant\_factor} \times \Delta x / v_{\max}$.
+Typical: \textbf{0.8}.  Lower values increase stability at the cost
+of more time steps.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{scheme}{character}{`muscl'}
+\label{param:scheme}
+
+\begin{quote}
+Hydrodynamics integration scheme.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`muscl'] MUSCL--Hancock (Monotonic Upstream-centred Scheme
+    for Conservation Laws), second-order in space and time.  This is
+    the only production scheme in RAMSES.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{slope\_type}{integer}{1}
+\label{param:slope_type}
+
+\begin{quote}
+Slope limiter for MUSCL piecewise-linear reconstruction.
+\begin{description}[style=nextline,leftmargin=1.5cm,font=\ttfamily]
+  \item[1] MinMod -- most robust, more diffusive.
+  \item[2] MonCen -- monotonised central, less diffusive.
+        \textbf{Recommended} for production runs.
+  \item[3] Unlimited -- no limiting (unstable; testing only).
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{riemann}{character}{`llf'}
+\label{param:riemann}
+
+\begin{quote}
+Approximate Riemann solver for inter-cell flux computation.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`llf'] Local Lax--Friedrichs (Rusanov).  Most diffusive but
+    unconditionally stable.  Good default.
+  \item[`hll'] Harten--Lax--van Leer.  Two-wave solver.
+  \item[`hllc'] HLL with Contact restoration.  Three-wave solver,
+    most accurate for contact discontinuities.
+    \textbf{Recommended for cosmological simulations}.
+  \item[`exact'] Exact Riemann solver (expensive; primarily for
+    validation).
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{pressure\_fix}{logical}{.false.}
+\label{param:pressure_fix}
+
+\begin{quote}
+Enable pressure floor to prevent negative pressures in strong shocks
+or highly supersonic flows.  When the internal energy becomes negative,
+RAMSES falls back to a pressure estimate from the total energy.
+
+\textbf{Recommended:} \texttt{.true.}\ for cosmological simulations.
+See also \paramref{beta_fix}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{beta\_fix}{real(dp)}{0.0}
+\label{param:beta_fix}
+
+\begin{quote}
+Pressure fix parameter.  Controls the magnitude of the pressure floor:
+$P_{\text{floor}} = \texttt{beta\_fix} \times \rho v^2 / 2$.
+Typical value: \textbf{0.5} when
+\paramref{pressure_fix}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{isothermal}{logical}{.false.}
+\label{param:isothermal}
+
+\begin{quote}
+Isothermal mode.  When \texttt{.true.}, the energy equation is not
+solved and the gas temperature remains constant.  Reduces the number
+of hydro variables by one.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&POISSON\_PARAMS} -- Gravity Solver}
+\label{sec:poisson_params}
+%======================================================================
+
+Controls the multigrid Poisson solver for self-gravity.
+
+% ------------------------------------------------------------------
+\paramheader{epsilon}{real(dp)}{$10^{-4}$}
+\label{param:epsilon}
+
+\begin{quote}
+Multigrid convergence criterion.  The V-cycle iteration at each level
+stops when the residual norm satisfies
+$\|r\| / \|r_0\| < \texttt{epsilon}$.
+Typical value for cosmological runs: $10^{-5}$ to $10^{-4}$.
+Tighter values improve force accuracy but increase iteration count.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{gravity\_type}{integer}{0}
+\label{param:gravity_type}
+
+\begin{quote}
+Gravity model selection.
+\begin{description}[style=nextline,leftmargin=1.5cm,font=\ttfamily]
+  \item[0] Self-gravity (solve Poisson equation on the AMR grid).
+  \item[>0] Analytical gravitational potential (e.g.\ for test
+    problems with known solutions).  The integer value selects the
+    specific analytical profile.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{cg\_levelmin}{integer}{999}
+\label{param:cg_levelmin}
+
+\begin{quote}
+Minimum level at which the conjugate gradient (CG) fallback solver
+activates.  When the multigrid solver stalls at high AMR levels, CG
+provides guaranteed convergence.  Set to \paramref{levelmax} for
+best convergence behaviour.
+
+Typical: \texttt{cg\_levelmin = levelmax}.  The default (999) means
+CG is effectively disabled unless \texttt{levelmax} is absurdly
+large.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{cic\_levelmax}{integer}{0}
+\label{param:cic_levelmax}
+
+\begin{quote}
+Maximum level for cloud-in-cell (CIC) particle mass deposition.
+\begin{itemize}[nosep]
+  \item \texttt{0} -- deposit particles at all levels (standard).
+  \item $N > 0$ -- deposit particles only up to level $N$; finer
+    levels inherit the coarse density by prolongation.
+\end{itemize}
+Rarely modified.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&PHYSICS\_PARAMS} -- Sub-grid Physics}
+\label{sec:physics_params}
+%======================================================================
+
+Controls cooling, star formation, stellar/AGN feedback, and
+cosmological parameters.  This block is optional; omit it entirely
+for adiabatic (non-radiative) simulations.
+
+%----------------------------------------------------------------------
+\subsection{Cooling and UV Background}
+%----------------------------------------------------------------------
+
+\paramheader{cooling}{logical}{.false.}
+\label{param:cooling}
+
+\begin{quote}
+Enable radiative cooling with a metal-dependent cooling function.
+When \texttt{.true.}, RAMSES integrates the cooling/heating rate
+at each time step using tabulated cooling curves.  Requires
+\paramref{hydro}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{haardt\_madau}{logical}{.false.}
+\label{param:haardt_madau}
+
+\begin{quote}
+Enable the Haardt \& Madau (2012) ultraviolet background model for
+cosmic reionization.  Provides a redshift-dependent photo-heating
+and photo-ionization rate.  Used together with \paramref{cooling}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{z\_reion}{real(dp)}{8.5}
+\label{param:z_reion}
+
+\begin{quote}
+Reionization redshift.  Hydrogen reionization heating is applied
+instantaneously at this redshift.  Typical range: 6--10, depending
+on the reionization model.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{z\_ave}{real(dp)}{0.0}
+\label{param:z_ave}
+
+\begin{quote}
+Initial mean metallicity of the gas in solar units ($Z_\odot$).
+Applied uniformly at initialization.  Use \texttt{0.0} for
+primordial composition.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{delayed\_cooling}{logical}{.false.}
+\label{param:delayed_cooling}
+
+\begin{quote}
+Delay radiative cooling in supernova-heated gas to prevent
+overcooling.  When a cell receives SN energy, cooling is suppressed
+for a duration related to the Sedov--Taylor phase.  Improves the
+effectiveness of stellar feedback in regulating star formation.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{tol}{real(dp)}{$10^{-3}$}
+\label{param:tol}
+
+\begin{quote}
+Tolerance for the implicit cooling solver.  The Newton--Raphson
+iteration converges when the relative temperature change
+$|\Delta T / T| < \texttt{tol}$.
+\end{quote}
+
+%----------------------------------------------------------------------
+\subsection{Star Formation}
+%----------------------------------------------------------------------
+
+\paramheader{n\_star}{real(dp)}{0.1}
+\label{param:n_star}
+
+\begin{quote}
+Star formation hydrogen number density threshold in
+$\text{H}\;\text{cm}^{-3}$.  Only gas denser than this value is
+eligible for star formation.  Typical range: 0.1--10.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{eps\_star}{real(dp)}{0.0}
+\label{param:eps_star}
+
+\begin{quote}
+Star formation efficiency per free-fall time $\epsilon_{\text{ff}}$.
+The star formation rate density is
+$\dot{\rho}_\star = \epsilon_{\text{ff}} \, \rho_{\text{gas}} /
+t_{\text{ff}}$.
+Typical value: \textbf{0.01--0.02} (1--2\%\ per free-fall time).
+Set to \texttt{0.0} to disable star formation entirely.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{del\_star}{real(dp)}{200}
+\label{param:del_star}
+
+\begin{quote}
+Overdensity threshold for star formation (in units of the cosmic
+mean density).  Gas must exceed $\delta > \texttt{del\_star}$ in
+addition to the density threshold \paramref{n_star}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{m\_star}{real(dp)}{$-1$}
+\label{param:m_star}
+
+\begin{quote}
+Minimum stellar particle mass in code units.  When a star-forming
+cell would produce a particle below this mass, the event is
+stochastically deferred to the next time step.
+\begin{itemize}[nosep]
+  \item $< 0$: use the cell gas mass (no minimum).
+  \item $> 0$: explicit minimum mass.
+\end{itemize}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{T2\_star}{real(dp)}{0}
+\label{param:T2_star}
+
+\begin{quote}
+ISM polytropic equation-of-state temperature floor in Kelvin.  Gas
+above the star-formation density threshold \paramref{n_star} follows
+a polytropic relation:
+\[
+  T = T_{2,\star} \left(\frac{n}{n_\star}\right)^{\gamma_\star - 1}
+\]
+where $\gamma_\star$ is \paramref{g_star}.  This prevents artificial
+fragmentation below the resolution limit (Jeans mass floor).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{g\_star}{real(dp)}{1.6}
+\label{param:g_star}
+
+\begin{quote}
+Polytropic index $\gamma_\star$ for the ISM equation of state (see
+\paramref{T2_star}).  Typical value: \textbf{1.6} (stiff polytrope)
+or \textbf{5/3} (adiabatic floor).
+\end{quote}
+
+%----------------------------------------------------------------------
+\subsection{Stellar Feedback}
+%----------------------------------------------------------------------
+
+\paramheader{f\_w}{real(dp)}{0}
+\label{param:f_w}
+
+\begin{quote}
+Mass loading factor for supernova-driven winds.  The wind mass flux
+is $\dot{M}_w = \texttt{f\_w} \times \dot{M}_\star$.  Set to
+\texttt{0} to disable winds.  Typical range: 1--5.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{f\_ek}{real(dp)}{1.0}
+\label{param:f_ek}
+
+\begin{quote}
+Kinetic energy fraction of supernova feedback.  Controls the
+partition between kinetic (\texttt{f\_ek}) and thermal
+($1 - \texttt{f\_ek}$) energy injection.  \texttt{f\_ek=1} is
+purely kinetic feedback; \texttt{f\_ek=0} is purely thermal.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{eps\_sn1}{real(dp)}{0}
+\label{param:eps_sn1}
+
+\begin{quote}
+Type Ia supernova energy per event in units of $10^{51}\,$erg.
+Set to \texttt{0} to disable Type Ia SN feedback.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{eps\_sn2}{real(dp)}{0}
+\label{param:eps_sn2}
+
+\begin{quote}
+Type II supernova energy per event in units of $10^{51}\,$erg.
+Set to \texttt{0} to disable Type II SN feedback.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{yieldtablefilename}{character}{---}
+\label{param:yieldtablefilename}
+
+\begin{quote}
+Path to the chemical yield table file for metal enrichment
+calculations.  Required when metal-dependent cooling or chemical
+evolution tracking is enabled.
+\end{quote}
+
+%----------------------------------------------------------------------
+\subsection{Cosmological Parameters}
+%----------------------------------------------------------------------
+
+\paramheader{omega\_b}{real(dp)}{---}
+\label{param:omega_b}
+
+\begin{quote}
+Baryon density parameter $\Omega_b$.  Overrides the value read from
+the IC file header.  Must be consistent with the initial conditions
+and other cosmological parameters ($\Omega_m$, $H_0$, etc.\ are
+read from the GRAFIC2 header).
+\end{quote}
+
+%----------------------------------------------------------------------
+\subsection{AGN and Sink Particle Parameters}
+%----------------------------------------------------------------------
+
+\paramheader{Mseed}{real(dp)}{---}
+\label{param:Mseed}
+
+\begin{quote}
+Seed black hole mass in solar masses ($M_\odot$).  When a sink
+particle forms, it is initialised with this mass.  Typical range:
+$10^4$--$10^6\,M_\odot$ for cosmological simulations.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sink\_AGN}{logical}{.false.}
+\label{param:sink_AGN}
+
+\begin{quote}
+Enable AGN feedback from sink particles.  When \texttt{.true.}, sink
+particles inject thermal and/or kinetic energy into their surroundings
+based on their accretion rate.  Requires
+\paramref{sink}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{bondi}{logical}{.false.}
+\label{param:bondi}
+
+\begin{quote}
+Enable Bondi--Hoyle--Lyttleton accretion for sink particles.  The
+accretion rate is computed from the local gas density, sound speed,
+and relative velocity:
+\[
+  \dot{M} = \frac{4\pi G^2 M_{\text{BH}}^2 \rho}%
+             {(c_s^2 + v_{\text{rel}}^2)^{3/2}}
+\]
+Can be boosted by \paramref{boost_acc}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{drag}{logical}{.false.}
+\label{param:drag}
+
+\begin{quote}
+Enable dynamical friction on sink particles.  Applies a drag force
+opposing the sink's motion relative to the background gas.  Strength
+can be amplified by \paramref{boost_drag}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{rAGN}{real(dp)}{---}
+\label{param:rAGN}
+
+\begin{quote}
+AGN feedback energy injection radius in units of the cell size at
+\paramref{levelmax}.  Feedback energy is distributed over a sphere
+of this radius centred on the sink particle.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{X\_floor}{real(dp)}{---}
+\label{param:X_floor}
+
+\begin{quote}
+Hydrogen mass fraction floor.  Prevents the hydrogen fraction from
+dropping below this value due to numerical artefacts.  Typical:
+\texttt{0.76}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{eAGN\_K}{real(dp)}{---}
+\label{param:eAGN_K}
+
+\begin{quote}
+AGN kinetic feedback efficiency $\epsilon_K$.  Fraction of the
+accreted rest-mass energy deposited as kinetic energy:
+$\dot{E}_K = \epsilon_K \, \dot{M} c^2$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{eAGN\_T}{real(dp)}{---}
+\label{param:eAGN_T}
+
+\begin{quote}
+AGN thermal feedback efficiency $\epsilon_T$.  Fraction of the
+accreted rest-mass energy deposited as thermal energy:
+$\dot{E}_T = \epsilon_T \, \dot{M} c^2$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{TAGN}{real(dp)}{---}
+\label{param:TAGN}
+
+\begin{quote}
+AGN heating temperature in Kelvin.  The AGN thermal energy is
+deposited by raising gas temperature toward this value within the
+feedback region \paramref{rAGN}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{r\_gal}{real(dp)}{---}
+\label{param:r_gal}
+
+\begin{quote}
+Galaxy definition radius for AGN feedback, in code units.  Used to
+compute the local galaxy properties (stellar mass, gas mass) around
+a sink particle for AGN mode switching.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{T2maxAGN}{real(dp)}{---}
+\label{param:T2maxAGN}
+
+\begin{quote}
+Maximum AGN heating temperature in Kelvin.  Caps the temperature
+increase from a single AGN feedback event to prevent unphysically
+hot gas.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{boost\_acc}{real(dp)}{---}
+\label{param:boost_acc}
+
+\begin{quote}
+Bondi accretion boost factor.  Multiplies the Bondi--Hoyle accretion
+rate by this factor to compensate for unresolved gas structure near
+the black hole.  Typical range: 1--100.  Requires
+\paramref{bondi}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{boost\_drag}{real(dp)}{---}
+\label{param:boost_drag}
+
+\begin{quote}
+Dynamical friction drag boost factor.  Multiplies the drag force by
+this factor.  Requires \paramref{drag}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{vrel\_merge}{logical}{---}
+\label{param:vrel_merge}
+
+\begin{quote}
+Use relative velocity criterion for sink particle merging.  When
+\texttt{.true.}, two sinks merge only if their relative velocity is
+below the local escape velocity, in addition to the spatial proximity
+criterion \paramref{rmerge}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{rmerge}{real(dp)}{---}
+\label{param:rmerge}
+
+\begin{quote}
+Sink merging radius in units of the cell size at
+\paramref{levelmax}.  Two sink particles closer than this distance
+are candidates for merging (subject to additional criteria if
+\paramref{vrel_merge}\texttt{=.true.}).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{spin\_bh}{logical}{---}
+\label{param:spin_bh}
+
+\begin{quote}
+Track black hole spin evolution.  When \texttt{.true.}, the code
+evolves the dimensionless spin parameter $a_\star$ of each sink
+particle based on the angular momentum of accreted gas.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mad\_jet}{logical}{---}
+\label{param:mad_jet}
+
+\begin{quote}
+Enable the magnetically arrested disk (MAD) jet model.  When
+\texttt{.true.}, AGN kinetic feedback is launched as a collimated
+bipolar jet aligned with the black hole spin axis.  Requires
+\paramref{spin_bh}\texttt{=.true.}
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&LIGHTCONE\_PARAMS} -- Lightcone Output}
+\label{sec:lightcone_params}
+%======================================================================
+
+\begin{quote}
+Parameters for lightcone output mode (activated when
+\paramref{lightcone}\texttt{=.true.}).  In this mode, particles
+and/or cells that cross the observer's past lightcone during each
+time step are written to special output files, enabling the
+construction of mock galaxy surveys and weak-lensing maps without
+storing full snapshots.
+
+Configuration parameters include the observer position, opening
+angle, and selection criteria.  Consult the RAMSES lightcone
+documentation for the full parameter list, which varies by
+application.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&SPHERICAL\_REGION\_PARAMS}}
+\label{sec:spherical_region_params}
+%======================================================================
+
+\paramheader{spherical\_region}{logical}{.false.}
+\label{param:spherical_region}
+
+\begin{quote}
+Enable a spherical refinement region.  When \texttt{.true.}, AMR
+refinement is restricted to a spherical sub-volume of the simulation
+box.  This is useful for re-simulations of specific halos where a
+cubic zoom region is not optimal.  Additional parameters define the
+centre and radius of the sphere.
+\end{quote}
+
+
+%======================================================================
+\section{Complete Example: Cosmological Zoom-In}
+\label{sec:example}
+%======================================================================
+
+The following namelist illustrates a production cosmological zoom-in
+simulation with dark matter particles, baryonic gas, self-gravity,
+cooling, star formation, and AGN feedback.
+
+\begin{lstlisting}[language=Fortran,
+  caption={Cosmological zoom-in namelist},
+  label={lst:zoomin}]
+&RUN_PARAMS
+cosmo    = .true.
+pic      = .true.
+poisson  = .true.
+hydro    = .true.
+sink     = .true.
+nrestart = 0
+nremap   = 5
+nsubcycle = 1, 1, 1, 2, 2, 2, 2
+nstepmax = 10000000
+ordering = 'ksection'
+memory_balance = .true.
+/
+
+&AMR_PARAMS
+levelmin  = 7
+levelmax  = 18
+nexpand   = 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+ngridtot  = 400000000
+nparttot  = 600000000
+/
+
+&OUTPUT_PARAMS
+noutput = 10
+aout = 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.7, 0.85, 1.0
+foutput = 500
+/
+
+&INIT_PARAMS
+filetype = 'grafic'
+initfile = '/data/IC/level_07'
+         , '/data/IC/level_08'
+         , '/data/IC/level_09'
+         , '/data/IC/level_10'
+         , '/data/IC/level_11'
+         , '/data/IC/level_12'
+         , '/data/IC/level_13'
+/
+
+&REFINE_PARAMS
+m_refine = 8., 8., 8., 8., 8., 8., 8., 8., 8., 8., 8., 8.
+ivar_refine     = 11
+var_cut_refine  = 0.01
+mass_cut_refine = 3.63798e-12
+interpol_var    = 1
+interpol_type   = 1
+/
+
+&HYDRO_PARAMS
+gamma         = 1.6666667
+courant_factor = 0.8
+scheme        = 'muscl'
+slope_type    = 2
+riemann       = 'hllc'
+pressure_fix  = .true.
+beta_fix      = 0.5
+/
+
+&POISSON_PARAMS
+epsilon      = 1.0e-5
+gravity_type = 0
+cg_levelmin  = 18
+/
+
+&PHYSICS_PARAMS
+cooling        = .true.
+haardt_madau   = .true.
+z_reion        = 8.5
+n_star         = 0.1
+eps_star       = 0.02
+T2_star        = 1.0e4
+g_star         = 1.6
+del_star       = 200.0
+f_ek           = 1.0
+sink_AGN       = .true.
+bondi          = .true.
+Mseed          = 1.0e5
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{Parameter Cross-Reference Index}
+\label{sec:crossref}
+%======================================================================
+
+Table~\ref{tab:crossref} lists parameters that commonly interact and
+should be set consistently.
+
+\begin{longtable}{@{}p{4cm}p{4.5cm}p{6.5cm}@{}}
+\caption{Cross-reference of interacting parameters.}
+\label{tab:crossref}\\
+\toprule
+\textbf{Parameter} & \textbf{Related Parameters} & \textbf{Notes} \\
+\midrule
+\endfirsthead
+\toprule
+\textbf{Parameter} & \textbf{Related Parameters} & \textbf{Notes} \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{cosmo}
+  & \texttt{aout}, \texttt{omega\_b}
+  & Cosmological mode requires scale-factor outputs \\
+\addlinespace
+\texttt{pic}
+  & \texttt{poisson}, \texttt{nparttot}
+  & Particles need gravity and memory allocation \\
+\addlinespace
+\texttt{ordering}
+  & \texttt{memory\_balance}
+  & Memory balancing requires \texttt{ksection} \\
+\addlinespace
+\texttt{levelmax}
+  & \texttt{m\_refine}, \texttt{cg\_levelmin}
+  & Set \texttt{cg\_levelmin = levelmax} \\
+\addlinespace
+\texttt{ivar\_refine}
+  & \texttt{var\_cut\_refine}, \texttt{mass\_cut\_refine}, \texttt{m\_refine}
+  & All must be consistent for zoom-in \\
+\addlinespace
+\texttt{mass\_cut\_refine}
+  & \texttt{ivar\_refine}
+  & Set to finest-level DM particle mass \\
+\addlinespace
+\texttt{pressure\_fix}
+  & \texttt{beta\_fix}
+  & \texttt{beta\_fix} only effective when fix is on \\
+\addlinespace
+\texttt{T2\_star}
+  & \texttt{g\_star}, \texttt{n\_star}
+  & Polytropic EOS parameters \\
+\addlinespace
+\texttt{sink}
+  & \texttt{sink\_AGN}, \texttt{bondi}, \texttt{Mseed}
+  & AGN feedback requires sink particles \\
+\addlinespace
+\texttt{sink\_AGN}
+  & \texttt{eAGN\_K}, \texttt{eAGN\_T}, \texttt{TAGN}, \texttt{rAGN}
+  & AGN feedback parameters \\
+\addlinespace
+\texttt{bondi}
+  & \texttt{boost\_acc}
+  & Boost factor for unresolved accretion \\
+\addlinespace
+\texttt{drag}
+  & \texttt{boost\_drag}
+  & Drag boost factor \\
+\addlinespace
+\texttt{spin\_bh}
+  & \texttt{mad\_jet}
+  & MAD jet requires spin tracking \\
+\addlinespace
+\texttt{cooling}
+  & \texttt{haardt\_madau}, \texttt{z\_reion}
+  & UV background for reionization heating \\
+\addlinespace
+\texttt{ngridtot}
+  & \texttt{nparttot}
+  & Both determine per-process memory usage \\
+\end{longtable}
+
+
+%======================================================================
+\vfill
+\begin{center}
+\small\sffamily\textcolor{apitype}{%
+Generated for cuRAMSES-kjhan --- \today}
+\end{center}
+
+\end{document}

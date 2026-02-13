@@ -1148,28 +1148,7 @@ subroutine kinetic_feedback
   tt4=MPI_WTIME()
   if(myid .eq. 1) write(*,*)'Time elapsed in operating SNII array modification: ',tt4-tt3
 #endif
-  ! Compute the grid discretization effects
-     do ind=1,twotondim
-        iskip=ncoarse+(ind-1)*ngridmax
-        do i=1,active(ilevel)%ngrid
-            if(isnan(uold(active(ilevel)%igrid(i)+iskip,1))) then
-                write(*,*)'NaN found before average_SN'
-            endif
-        enddo
-     enddo
-
-
   call average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,indSN,nSN,nSN_tot,iSN_myid,mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN)
-
-
-     do ind=1,twotondim
-        iskip=ncoarse+(ind-1)*ngridmax
-        do i=1,active(ilevel)%ngrid
-            if(isnan(uold(active(ilevel)%igrid(i)+iskip,1))) then
-                write(*,*)'NaN found after average_SN'
-            endif
-        enddo
-     enddo
 
 
 
@@ -1181,17 +1160,6 @@ subroutine kinetic_feedback
 #endif
   ! Modify hydro quantities to account for a Sedov blast wave
   call Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN,celoadSN,vloadSN)
-
-     do ind=1,twotondim
-        iskip=ncoarse+(ind-1)*ngridmax
-        do i=1,active(ilevel)%ngrid
-            if(isnan(uold(active(ilevel)%igrid(i)+iskip,1))) then
-                write(*,*)'NaN found after Sedov_blast'
-            endif
-        enddo
-     enddo
-
-
 
 #ifndef WITHOUTMPI
   tt6=MPI_WTIME()
