@@ -8,11 +8,26 @@
 !   - Particles (xp, vp, mp, idp, levelp, tp, zp)
 !   - Sinks
 !
-! All ranks read ALL grids at each level (active + virtual) to mirror
-! the binary restart behavior. build_comm then sets up the proper
-! emission/reception communication structure.
+! Supports variable-ncpu restart (ncpu_file != ncpu) with ksection ordering:
+!   - Builds uniform ksection tree for new ncpu
+!   - Recomputes cpu_map via cmp_ksection_cpumap
+!   - ALL ranks read ALL data, scatter to locally owned grids
+!   - First coarse step forces load_balance for optimal rebalancing
 !###########################################################################
 #ifdef HDF5
+
+!###########################################################################
+! Module for variable-ncpu restart data shared between AMR/hydro/poisson
+!###########################################################################
+module varcpu_hdf5_data
+  use amr_parameters, only: dp, i8b
+  implicit none
+  ! igrid → file index mapping (set during AMR restore, used by hydro/poisson)
+  integer, allocatable, save :: varcpu_grid_file_idx(:)  ! (1:ngridmax)
+  ! Total grids per level in file
+  integer, allocatable, save :: varcpu_ngrid_file(:)     ! (1:nlevelmax)
+  logical, save :: varcpu_restart = .false.
+end module varcpu_hdf5_data
 
 !###########################################################################
 ! AMR restore from HDF5
@@ -24,6 +39,7 @@ subroutine restore_amr_hdf5()
   use morton_keys
   use morton_hash
   use ramses_hdf5_io
+  use varcpu_hdf5_data
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -47,6 +63,12 @@ subroutine restore_amr_hdf5()
   integer :: ngrid_all_int, icpu, grid_offset
   integer(mkb) :: mkey
   real(dp) :: twotol
+
+  ! Variable-ncpu specific variables
+  integer, allocatable :: tail_cpu(:)  ! per-CPU tail pointer for linked list
+  real(dp) :: scale, dx, xx_cell(1,3), xc_off(3)
+  integer :: c_tmp(1)
+  integer :: nx_loc
 
   call title(nrestart, nchar)
   h5filename = 'output_'//trim(nchar)//'/data_'//trim(nchar)//'.h5'
@@ -95,15 +117,41 @@ subroutine restore_amr_hdf5()
 
   if(myid==1) write(*,*) 'Restarting at t=', t, ' nstep_coarse=', nstep_coarse
 
-  ! Enforce same-rank restart
+  !=====================================================
+  ! Step 2: Check ncpu_file vs ncpu
+  !=====================================================
   if(ncpu_file /= ncpu) then
-     if(myid==1) write(*,*) 'ERROR: HDF5 restart requires same ncpu. File=', &
-          ncpu_file, ' current=', ncpu
-     call clean_stop
+     if(ordering /= 'ksection') then
+        if(myid==1) then
+           write(*,*) 'ERROR: Variable-ncpu restart only supported with ksection ordering.'
+           write(*,*) '       File ncpu=', ncpu_file, ', current ncpu=', ncpu
+        end if
+        call clean_stop
+     end if
+     varcpu_restart = .true.
+     varcpu_restart_done = .true.   ! flag in amr_commons: force load_balance on first step
+     if(myid==1) then
+        write(*,*) '============================================================'
+        write(*,*) '============================================================'
+        write(*,*) '=====  VARIABLE NCPU RESTART                           ====='
+        write(*,*) '=====  File ncpu = ', ncpu_file
+        write(*,*) '=====  New  ncpu = ', ncpu
+        write(*,*) '=====  Rebuilding domain decomposition for new ncpu    ====='
+        write(*,*) '=====  Load balance will be forced on first coarse step ====='
+        write(*,*) '============================================================'
+        write(*,*) '============================================================'
+     end if
+     ! Allocate mapping arrays
+     allocate(varcpu_grid_file_idx(1:ngridmax))
+     varcpu_grid_file_idx = 0
+     allocate(varcpu_ngrid_file(1:nlevelmax))
+     varcpu_ngrid_file = 0
+  else
+     varcpu_restart = .false.
   end if
 
   !=====================================================
-  ! Step 2: Read coarse grid (all ranks read full coarse)
+  ! Step 2b: Read coarse grid (all ranks read full coarse)
   !=====================================================
   call hdf5_open_group('/coarse', grp_id)
   call hdf5_read_dataset_all_int(grp_id, 'son', son(1:ncoarse), ncoarse)
@@ -127,60 +175,92 @@ subroutine restore_amr_hdf5()
   end block
   call hdf5_close_group(grp_id)
 
-  ! Set cpu_map2 = cpu_map for coarse
-  cpu_map2(1:ncoarse) = cpu_map(1:ncoarse)
   ! Reset coarse son — will be set when level 1 grids are created
   son(1:ncoarse) = 0
 
   !=====================================================
-  ! Step 3: Read domain decomposition (ksection tree)
+  ! Step 3: Domain decomposition
   !=====================================================
-  call hdf5_open_group('/domain', grp_id)
-  if(ordering=='ksection') then
-     call hdf5_read_attr_int(grp_id, 'ksec_kmax', ksec_kmax)
-     call hdf5_read_attr_int(grp_id, 'ksec_nbinodes', ksec_nbinodes)
-     call hdf5_read_dataset_all_int(grp_id, 'ksec_factor', ksec_factor, nksec_levels)
-     call hdf5_read_dataset_all_int(grp_id, 'ksec_dir', ksec_dir, nksec_levels)
-     call hdf5_read_dataset_all_int(grp_id, 'ksec_indx', ksec_indx, ksec_nbinodes)
-     ! Read flattened 2D arrays
-     block
-        integer :: nw_cols, nn_cols, nw_total, nn_total
-        real(dp), allocatable :: wall_flat(:)
-        integer, allocatable :: next_flat(:)
-        nw_cols = max(ksec_kmax - 1, 1)
-        nn_cols = ksec_kmax
-        nw_total = ksec_nbinodes * nw_cols
-        nn_total = ksec_nbinodes * nn_cols
-        allocate(wall_flat(nw_total))
-        allocate(next_flat(nn_total))
-        call hdf5_read_dataset_all_dp(grp_id, 'ksec_wall', wall_flat, nw_total)
-        call hdf5_read_dataset_all_int(grp_id, 'ksec_next', next_flat, nn_total)
-        ksec_wall(1:ksec_nbinodes, 1:nw_cols) = &
-             reshape(wall_flat, (/ksec_nbinodes, nw_cols/))
-        ksec_next(1:ksec_nbinodes, 1:nn_cols) = &
-             reshape(next_flat, (/ksec_nbinodes, nn_cols/))
-        deallocate(wall_flat, next_flat)
-     end block
-     ! Read CPU bounding boxes
-     block
-        real(dp), allocatable :: cpubox_flat(:)
-        integer :: ncb
-        ncb = ncpu * ndim
-        allocate(cpubox_flat(ncb))
-        call hdf5_read_dataset_all_dp(grp_id, 'bisec_cpubox_min', cpubox_flat, ncb)
-        bisec_cpubox_min(1:ncpu, 1:ndim) = reshape(cpubox_flat, (/ncpu, ndim/))
-        call hdf5_read_dataset_all_dp(grp_id, 'bisec_cpubox_max', cpubox_flat, ncb)
-        bisec_cpubox_max(1:ncpu, 1:ndim) = reshape(cpubox_flat, (/ncpu, ndim/))
-        deallocate(cpubox_flat)
-     end block
-     bisec_cpubox_min2 = bisec_cpubox_min
-     bisec_cpubox_max2 = bisec_cpubox_max
-     ! Rebuild tree navigation arrays
+  if(varcpu_restart) then
+     !--- Variable ncpu: rebuild ksection tree for new ncpu ---
+     ! Arrays already allocated in init_amr for ncpu
+     ! Build uniform tree (volume-balanced, no load data needed)
+     nx_loc = icoarse_max - icoarse_min + 1
+     scale = boxlen / dble(nx_loc)
+     call build_ksection(update=.false.)
+     ! Rebuild tree navigation
      call rebuild_ksec_cpuranges()
      call compute_ksec_cpu_path()
-     if(myid==1) write(*,*) 'HDF5: ksection tree restored'
+     bisec_cpubox_min2 = bisec_cpubox_min
+     bisec_cpubox_max2 = bisec_cpubox_max
+     if(myid==1) write(*,*) 'HDF5: ksection tree rebuilt for ncpu=', ncpu
+
+     ! Recompute coarse cpu_map via ksection tree
+     do iz = kcoarse_min, kcoarse_max
+     do iy = jcoarse_min, jcoarse_max
+     do ix = icoarse_min, icoarse_max
+        ind = 1 + ix + iy * nx + iz * nxny
+        xx_cell(1,1) = (dble(ix) + 0.5d0 - dble(icoarse_min)) * scale
+        xx_cell(1,2) = (dble(iy) + 0.5d0 - dble(jcoarse_min)) * scale
+        xx_cell(1,3) = (dble(iz) + 0.5d0 - dble(kcoarse_min)) * scale
+        call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+        cpu_map(ind) = c_tmp(1)
+     end do
+     end do
+     end do
+     if(myid==1) write(*,*) 'HDF5: coarse cpu_map recomputed'
+  else
+     !--- Same ncpu: read ksection tree from file ---
+     call hdf5_open_group('/domain', grp_id)
+     if(ordering=='ksection') then
+        call hdf5_read_attr_int(grp_id, 'ksec_kmax', ksec_kmax)
+        call hdf5_read_attr_int(grp_id, 'ksec_nbinodes', ksec_nbinodes)
+        call hdf5_read_dataset_all_int(grp_id, 'ksec_factor', ksec_factor, nksec_levels)
+        call hdf5_read_dataset_all_int(grp_id, 'ksec_dir', ksec_dir, nksec_levels)
+        call hdf5_read_dataset_all_int(grp_id, 'ksec_indx', ksec_indx, ksec_nbinodes)
+        ! Read flattened 2D arrays
+        block
+           integer :: nw_cols, nn_cols, nw_total, nn_total
+           real(dp), allocatable :: wall_flat(:)
+           integer, allocatable :: next_flat(:)
+           nw_cols = max(ksec_kmax - 1, 1)
+           nn_cols = ksec_kmax
+           nw_total = ksec_nbinodes * nw_cols
+           nn_total = ksec_nbinodes * nn_cols
+           allocate(wall_flat(nw_total))
+           allocate(next_flat(nn_total))
+           call hdf5_read_dataset_all_dp(grp_id, 'ksec_wall', wall_flat, nw_total)
+           call hdf5_read_dataset_all_int(grp_id, 'ksec_next', next_flat, nn_total)
+           ksec_wall(1:ksec_nbinodes, 1:nw_cols) = &
+                reshape(wall_flat, (/ksec_nbinodes, nw_cols/))
+           ksec_next(1:ksec_nbinodes, 1:nn_cols) = &
+                reshape(next_flat, (/ksec_nbinodes, nn_cols/))
+           deallocate(wall_flat, next_flat)
+        end block
+        ! Read CPU bounding boxes
+        block
+           real(dp), allocatable :: cpubox_flat(:)
+           integer :: ncb
+           ncb = ncpu * ndim
+           allocate(cpubox_flat(ncb))
+           call hdf5_read_dataset_all_dp(grp_id, 'bisec_cpubox_min', cpubox_flat, ncb)
+           bisec_cpubox_min(1:ncpu, 1:ndim) = reshape(cpubox_flat, (/ncpu, ndim/))
+           call hdf5_read_dataset_all_dp(grp_id, 'bisec_cpubox_max', cpubox_flat, ncb)
+           bisec_cpubox_max(1:ncpu, 1:ndim) = reshape(cpubox_flat, (/ncpu, ndim/))
+           deallocate(cpubox_flat)
+        end block
+        bisec_cpubox_min2 = bisec_cpubox_min
+        bisec_cpubox_max2 = bisec_cpubox_max
+        ! Rebuild tree navigation arrays
+        call rebuild_ksec_cpuranges()
+        call compute_ksec_cpu_path()
+        if(myid==1) write(*,*) 'HDF5: ksection tree restored'
+     end if
+     call hdf5_close_group(grp_id)
   end if
-  call hdf5_close_group(grp_id)
+
+  ! Set cpu_map2 = cpu_map for coarse
+  cpu_map2(1:ncoarse) = cpu_map(1:ncoarse)
 
   !=====================================================
   ! Step 4: Read nlevelmax_file from /amr group
@@ -205,125 +285,133 @@ subroutine restore_amr_hdf5()
 
   !=====================================================
   ! Step 6: Per-level grid creation
-  ! ALL ranks read ALL grids at each level, creating
-  ! active grids for myid and reception grids for other
-  ! CPUs. This mirrors the binary restart where each
-  ! rank has active + virtual grids in headl/numbl.
   !=====================================================
-  allocate(ngrid_per_cpu(ncpu))
-
   ! Suppress HDF5 error messages for missing level groups
   call hdf5_suppress_errors()
 
-  do ilevel = 1, nlevelmax_file
-     ! Check if level group exists
-     write(lvl_str, '(I0)') ilevel
-     grp_name = '/amr/level_'//trim(lvl_str)
+  ! Compute scale for cell coordinate computation
+  nx_loc = icoarse_max - icoarse_min + 1
+  scale = boxlen / dble(nx_loc)
 
-     block
-        integer(HID_T) :: test_grp_id
-        integer :: h5err
-        logical :: grp_exists
-        call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
-        if(.not. grp_exists .or. h5err /= 0) cycle
-        call h5gopen_f(hdf5_file_id, trim(grp_name), test_grp_id, h5err)
-        if(h5err /= 0) cycle
-        lvl_grp_id = test_grp_id
-     end block
+  if(varcpu_restart) then
+     !===================================================
+     ! VARIABLE NCPU PATH: read ALL grids, recompute ownership
+     !===================================================
+     allocate(tail_cpu(ncpu))
 
-     ! Read ngrid_per_cpu (all ranks read full array)
-     call hdf5_read_dataset_all_int(lvl_grp_id, 'ngrid_per_cpu', ngrid_per_cpu, ncpu)
+     do ilevel = 1, nlevelmax_file
+        ! Check if level group exists
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/amr/level_'//trim(lvl_str)
 
-     ! Compute total grids at this level
-     ngrid_total = 0
-     do i = 1, ncpu
-        ngrid_total = ngrid_total + ngrid_per_cpu(i)
-     end do
-     ngrid_all_int = int(ngrid_total)
+        block
+           integer(HID_T) :: test_grp_id
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), test_grp_id, h5err)
+           if(h5err /= 0) cycle
+           lvl_grp_id = test_grp_id
+        end block
 
-     if(myid==1) write(*,'(A,I3,A,I10)') &
-          ' HDF5 level ', ilevel, ' total grids: ', ngrid_total
+        ! Read ngrid_per_cpu from file (ncpu_file entries)
+        allocate(ngrid_per_cpu(ncpu_file))
+        call hdf5_read_dataset_all_int(lvl_grp_id, 'ngrid_per_cpu', ngrid_per_cpu, ncpu_file)
 
-     if(ngrid_all_int == 0) then
-        call hdf5_close_group(lvl_grp_id)
-        cycle
-     end if
+        ! Compute total grids at this level
+        ngrid_total = 0
+        do i = 1, ncpu_file
+           ngrid_total = ngrid_total + ngrid_per_cpu(i)
+        end do
+        ngrid_all_int = int(ngrid_total)
+        varcpu_ngrid_file(ilevel) = ngrid_all_int
 
-     ! ALL ranks read ALL grids' data at this level
-     allocate(xg_all(ngrid_all_int, ndim))
-     allocate(son_flag_buf(ngrid_all_int * twotondim))
-     allocate(cpu_map_buf(ngrid_all_int * twotondim))
+        if(myid==1) write(*,'(A,I3,A,I10)') &
+             ' HDF5 level ', ilevel, ' total grids: ', ngrid_total
 
-     ! Read ALL grid positions (every rank reads full datasets)
-     do idim = 1, ndim
-        write(lvl_str, '(I0)') idim
-        call hdf5_read_dataset_all_dp(lvl_grp_id, 'xg_'//trim(lvl_str), &
-             xg_all(:, idim), ngrid_all_int)
-     end do
+        deallocate(ngrid_per_cpu)
 
-     ! Read ALL cell data
-     call hdf5_read_dataset_all_int(lvl_grp_id, 'son_flag', &
-          son_flag_buf, ngrid_all_int * twotondim)
-     call hdf5_read_dataset_all_int(lvl_grp_id, 'cpu_map', &
-          cpu_map_buf, ngrid_all_int * twotondim)
+        if(ngrid_all_int == 0) then
+           call hdf5_close_group(lvl_grp_id)
+           cycle
+        end if
 
-     ! Initialize hash table for this level
-     call morton_hash_init(mort_table(ilevel), max(2 * ngrid_all_int, 16))
+        ! ALL ranks read ALL grids' data at this level
+        allocate(xg_all(ngrid_all_int, ndim))
+        allocate(son_flag_buf(ngrid_all_int * twotondim))
 
-     !--- Create grid slots for ALL CPUs' grids ---
-     ! Grids are ordered by CPU: CPU 1 first, then CPU 2, etc.
-     grid_offset = 0
-     do icpu = 1, ncpu
-        igrid_prev_cpu = 0
-        do i = 1, ngrid_per_cpu(icpu)
+        ! Read ALL grid positions
+        do idim = 1, ndim
+           write(lvl_str, '(I0)') idim
+           call hdf5_read_dataset_all_dp(lvl_grp_id, 'xg_'//trim(lvl_str), &
+                xg_all(:, idim), ngrid_all_int)
+        end do
+
+        ! Read ALL son flags (for flag1)
+        call hdf5_read_dataset_all_int(lvl_grp_id, 'son_flag', &
+             son_flag_buf, ngrid_all_int * twotondim)
+        ! Note: we do NOT read cpu_map from file — will recompute
+
+        ! Initialize hash table for this level
+        call morton_hash_init(mort_table(ilevel), max(2 * ngrid_all_int, 16))
+
+        ! Subcell offsets at this level
+        dx = 0.5d0**ilevel
+
+        !--- Phase 1: Allocate all grids, set xg, father, son, Morton ---
+        tail_cpu(:) = 0
+        do i = 1, ngrid_all_int
            ! Allocate grid from free list
            igrid_new = headf
            if(igrid_new == 0) then
               write(*,*) 'ERROR: out of free grids, myid=', myid, &
-                   ' level=', ilevel, ' cpu=', icpu
+                   ' level=', ilevel, ' grid=', i
               call clean_stop
            end if
            headf = next(igrid_new)
            if(headf > 0) prev(headf) = 0
            numbf = numbf - 1
 
-           ! Set linked list for this CPU at this level
-           if(igrid_prev_cpu == 0) then
-              headl(icpu, ilevel) = igrid_new
-           else
-              next(igrid_prev_cpu) = igrid_new
-           end if
-           prev(igrid_new) = igrid_prev_cpu
-           next(igrid_new) = 0
-           taill(icpu, ilevel) = igrid_new
-           numbl(icpu, ilevel) = numbl(icpu, ilevel) + 1
+           ! Set xg
+           xg(igrid_new, 1:ndim) = xg_all(i, 1:ndim)
 
-           ! Set xg, cpu_map, cpu_map2, son, flag1
-           ind = grid_offset + i
-           xg(igrid_new, 1:ndim) = xg_all(ind, 1:ndim)
+           ! Set son_flag → flag1, and init son to 0
            do iskip = 1, twotondim
               ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
-              cpu_map(ind_cell) = cpu_map_buf((ind-1)*twotondim + iskip)
-              cpu_map2(ind_cell) = cpu_map_buf((ind-1)*twotondim + iskip)
               son(ind_cell) = 0
-              flag1(ind_cell) = son_flag_buf((ind-1)*twotondim + iskip)
+              flag1(ind_cell) = son_flag_buf((i-1)*twotondim + iskip)
+           end do
+
+           ! Compute cpu_map for each cell via cmp_ksection_cpumap
+           do iskip = 1, twotondim
+              ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
+              iz = (iskip - 1) / 4
+              iy = (iskip - 1 - 4 * iz) / 2
+              ix = (iskip - 1 - 2 * iy - 4 * iz)
+              xx_cell(1,1) = (xg_all(i, 1) + (dble(ix) - 0.5d0) * dx &
+                   - dble(icoarse_min)) * scale
+              xx_cell(1,2) = (xg_all(i, 2) + (dble(iy) - 0.5d0) * dx &
+                   - dble(jcoarse_min)) * scale
+              xx_cell(1,3) = (xg_all(i, 3) + (dble(iz) - 0.5d0) * dx &
+                   - dble(kcoarse_min)) * scale
+              call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+              cpu_map(ind_cell) = c_tmp(1)
+              cpu_map2(ind_cell) = c_tmp(1)
            end do
 
            ! Set father pointer
            if(ilevel == 1) then
-              ! Father is a coarse cell
               twotol = 1.0d0
-              ix = int(xg_all(ind, 1) * twotol)
-              iy = int(xg_all(ind, 2) * twotol)
-              iz = int(xg_all(ind, 3) * twotol)
+              ix = int(xg_all(i, 1) * twotol)
+              iy = int(xg_all(i, 2) * twotol)
+              iz = int(xg_all(i, 3) * twotol)
               father(igrid_new) = 1 + ix + iy * nx + iz * nxny
            else
-              ! Father is a cell in a grid at level L-1
               twotol = 2.0d0**(ilevel-1)
-              ix = int(xg_all(ind, 1) * twotol)
-              iy = int(xg_all(ind, 2) * twotol)
-              iz = int(xg_all(ind, 3) * twotol)
-              ! Parent grid position at level L-1
+              ix = int(xg_all(i, 1) * twotol)
+              iy = int(xg_all(i, 2) * twotol)
+              iz = int(xg_all(i, 3) * twotol)
               ix_p = ix / 2
               iy_p = iy / 2
               iz_p = iz / 2
@@ -331,11 +419,10 @@ subroutine restore_amr_hdf5()
               igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
               if(igrid_father == 0) then
                  write(*,*) 'ERROR: father not found! myid=', myid, &
-                      ' level=', ilevel, ' cpu=', icpu, ' grid=', i, &
+                      ' level=', ilevel, ' grid=', i, &
                       ' ix_p=', ix_p, ' iy_p=', iy_p, ' iz_p=', iz_p
                  call clean_stop
               end if
-              ! Subcell within parent oct
               ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
               father(igrid_new) = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
            end if
@@ -348,14 +435,178 @@ subroutine restore_amr_hdf5()
            call morton_hash_insert(mort_table(ilevel), mkey, igrid_new)
            grid_level(igrid_new) = ilevel
 
-           igrid_prev_cpu = igrid_new
+           ! Determine owner CPU from father cell's cpu_map
+           icpu = cpu_map(father(igrid_new))
+
+           ! Append to linked list for icpu at this level
+           if(tail_cpu(icpu) == 0) then
+              headl(icpu, ilevel) = igrid_new
+              prev(igrid_new) = 0
+           else
+              next(tail_cpu(icpu)) = igrid_new
+              prev(igrid_new) = tail_cpu(icpu)
+           end if
+           next(igrid_new) = 0
+           taill(icpu, ilevel) = igrid_new
+           tail_cpu(icpu) = igrid_new
+           numbl(icpu, ilevel) = numbl(icpu, ilevel) + 1
+
+           ! Save file→igrid mapping for hydro/poisson restore
+           varcpu_grid_file_idx(igrid_new) = i
         end do
-        grid_offset = grid_offset + ngrid_per_cpu(icpu)
+
+        deallocate(xg_all, son_flag_buf)
+        call hdf5_close_group(lvl_grp_id)
      end do
 
-     deallocate(xg_all, son_flag_buf, cpu_map_buf)
-     call hdf5_close_group(lvl_grp_id)
-  end do
+     deallocate(tail_cpu)
+
+  else
+     !===================================================
+     ! SAME NCPU PATH: original code (grids ordered by CPU)
+     !===================================================
+     allocate(ngrid_per_cpu(ncpu))
+
+     do ilevel = 1, nlevelmax_file
+        ! Check if level group exists
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/amr/level_'//trim(lvl_str)
+
+        block
+           integer(HID_T) :: test_grp_id
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), test_grp_id, h5err)
+           if(h5err /= 0) cycle
+           lvl_grp_id = test_grp_id
+        end block
+
+        ! Read ngrid_per_cpu (all ranks read full array)
+        call hdf5_read_dataset_all_int(lvl_grp_id, 'ngrid_per_cpu', ngrid_per_cpu, ncpu)
+
+        ! Compute total grids at this level
+        ngrid_total = 0
+        do i = 1, ncpu
+           ngrid_total = ngrid_total + ngrid_per_cpu(i)
+        end do
+        ngrid_all_int = int(ngrid_total)
+
+        if(myid==1) write(*,'(A,I3,A,I10)') &
+             ' HDF5 level ', ilevel, ' total grids: ', ngrid_total
+
+        if(ngrid_all_int == 0) then
+           call hdf5_close_group(lvl_grp_id)
+           cycle
+        end if
+
+        ! ALL ranks read ALL grids' data at this level
+        allocate(xg_all(ngrid_all_int, ndim))
+        allocate(son_flag_buf(ngrid_all_int * twotondim))
+        allocate(cpu_map_buf(ngrid_all_int * twotondim))
+
+        ! Read ALL grid positions (every rank reads full datasets)
+        do idim = 1, ndim
+           write(lvl_str, '(I0)') idim
+           call hdf5_read_dataset_all_dp(lvl_grp_id, 'xg_'//trim(lvl_str), &
+                xg_all(:, idim), ngrid_all_int)
+        end do
+
+        ! Read ALL cell data
+        call hdf5_read_dataset_all_int(lvl_grp_id, 'son_flag', &
+             son_flag_buf, ngrid_all_int * twotondim)
+        call hdf5_read_dataset_all_int(lvl_grp_id, 'cpu_map', &
+             cpu_map_buf, ngrid_all_int * twotondim)
+
+        ! Initialize hash table for this level
+        call morton_hash_init(mort_table(ilevel), max(2 * ngrid_all_int, 16))
+
+        !--- Create grid slots for ALL CPUs' grids ---
+        ! Grids are ordered by CPU: CPU 1 first, then CPU 2, etc.
+        grid_offset = 0
+        do icpu = 1, ncpu
+           igrid_prev_cpu = 0
+           do i = 1, ngrid_per_cpu(icpu)
+              ! Allocate grid from free list
+              igrid_new = headf
+              if(igrid_new == 0) then
+                 write(*,*) 'ERROR: out of free grids, myid=', myid, &
+                      ' level=', ilevel, ' cpu=', icpu
+                 call clean_stop
+              end if
+              headf = next(igrid_new)
+              if(headf > 0) prev(headf) = 0
+              numbf = numbf - 1
+
+              ! Set linked list for this CPU at this level
+              if(igrid_prev_cpu == 0) then
+                 headl(icpu, ilevel) = igrid_new
+              else
+                 next(igrid_prev_cpu) = igrid_new
+              end if
+              prev(igrid_new) = igrid_prev_cpu
+              next(igrid_new) = 0
+              taill(icpu, ilevel) = igrid_new
+              numbl(icpu, ilevel) = numbl(icpu, ilevel) + 1
+
+              ! Set xg, cpu_map, cpu_map2, son, flag1
+              ind = grid_offset + i
+              xg(igrid_new, 1:ndim) = xg_all(ind, 1:ndim)
+              do iskip = 1, twotondim
+                 ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
+                 cpu_map(ind_cell) = cpu_map_buf((ind-1)*twotondim + iskip)
+                 cpu_map2(ind_cell) = cpu_map_buf((ind-1)*twotondim + iskip)
+                 son(ind_cell) = 0
+                 flag1(ind_cell) = son_flag_buf((ind-1)*twotondim + iskip)
+              end do
+
+              ! Set father pointer
+              if(ilevel == 1) then
+                 twotol = 1.0d0
+                 ix = int(xg_all(ind, 1) * twotol)
+                 iy = int(xg_all(ind, 2) * twotol)
+                 iz = int(xg_all(ind, 3) * twotol)
+                 father(igrid_new) = 1 + ix + iy * nx + iz * nxny
+              else
+                 twotol = 2.0d0**(ilevel-1)
+                 ix = int(xg_all(ind, 1) * twotol)
+                 iy = int(xg_all(ind, 2) * twotol)
+                 iz = int(xg_all(ind, 3) * twotol)
+                 ix_p = ix / 2
+                 iy_p = iy / 2
+                 iz_p = iz / 2
+                 mkey = morton_encode(ix_p, iy_p, iz_p)
+                 igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
+                 if(igrid_father == 0) then
+                    write(*,*) 'ERROR: father not found! myid=', myid, &
+                         ' level=', ilevel, ' cpu=', icpu, ' grid=', i, &
+                         ' ix_p=', ix_p, ' iy_p=', iy_p, ' iz_p=', iz_p
+                    call clean_stop
+                 end if
+                 ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
+                 father(igrid_new) = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
+              end if
+
+              ! Set son in parent cell
+              son(father(igrid_new)) = igrid_new
+
+              ! Insert into Morton hash
+              mkey = grid_to_morton(igrid_new, ilevel)
+              call morton_hash_insert(mort_table(ilevel), mkey, igrid_new)
+              grid_level(igrid_new) = ilevel
+
+              igrid_prev_cpu = igrid_new
+           end do
+           grid_offset = grid_offset + ngrid_per_cpu(icpu)
+        end do
+
+        deallocate(xg_all, son_flag_buf, cpu_map_buf)
+        call hdf5_close_group(lvl_grp_id)
+     end do
+
+     deallocate(ngrid_per_cpu)
+  end if
 
   ! Restore HDF5 error printing
   call hdf5_restore_errors()
@@ -388,7 +639,6 @@ subroutine restore_amr_hdf5()
   !=====================================================
   ! Step 10: Close HDF5 file
   !=====================================================
-  deallocate(ngrid_per_cpu)
   call hdf5_close_file()
 
   if(myid==1) write(*,*) 'HDF5 AMR restore done.'
@@ -402,15 +652,16 @@ subroutine restore_hydro_hdf5()
   use amr_commons
   use hydro_commons
   use ramses_hdf5_io
+  use varcpu_hdf5_data
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
   integer :: ilevel, i, igrid, ind, iskip, ivar, info
-  integer :: ngrid_loc, ncpu_file, nvar_file
+  integer :: ngrid_loc, ncpu_file, nvar_file, fidx
   integer, allocatable :: ngrid_all(:)
   integer(i8b) :: ncells_total, offset_cells, ngrid_total
-  real(dp), allocatable :: ubuf(:)
+  real(dp), allocatable :: ubuf(:), ubuf_all(:)
   integer(HID_T) :: grp_id, lvl_grp_id, hdr_grp_id
   character(len=200) :: h5filename
   character(len=40) :: grp_name
@@ -434,69 +685,117 @@ subroutine restore_hydro_hdf5()
      if(myid==1) write(*,*) 'WARNING: HDF5 nvar mismatch, file=', nvar_file, ' expected=', nvar
   end if
 
-  allocate(ngrid_all(ncpu))
-
   ! Suppress HDF5 error messages for missing level groups
   call hdf5_suppress_errors()
 
-  do ilevel = 1, nlevelmax
-     ngrid_loc = numbl(myid, ilevel)
-     call MPI_ALLGATHER(ngrid_loc, 1, MPI_INTEGER, ngrid_all, 1, MPI_INTEGER, &
-          MPI_COMM_WORLD, info)
-     ngrid_total = 0
-     do i = 1, ncpu
-        ngrid_total = ngrid_total + ngrid_all(i)
-     end do
-     if(ngrid_total == 0) cycle
+  if(varcpu_restart) then
+     !===================================================
+     ! VARIABLE NCPU PATH: ALL ranks read ALL data, scatter
+     !===================================================
+     do ilevel = 1, nlevelmax
+        ngrid_loc = numbl(myid, ilevel)
+        if(varcpu_ngrid_file(ilevel) == 0) cycle
 
-     ncells_total = ngrid_total * twotondim
-     offset_cells = 0
-     do i = 1, myid - 1
-        offset_cells = offset_cells + int(ngrid_all(i), i8b) * twotondim
-     end do
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/hydro/level_'//trim(lvl_str)
 
-     write(lvl_str, '(I0)') ilevel
-     grp_name = '/hydro/level_'//trim(lvl_str)
+        block
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
+           if(h5err /= 0) cycle
+        end block
 
-     block
-        integer :: h5err
-        logical :: grp_exists
-        call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
-        if(.not. grp_exists .or. h5err /= 0) cycle
-        call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
-        if(h5err /= 0) cycle
-     end block
+        ! ALL ranks read ALL hydro data for this level
+        allocate(ubuf_all(varcpu_ngrid_file(ilevel) * twotondim))
 
-     if(ngrid_loc > 0) then
-        allocate(ubuf(ngrid_loc * twotondim))
-     else
-        allocate(ubuf(1))
-     end if
+        do ivar = 1, min(nvar, nvar_file)
+           write(var_str, '(I0)') ivar
+           call hdf5_read_dataset_all_dp(lvl_grp_id, 'uold_'//trim(var_str), &
+                ubuf_all, varcpu_ngrid_file(ilevel) * twotondim)
 
-     ! Read uold: raw conservative variables
-     do ivar = 1, min(nvar, nvar_file)
-        write(var_str, '(I0)') ivar
-        call hdf5_read_dataset_1d_dp(lvl_grp_id, 'uold_'//trim(var_str), &
-             ubuf, ngrid_loc * twotondim, offset_cells)
-
-        ! Scatter to uold array
-        igrid = headl(myid, ilevel)
-        do i = 1, ngrid_loc
-           do ind = 1, twotondim
-              iskip = ncoarse + (ind - 1) * ngridmax
-              uold(igrid + iskip, ivar) = ubuf((i-1)*twotondim + ind)
+           ! Scatter to active grids owned by this rank
+           igrid = headl(myid, ilevel)
+           do while(igrid > 0)
+              fidx = varcpu_grid_file_idx(igrid)
+              do ind = 1, twotondim
+                 iskip = ncoarse + (ind - 1) * ngridmax
+                 uold(igrid + iskip, ivar) = ubuf_all((fidx-1)*twotondim + ind)
+              end do
+              igrid = next(igrid)
            end do
-           igrid = next(igrid)
         end do
+
+        deallocate(ubuf_all)
+        call hdf5_close_group(lvl_grp_id)
+     end do
+  else
+     !===================================================
+     ! SAME NCPU PATH: parallel I/O with per-rank offsets
+     !===================================================
+     allocate(ngrid_all(ncpu))
+
+     do ilevel = 1, nlevelmax
+        ngrid_loc = numbl(myid, ilevel)
+        call MPI_ALLGATHER(ngrid_loc, 1, MPI_INTEGER, ngrid_all, 1, MPI_INTEGER, &
+             MPI_COMM_WORLD, info)
+        ngrid_total = 0
+        do i = 1, ncpu
+           ngrid_total = ngrid_total + ngrid_all(i)
+        end do
+        if(ngrid_total == 0) cycle
+
+        ncells_total = ngrid_total * twotondim
+        offset_cells = 0
+        do i = 1, myid - 1
+           offset_cells = offset_cells + int(ngrid_all(i), i8b) * twotondim
+        end do
+
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/hydro/level_'//trim(lvl_str)
+
+        block
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
+           if(h5err /= 0) cycle
+        end block
+
+        if(ngrid_loc > 0) then
+           allocate(ubuf(ngrid_loc * twotondim))
+        else
+           allocate(ubuf(1))
+        end if
+
+        ! Read uold: raw conservative variables
+        do ivar = 1, min(nvar, nvar_file)
+           write(var_str, '(I0)') ivar
+           call hdf5_read_dataset_1d_dp(lvl_grp_id, 'uold_'//trim(var_str), &
+                ubuf, ngrid_loc * twotondim, offset_cells)
+
+           ! Scatter to uold array
+           igrid = headl(myid, ilevel)
+           do i = 1, ngrid_loc
+              do ind = 1, twotondim
+                 iskip = ncoarse + (ind - 1) * ngridmax
+                 uold(igrid + iskip, ivar) = ubuf((i-1)*twotondim + ind)
+              end do
+              igrid = next(igrid)
+           end do
+        end do
+
+        deallocate(ubuf)
+        call hdf5_close_group(lvl_grp_id)
      end do
 
-     deallocate(ubuf)
-     call hdf5_close_group(lvl_grp_id)
-  end do
+     deallocate(ngrid_all)
+  end if
 
   call hdf5_restore_errors()
-
-  deallocate(ngrid_all)
   call hdf5_close_file()
 
   ! Virtual exchange to populate ghost cells
@@ -518,15 +817,16 @@ subroutine restore_poisson_hdf5()
   use amr_commons
   use poisson_commons
   use ramses_hdf5_io
+  use varcpu_hdf5_data
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
-  integer :: ilevel, i, igrid, ind, iskip, idim, info
+  integer :: ilevel, i, igrid, ind, iskip, idim, info, fidx
   integer :: ngrid_loc
   integer, allocatable :: ngrid_all(:)
   integer(i8b) :: ncells_total, offset_cells, ngrid_total
-  real(dp), allocatable :: pbuf(:)
+  real(dp), allocatable :: pbuf(:), pbuf_all(:)
   integer(HID_T) :: lvl_grp_id
   character(len=200) :: h5filename
   character(len=40) :: grp_name
@@ -543,76 +843,140 @@ subroutine restore_poisson_hdf5()
   ! Suppress HDF5 error messages for missing level groups
   call hdf5_suppress_errors()
 
-  allocate(ngrid_all(ncpu))
+  if(varcpu_restart) then
+     !===================================================
+     ! VARIABLE NCPU PATH: ALL ranks read ALL data, scatter
+     !===================================================
+     do ilevel = 1, nlevelmax
+        ngrid_loc = numbl(myid, ilevel)
+        if(varcpu_ngrid_file(ilevel) == 0) cycle
 
-  do ilevel = 1, nlevelmax
-     ngrid_loc = numbl(myid, ilevel)
-     call MPI_ALLGATHER(ngrid_loc, 1, MPI_INTEGER, ngrid_all, 1, MPI_INTEGER, &
-          MPI_COMM_WORLD, info)
-     ngrid_total = 0
-     do i = 1, ncpu
-        ngrid_total = ngrid_total + ngrid_all(i)
-     end do
-     if(ngrid_total == 0) cycle
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/gravity/level_'//trim(lvl_str)
 
-     ncells_total = ngrid_total * twotondim
-     offset_cells = 0
-     do i = 1, myid - 1
-        offset_cells = offset_cells + int(ngrid_all(i), i8b) * twotondim
-     end do
+        block
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
+           if(h5err /= 0) cycle
+        end block
 
-     write(lvl_str, '(I0)') ilevel
-     grp_name = '/gravity/level_'//trim(lvl_str)
+        ! ALL ranks read ALL data for this level
+        allocate(pbuf_all(varcpu_ngrid_file(ilevel) * twotondim))
 
-     block
-        integer :: h5err
-        logical :: grp_exists
-        call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
-        if(.not. grp_exists .or. h5err /= 0) cycle
-        call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
-        if(h5err /= 0) cycle
-     end block
-
-     if(ngrid_loc > 0) then
-        allocate(pbuf(ngrid_loc * twotondim))
-     else
-        allocate(pbuf(1))
-     end if
-
-     ! Read phi
-     call hdf5_read_dataset_1d_dp(lvl_grp_id, 'phi', &
-          pbuf, ngrid_loc * twotondim, offset_cells)
-     igrid = headl(myid, ilevel)
-     do i = 1, ngrid_loc
-        do ind = 1, twotondim
-           iskip = ncoarse + (ind - 1) * ngridmax
-           phi(igrid + iskip) = pbuf((i-1)*twotondim + ind)
+        ! Read phi
+        call hdf5_read_dataset_all_dp(lvl_grp_id, 'phi', &
+             pbuf_all, varcpu_ngrid_file(ilevel) * twotondim)
+        igrid = headl(myid, ilevel)
+        do while(igrid > 0)
+           fidx = varcpu_grid_file_idx(igrid)
+           do ind = 1, twotondim
+              iskip = ncoarse + (ind - 1) * ngridmax
+              phi(igrid + iskip) = pbuf_all((fidx-1)*twotondim + ind)
+           end do
+           igrid = next(igrid)
         end do
-        igrid = next(igrid)
+
+        ! Read force
+        do idim = 1, ndim
+           write(dim_str, '(I0)') idim
+           call hdf5_read_dataset_all_dp(lvl_grp_id, 'f_'//trim(dim_str), &
+                pbuf_all, varcpu_ngrid_file(ilevel) * twotondim)
+           igrid = headl(myid, ilevel)
+           do while(igrid > 0)
+              fidx = varcpu_grid_file_idx(igrid)
+              do ind = 1, twotondim
+                 iskip = ncoarse + (ind - 1) * ngridmax
+                 f(igrid + iskip, idim) = pbuf_all((fidx-1)*twotondim + ind)
+              end do
+              igrid = next(igrid)
+           end do
+        end do
+
+        deallocate(pbuf_all)
+        call hdf5_close_group(lvl_grp_id)
      end do
 
-     ! Read force
-     do idim = 1, ndim
-        write(dim_str, '(I0)') idim
-        call hdf5_read_dataset_1d_dp(lvl_grp_id, 'f_'//trim(dim_str), &
+     ! Free mapping arrays — no longer needed
+     if(allocated(varcpu_grid_file_idx)) deallocate(varcpu_grid_file_idx)
+     if(allocated(varcpu_ngrid_file)) deallocate(varcpu_ngrid_file)
+  else
+     !===================================================
+     ! SAME NCPU PATH: parallel I/O with per-rank offsets
+     !===================================================
+     allocate(ngrid_all(ncpu))
+
+     do ilevel = 1, nlevelmax
+        ngrid_loc = numbl(myid, ilevel)
+        call MPI_ALLGATHER(ngrid_loc, 1, MPI_INTEGER, ngrid_all, 1, MPI_INTEGER, &
+             MPI_COMM_WORLD, info)
+        ngrid_total = 0
+        do i = 1, ncpu
+           ngrid_total = ngrid_total + ngrid_all(i)
+        end do
+        if(ngrid_total == 0) cycle
+
+        ncells_total = ngrid_total * twotondim
+        offset_cells = 0
+        do i = 1, myid - 1
+           offset_cells = offset_cells + int(ngrid_all(i), i8b) * twotondim
+        end do
+
+        write(lvl_str, '(I0)') ilevel
+        grp_name = '/gravity/level_'//trim(lvl_str)
+
+        block
+           integer :: h5err
+           logical :: grp_exists
+           call h5lexists_f(hdf5_file_id, trim(grp_name), grp_exists, h5err)
+           if(.not. grp_exists .or. h5err /= 0) cycle
+           call h5gopen_f(hdf5_file_id, trim(grp_name), lvl_grp_id, h5err)
+           if(h5err /= 0) cycle
+        end block
+
+        if(ngrid_loc > 0) then
+           allocate(pbuf(ngrid_loc * twotondim))
+        else
+           allocate(pbuf(1))
+        end if
+
+        ! Read phi
+        call hdf5_read_dataset_1d_dp(lvl_grp_id, 'phi', &
              pbuf, ngrid_loc * twotondim, offset_cells)
         igrid = headl(myid, ilevel)
         do i = 1, ngrid_loc
            do ind = 1, twotondim
               iskip = ncoarse + (ind - 1) * ngridmax
-              f(igrid + iskip, idim) = pbuf((i-1)*twotondim + ind)
+              phi(igrid + iskip) = pbuf((i-1)*twotondim + ind)
            end do
            igrid = next(igrid)
         end do
+
+        ! Read force
+        do idim = 1, ndim
+           write(dim_str, '(I0)') idim
+           call hdf5_read_dataset_1d_dp(lvl_grp_id, 'f_'//trim(dim_str), &
+                pbuf, ngrid_loc * twotondim, offset_cells)
+           igrid = headl(myid, ilevel)
+           do i = 1, ngrid_loc
+              do ind = 1, twotondim
+                 iskip = ncoarse + (ind - 1) * ngridmax
+                 f(igrid + iskip, idim) = pbuf((i-1)*twotondim + ind)
+              end do
+              igrid = next(igrid)
+           end do
+        end do
+
+        deallocate(pbuf)
+        call hdf5_close_group(lvl_grp_id)
      end do
 
-     deallocate(pbuf)
-     call hdf5_close_group(lvl_grp_id)
-  end do
+     deallocate(ngrid_all)
+  end if
 
   call hdf5_restore_errors()
-
-  deallocate(ngrid_all)
   call hdf5_close_file()
 
   ! Virtual exchange to populate ghost cells

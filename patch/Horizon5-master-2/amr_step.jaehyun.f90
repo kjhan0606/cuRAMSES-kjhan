@@ -87,7 +87,15 @@ recursive subroutine amr_step(ilevel,icount)
   ok_defrag=.false.
   if(levelmin.lt.nlevelmax)then
      if(ilevel==levelmin)then
-        if(nremap>0)then
+        if(varcpu_restart_done)then
+           ! Force load balance after variable-ncpu restart
+           if(myid==1) write(*,*) 'Forcing load_balance after variable-ncpu restart'
+           call load_balance
+           call defrag
+           ok_defrag=.true.
+           varcpu_restart_done=.false.
+           first_step=.false.
+        else if(nremap>0)then
            ! Skip first load balance because it has been performed before file dump
            if(nrestart>0.and.first_step)then
               first_step=.false.

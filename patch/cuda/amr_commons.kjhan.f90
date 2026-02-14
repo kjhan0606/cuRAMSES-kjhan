@@ -6,6 +6,7 @@ module amr_commons
   logical::init=.false.                         ! Set up or run
   logical::balance=.false.                      ! Load balance or run
   logical::shrink=.false.                       ! Shrink mesh or run
+  logical::varcpu_restart_done=.false.          ! Force load_balance after variable-ncpu restart
   integer::nstep=0                              ! Time step
   integer::nstep_coarse=0                       ! Coarse step
   integer::nstep_coarse_old=0                   ! Old coarse step
