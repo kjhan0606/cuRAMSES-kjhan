@@ -65,7 +65,7 @@ subroutine restore_amr_hdf5()
   real(dp) :: twotol
 
   ! Variable-ncpu specific variables
-  integer, allocatable :: tail_cpu(:)  ! per-CPU tail pointer for linked list
+  integer :: father_cell
   real(dp) :: scale, dx, xx_cell(1,3), xc_off(3)
   integer :: c_tmp(1)
   integer :: nx_loc
@@ -304,9 +304,13 @@ subroutine restore_amr_hdf5()
 
   if(varcpu_restart) then
      !===================================================
-     ! VARIABLE NCPU PATH: read ALL grids, recompute ownership
+     ! VARIABLE NCPU PATH: distributed active-only grid creation
+     ! Each rank creates only its active grids (cpu_map(father)==myid)
+     ! Virtual grids are created via refine_coarse/refine_fine
+     ! This reduces per-rank memory by ~ncpu× vs reading ALL grids
      !===================================================
-     allocate(tail_cpu(ncpu))
+     balance = .true.
+     shrink = .false.
 
      do ilevel = 1, nlevelmax_file
         ! Check if level group exists
@@ -346,7 +350,7 @@ subroutine restore_amr_hdf5()
            cycle
         end if
 
-        ! ALL ranks read ALL grids' data at this level
+        ! ALL ranks read ALL grids' data at this level (temporary buffer)
         allocate(xg_all(ngrid_all_int, ndim))
         allocate(son_flag_buf(ngrid_all_int * twotondim))
 
@@ -360,17 +364,42 @@ subroutine restore_amr_hdf5()
         ! Read ALL son flags (for flag1)
         call hdf5_read_dataset_all_int(lvl_grp_id, 'son_flag', &
              son_flag_buf, ngrid_all_int * twotondim)
-        ! Note: we do NOT read cpu_map from file — will recompute
 
-        ! Initialize hash table for this level
-        call morton_hash_init(mort_table(ilevel), max(2 * ngrid_all_int, 16))
+        ! Initialize hash table for this level (sized for local grids)
+        call morton_hash_init(mort_table(ilevel), &
+             max(4 * (ngrid_all_int / max(ncpu, 1) + 1), 16))
 
         ! Subcell offsets at this level
         dx = 0.5d0**ilevel
 
-        !--- Phase 1: Allocate all grids, set xg, father, son, Morton ---
-        tail_cpu(:) = 0
+        !--- Phase 1: Create ACTIVE grids only (cpu_map(father)==myid) ---
+        igrid_prev_cpu = 0
         do i = 1, ngrid_all_int
+           ! Compute father cell index
+           if(ilevel == 1) then
+              twotol = 1.0d0
+              ix = int(xg_all(i, 1) * twotol)
+              iy = int(xg_all(i, 2) * twotol)
+              iz = int(xg_all(i, 3) * twotol)
+              father_cell = 1 + ix + iy * nx + iz * nxny
+           else
+              twotol = 2.0d0**(ilevel-1)
+              ix = int(xg_all(i, 1) * twotol)
+              iy = int(xg_all(i, 2) * twotol)
+              iz = int(xg_all(i, 3) * twotol)
+              ix_p = ix / 2
+              iy_p = iy / 2
+              iz_p = iz / 2
+              mkey = morton_encode(ix_p, iy_p, iz_p)
+              igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
+              if(igrid_father == 0) cycle  ! Father not on this rank → not active
+              ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
+              father_cell = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
+           end if
+
+           ! Check if this grid is active (owned by myid)
+           if(cpu_map(father_cell) /= myid) cycle
+
            ! Allocate grid from free list
            igrid_new = headf
            if(igrid_new == 0) then
@@ -410,55 +439,27 @@ subroutine restore_amr_hdf5()
            end do
 
            ! Set father pointer
-           if(ilevel == 1) then
-              twotol = 1.0d0
-              ix = int(xg_all(i, 1) * twotol)
-              iy = int(xg_all(i, 2) * twotol)
-              iz = int(xg_all(i, 3) * twotol)
-              father(igrid_new) = 1 + ix + iy * nx + iz * nxny
-           else
-              twotol = 2.0d0**(ilevel-1)
-              ix = int(xg_all(i, 1) * twotol)
-              iy = int(xg_all(i, 2) * twotol)
-              iz = int(xg_all(i, 3) * twotol)
-              ix_p = ix / 2
-              iy_p = iy / 2
-              iz_p = iz / 2
-              mkey = morton_encode(ix_p, iy_p, iz_p)
-              igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
-              if(igrid_father == 0) then
-                 write(*,*) 'ERROR: father not found! myid=', myid, &
-                      ' level=', ilevel, ' grid=', i, &
-                      ' ix_p=', ix_p, ' iy_p=', iy_p, ' iz_p=', iz_p
-                 call clean_stop
-              end if
-              ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
-              father(igrid_new) = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
-           end if
+           father(igrid_new) = father_cell
 
            ! Set son in parent cell
-           son(father(igrid_new)) = igrid_new
+           son(father_cell) = igrid_new
 
            ! Insert into Morton hash
            mkey = grid_to_morton(igrid_new, ilevel)
            call morton_hash_insert(mort_table(ilevel), mkey, igrid_new)
            grid_level(igrid_new) = ilevel
 
-           ! Determine owner CPU from father cell's cpu_map
-           icpu = cpu_map(father(igrid_new))
-
-           ! Append to linked list for icpu at this level
-           if(tail_cpu(icpu) == 0) then
-              headl(icpu, ilevel) = igrid_new
-              prev(igrid_new) = 0
+           ! Append to linked list for myid at this level
+           if(igrid_prev_cpu == 0) then
+              headl(myid, ilevel) = igrid_new
            else
-              next(tail_cpu(icpu)) = igrid_new
-              prev(igrid_new) = tail_cpu(icpu)
+              next(igrid_prev_cpu) = igrid_new
            end if
+           prev(igrid_new) = igrid_prev_cpu
            next(igrid_new) = 0
-           taill(icpu, ilevel) = igrid_new
-           tail_cpu(icpu) = igrid_new
-           numbl(icpu, ilevel) = numbl(icpu, ilevel) + 1
+           taill(myid, ilevel) = igrid_new
+           numbl(myid, ilevel) = numbl(myid, ilevel) + 1
+           igrid_prev_cpu = igrid_new
 
            ! Save file→igrid mapping for hydro/poisson restore
            varcpu_grid_file_idx(igrid_new) = i
@@ -466,9 +467,33 @@ subroutine restore_amr_hdf5()
 
         deallocate(xg_all, son_flag_buf)
         call hdf5_close_group(lvl_grp_id)
+
+        !--- Phase 2: Create virtual grids via RAMSES refine mechanism ---
+        ! Active grids already set son(father)>0, so refine skips those cells
+        ! Only cells with flag1==1 AND son==0 get new (virtual) grids
+        if(ilevel == 1) then
+           call flag_coarse
+           call refine_coarse
+        else
+           call refine_fine(ilevel - 1)
+        end if
+
+        ! Build communicators for this level
+        call build_comm(ilevel)
+
+        ! Exchange flag1/cpu_map/cpu_map2 from active to virtual grids
+        ! (needed for refine_fine at next level)
+        call make_virtual_fine_int(flag1(1), ilevel)
+        call make_virtual_fine_int(cpu_map(1), ilevel)
+        call make_virtual_fine_int(cpu_map2(1), ilevel)
+
+        if(myid==1) write(*,'(A,I3,A,I10,A,I10)') &
+             ' HDF5 level ', ilevel, ' active: ', numbl(myid, ilevel), &
+             ' total: ', numbtot(1, ilevel)
      end do
 
-     deallocate(tail_cpu)
+     balance = .false.
+     shrink = .false.
 
   else
      !===================================================
