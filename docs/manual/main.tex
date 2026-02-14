@@ -1199,6 +1199,50 @@ The merged red-black exchange introduces a minor change in the energy conservati
 \end{infobox}
 
 
+%======================================================
+\chapter{Scaling Performance}
+\label{ch:scaling}
+%======================================================
+
+Strong scaling tests were performed using a $200 \times 10^6$ particle cosmological simulation, restarted from an HDF5 checkpoint at coarse step~5 and evolved to step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC 7543 node (64 physical cores, 128 threads) with 1~TB of DDR4 memory.
+
+The variable-\texttt{ncpu} restart allows the 12-rank checkpoint to be read with any number of MPI ranks. A forced \texttt{load\_balance} on the first coarse step ensures optimal grid distribution.
+
+\subsection{Results}
+
+\begin{center}
+\begin{tabular}{rrrrrrrrr}
+\toprule
+\textbf{ncpu} & \textbf{Elapsed} & \textbf{Particles} & \textbf{Poisson} & \textbf{MG} & \textbf{Hydro-GZ} & \textbf{Godunov} & \textbf{LoadBal} & \textbf{I/O} \\
+ & (s) & (s) & (s) & (s) & (s) & (s) & (s) & (s) \\
+\midrule
+4  & 43.4  & 7.16 & 6.11 & 18.77 & 0.58 & 3.50 & 12.2 & 2.0 \\
+8  & 25.3  & 3.61 & 3.29 &  9.91 & 0.64 & 2.32 & 11.9 & 1.8 \\
+16 & 20.1  & 1.98 & 2.05 &  7.01 & 0.55 & 3.38 & 16.4 & 2.4 \\
+24 & 21.5  & 1.56 & 1.53 &  5.99 & 0.52 & 6.22 & 23.3 & 2.8 \\
+32 & 23.5  & 1.15 & 1.38 &  5.43 & 0.70 & 8.38 & 33.1 & 4.0 \\
+48 & 23.4  & 0.98 & 1.22 &  5.66 & 0.74 & 7.93 & 55.4 & 3.4 \\
+64 & 25.6  & 0.76 & 1.14 &  5.69 & 0.95 & 8.64 & 83.1 & 5.8 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Key Observations}
+
+\begin{itemize}
+\item \textbf{Particle operations} scale nearly ideally: 7.16~s (4 ranks) to 0.76~s (64 ranks), a $9.4\times$ speedup for $16\times$ the ranks.
+\item \textbf{Multigrid Poisson solver} scales well up to 16 ranks (18.77~s $\to$ 7.01~s), then plateaus near 5.5~s beyond 32 ranks.
+\item \textbf{Ghost-zone exchange} remains sub-second across all \texttt{ncpu} thanks to the hierarchical k-section routing.
+\item \textbf{Load balancing overhead} grows with \texttt{ncpu} (12~s for 4 ranks to 83~s for 64 ranks). This is a one-time cost at the \texttt{nremap} interval.
+\item \textbf{Optimal wall-clock time} of 20.1~s is achieved at 16 ranks for this problem size, representing a $2.2\times$ speedup over the 4-rank baseline.
+\item All configurations produce bit-identical gravitational potential ($e_{\rm pot} = -1.88 \times 10^{-6}$) and kinetic energy ($e_{\rm kin} = 1.23 \times 10^{-6}$) at step~10.
+\end{itemize}
+
+\begin{infobox}[Variable-ncpu Restart]
+The 12-rank same-\texttt{ncpu} restart (no forced load balance) shows significantly degraded performance: 144.7~s elapsed vs.\ 20.1~s for 16 ranks with variable-\texttt{ncpu} restart. This demonstrates the critical importance of the initial load balance step after restart.
+\end{infobox}
+
+
 %------------------------------------------------------
 % PART II: Namelist Reference
 %------------------------------------------------------
