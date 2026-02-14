@@ -27,7 +27,8 @@ subroutine read_params
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
        & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,ordering &
        & ,bisec_tol,static,geom,overload,cost_weighting,aton &
-       & ,memory_balance,mem_weight_grid,mem_weight_part
+       & ,memory_balance,mem_weight_grid,mem_weight_part &
+       & ,jobcontrolfile
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
        & ,informat,outformat

@@ -182,6 +182,8 @@ subroutine adaptive_loop
      ! New coarse time-step
      nstep_coarse=nstep_coarse+1
 
+     call check_jobcontrol
+
 !jhshin1 -walltime setting
 #ifndef WITHOUTMPI
      tt2=MPI_WTIME()
@@ -226,3 +228,54 @@ subroutine adaptive_loop
 999 format(' Level ',I2,' has ',I10,' grids (',3(I8,','),')')
 
 end subroutine adaptive_loop
+
+subroutine check_jobcontrol
+  use amr_commons
+  use amr_parameters
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+  integer::mpi_err
+#endif
+  integer::istep,iaction,ios,action_todo
+  logical::fexist
+
+  if(len_trim(jobcontrolfile)==0) return
+
+  action_todo = 0  ! default: do nothing
+
+  if(myid==1) then
+    inquire(file=trim(jobcontrolfile), exist=fexist)
+    if(fexist) then
+      open(unit=99, file=trim(jobcontrolfile), form='formatted', status='old', iostat=ios)
+      if(ios==0) then
+        do  ! read all lines
+          read(99, *, iostat=ios) istep, iaction
+          if(ios /= 0) exit
+          if(istep == 0 .or. istep == nstep_coarse) then
+            ! Match: take the strongest action (-1 > 1 > 0)
+            if(iaction == -1) then
+              action_todo = -1  ! stop always wins
+            else if(iaction == 1 .and. action_todo /= -1) then
+              action_todo = 1
+            endif
+          endif
+        end do
+        close(99)
+      endif
+    endif
+  endif
+
+#ifndef WITHOUTMPI
+  call MPI_BCAST(action_todo, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, mpi_err)
+#endif
+
+  if(action_todo == 1) then
+    output_now = .true.
+    if(myid==1) write(*,'(A,I7)') ' Job control: extra output requested at step', nstep_coarse
+  else if(action_todo == -1) then
+    output_now = .true.
+    nstepmax = nstep_coarse  ! triggers clean_stop in update_time
+    if(myid==1) write(*,'(A,I7)') ' Job control: stop requested at step', nstep_coarse
+  endif
+end subroutine check_jobcontrol
