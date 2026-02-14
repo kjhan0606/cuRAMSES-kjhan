@@ -430,6 +430,50 @@ additional diagnostics (grid counts, memory usage, load balance
 statistics) to standard output at each coarse step.
 \end{quote}
 
+% ------------------------------------------------------------------
+\paramheader{jobcontrolfile}{character(128)}{'' (empty)}
+\label{param:jobcontrolfile}
+
+\begin{quote}
+Path to a runtime job control file.  When set to a non-empty string,
+rank~0 reads this file at every coarse step to check for user-requested
+actions.  The action is broadcast to all ranks via \texttt{MPI\_BCAST}.
+
+\textbf{File format.}\quad  Each line contains two integers separated by
+whitespace:
+\begin{center}
+\texttt{step\_number\quad action\_code}
+\end{center}
+\begin{itemize}[nosep]
+  \item \texttt{step\_number = 0} --- match immediately (every step).
+  \item \texttt{step\_number =} $N$ --- match when
+        \texttt{nstep\_coarse} $= N$.
+  \item \texttt{action\_code = 0} --- do nothing.
+  \item \texttt{action\_code = 1} --- write an extra snapshot and continue.
+  \item \texttt{action\_code = -1} --- write an extra snapshot and stop
+        gracefully (sets \paramref{nstepmax}\texttt{= nstep\_coarse}).
+\end{itemize}
+If multiple lines match, \texttt{-1} (stop) takes priority over
+\texttt{1} (output).  The file is \emph{not} deleted after reading;
+lines with \texttt{step\_number = 0} re-trigger every step until the
+file is removed or modified by the user.
+
+\textbf{Example.}\quad  To request a graceful stop at the next coarse step:
+\begin{verbatim}
+echo "0 -1" > jobcontrol.txt
+\end{verbatim}
+To schedule extra outputs at specific steps:
+\begin{verbatim}
+100 1
+200 1
+500 -1
+\end{verbatim}
+
+\apinote{Output numbering (\texttt{ifout}) continues incrementally;
+extra outputs from job control use the next sequential number
+automatically.}
+\end{quote}
+
 
 %======================================================================
 \section{\texttt{\&AMR\_PARAMS} -- Adaptive Mesh Refinement}
@@ -1513,6 +1557,7 @@ nsubcycle = 1, 1, 1, 2, 2, 2, 2
 nstepmax = 10000000
 ordering = 'ksection'
 memory_balance = .true.
+jobcontrolfile = 'jobcontrol.txt'
 /
 
 &AMR_PARAMS

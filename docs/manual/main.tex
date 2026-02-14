@@ -1283,8 +1283,28 @@ Runtime control parameters.
 \texttt{memory\_balance} & logical & \texttt{.false.} & Enable memory-weighted balancing \\
 \texttt{mem\_weight\_grid} & integer & 270 & Memory per grid (dp-equivalents) \\
 \texttt{mem\_weight\_part} & integer & 12 & Memory per particle (dp-equivalents) \\
+\midrule
+\multicolumn{4}{l}{\textit{Job control (new)}} \\
+\midrule
+\texttt{jobcontrolfile} & char(128) & \texttt{''} & Runtime control file for stop/output requests \\
 \bottomrule
 \end{longtable}
+
+\noindent
+\textbf{Job control file.}\quad
+When \texttt{jobcontrolfile} is set to a non-empty path, rank~0 reads the file
+at every coarse step.  Each line contains two integers: \texttt{step\_number}
+and \texttt{action\_code}.
+\begin{itemize}[nosep]
+  \item \texttt{step\_number = 0}: match at every step (immediate).
+  \item \texttt{step\_number = $N$}: match when \texttt{nstep\_coarse} $= N$.
+  \item \texttt{action = 1}: write an extra output and continue.
+  \item \texttt{action = -1}: write an extra output and stop gracefully.
+\end{itemize}
+Example: to request a graceful stop at the next coarse step, create the file
+with \texttt{echo "0 -1" > jobcontrol.txt}.  The file is not deleted after
+reading; lines with \texttt{step\_number = 0} re-trigger every step until
+the file is removed or modified.
 
 
 %======================================================
@@ -1480,6 +1500,7 @@ ncontrol=1
 nstepmax=10
 ordering='ksection'
 memory_balance=.true.
+jobcontrolfile='jobcontrol.txt'
 /
 
 &OUTPUT_PARAMS
