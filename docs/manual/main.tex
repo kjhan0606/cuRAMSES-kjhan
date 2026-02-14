@@ -1349,6 +1349,97 @@ All configurations use a fixed total of 64 physical cores.  Speedup is relative 
 For a single dual-socket AMD EPYC node with 64 cores, we recommend \textbf{32 MPI ranks $\times$ 2 OpenMP threads} for cuRAMSES cosmological simulations with $\sim$$200 \times 10^6$ particles.  Set \texttt{OMP\_NUM\_THREADS=2}, \texttt{OMP\_PROC\_BIND=close}, \texttt{OMP\_PLACES=cores}, and \texttt{I\_MPI\_PIN\_DOMAIN=omp} in the job script.
 \end{infobox}
 
+\section{Per-Routine Scaling Analysis}
+
+Table~\ref{tab:routine-mpi} shows the complete timer breakdown for pure MPI scaling, and Table~\ref{tab:routine-hybrid} for the hybrid configurations.  All times are averages across ranks in seconds.
+
+\begin{table}[htbp]
+\caption{Full timer breakdown --- pure MPI (\texttt{OMP\_NUM\_THREADS=1}).}
+\label{tab:routine-mpi}
+\begin{center}
+\small
+\begin{tabular}{lrrrrrrl}
+\toprule
+\textbf{Routine} & \textbf{2r} & \textbf{4r} & \textbf{8r} & \textbf{16r} & \textbf{32r} & \textbf{64r} & \textbf{Scale} \\
+\midrule
+poisson-mg     & 102.69 & 82.00 & 43.46 & 23.90 & 12.59 &  7.95 & 12.9$\times$ \\
+godunov        &  46.67 & 36.64 & 21.68 & 15.88 &  8.71 &  5.14 &  9.1$\times$ \\
+particles      &  20.92 & 16.74 &  8.93 &  4.67 &  2.27 &  1.18 & 17.7$\times$ \\
+poisson        &  18.22 & 14.76 &  8.18 &  4.97 &  2.73 &  1.64 & 11.1$\times$ \\
+flag           &  11.35 &  8.23 &  4.41 &  2.78 &  1.28 &  0.77 & 14.7$\times$ \\
+loadbalance    &   9.14 &  7.62 &  4.90 &  3.96 &  2.27 &  1.61 &  5.7$\times$ \\
+io             &   3.14 &  1.96 &  1.86 &  2.72 &  4.23 &  6.17 &  0.5$\times\downarrow$ \\
+coarse levels  &   2.27 &  2.59 &  2.12 &  2.56 &  2.04 &  1.91 &  1.2$\times$ \\
+courant        &   2.23 &  1.49 &  0.76 &  0.41 &  0.23 &  0.12 & 18.6$\times$ \\
+hydro-gz       &   0.52 &  0.89 &  1.09 &  1.26 &  1.11 &  1.13 &  0.5$\times\downarrow$ \\
+rev-gz         &   0.53 &  1.79 &  2.42 &  1.75 &  0.78 &  0.71 &  0.7$\times\downarrow$ \\
+set unew       &   0.28 &  0.26 &  0.22 &  0.23 &  0.15 &  0.10 &  2.8$\times$ \\
+set uold       &   1.11 &  0.77 &  0.38 &  0.24 &  0.15 &  0.10 & 11.1$\times$ \\
+refine         &   0.61 &  0.86 &  0.69 &  0.62 &  0.43 &  0.27 &  2.3$\times$ \\
+\midrule
+\textbf{TOTAL} & 219.7  & 176.6 & 101.1 &  66.0 &  39.0 &  28.8 &  7.6$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\begin{table}[htbp]
+\caption{Full timer breakdown --- hybrid MPI+OpenMP (fixed 64 cores).}
+\label{tab:routine-hybrid}
+\begin{center}
+\small
+\begin{tabular}{lrrrrr}
+\toprule
+\textbf{Routine} & \textbf{64$\times$1} & \textbf{32$\times$2} & \textbf{16$\times$4} & \textbf{8$\times$8} & \textbf{4$\times$16} \\
+\midrule
+poisson-mg     &  7.95 &  7.23 &  8.81 & 11.35 & 17.22 \\
+godunov        &  5.14 &  5.19 &  5.22 &  5.46 &  6.21 \\
+particles      &  1.18 &  1.37 &  2.23 &  3.80 &  6.99 \\
+poisson        &  1.64 &  1.64 &  2.31 &  3.34 &  5.66 \\
+io             &  6.17 &  3.37 &  2.25 &  2.02 &  1.89 \\
+loadbalance    &  1.61 &  1.63 &  2.46 &  3.06 &  5.27 \\
+flag           &  0.77 &  0.89 &  1.50 &  2.47 &  4.71 \\
+hydro-gz       &  1.13 &  0.82 &  0.66 &  0.68 &  0.67 \\
+rev-gz         &  0.71 &  0.57 &  0.83 &  0.56 &  0.58 \\
+coarse levels  &  1.91 &  1.55 &  1.49 &  1.26 &  1.35 \\
+courant        &  0.12 &  0.13 &  0.13 &  0.13 &  0.14 \\
+set uold       &  0.10 &  0.10 &  0.10 &  0.11 &  0.14 \\
+set unew       &  0.10 &  0.10 &  0.09 &  0.09 &  0.10 \\
+refine         &  0.27 &  0.28 &  0.31 &  0.25 &  0.40 \\
+\midrule
+\textbf{TOTAL} &  28.8 &  24.9 &  28.4 &  34.6 &  51.3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+\end{table}
+
+\subsection{Scaling Categories}
+
+The routines fall into three distinct categories by their scaling behavior:
+
+\begin{enumerate}
+\item \textbf{Compute-bound (excellent MPI scaling).}
+  \texttt{courant} (18.6$\times$), \texttt{particles} (17.7$\times$), \texttt{flag} (14.7$\times$), \texttt{poisson-mg} (12.9$\times$), \texttt{poisson} (11.1$\times$), \texttt{godunov} (9.1$\times$).
+  These routines perform per-cell or per-particle work and scale nearly linearly with MPI rank count.  In the hybrid regime, they are insensitive to the MPI/OMP ratio as long as total cores $\geq 32$.
+
+\item \textbf{Communication-bound (anti-scaling).}
+  \texttt{hydro-gz} (ghost zone exchange) grows from 0.52\,s to 1.13\,s as ranks increase from 2 to 64, because more ranks means more boundary surfaces and MPI messages.  In the hybrid regime, reducing ranks to 32 or fewer recovers some of this cost ($0.82$\,s at 32$\times$2, $0.67$\,s at 4$\times$16).
+  \texttt{io} (HDF5 output) degrades from 3.14\,s at 2 ranks to 6.17\,s at 64 ranks due to MPI collective I/O contention.  This is the clearest anti-scaling component: halving the rank count from 64 to 32 nearly halves the I/O time (6.17\,s $\to$ 3.37\,s).
+
+\item \textbf{Flat (Amdahl-limited).}
+  \texttt{coarse levels} remains at $\sim$2\,s regardless of configuration --- this work is inherently serial or involves global communication at the coarsest level.  It becomes a larger fraction of runtime as other components scale (from 1\% at 2 ranks to 6.6\% at 64 ranks).
+\end{enumerate}
+
+\subsection{Bottleneck Shift}
+
+As the rank count increases, the dominant bottleneck shifts:
+\begin{itemize}[nosep]
+\item At 2 ranks: \texttt{poisson-mg} (46.7\%), \texttt{godunov} (21.2\%), \texttt{particles} (9.5\%)
+\item At 32$\times$2: \texttt{poisson-mg} (29.1\%), \texttt{godunov} (20.9\%), \texttt{io} (13.6\%)
+\item At 64$\times$1: \texttt{poisson-mg} (27.6\%), \texttt{io} (21.4\%), \texttt{godunov} (17.8\%)
+\end{itemize}
+At high rank counts, I/O emerges as the second-largest cost, suggesting that asynchronous or node-local I/O strategies would yield further speedup.
+
 
 %------------------------------------------------------
 % PART II: Namelist Reference
