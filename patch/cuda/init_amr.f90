@@ -299,6 +299,13 @@ subroutine init_amr
   ! Read amr file for a restart
   !----------------------------
   if(nrestart>0)then
+#ifdef HDF5
+     if(informat == 'hdf5') then
+        call restore_amr_hdf5()
+        if(myid==1) write(*,*) 'HDF5 AMR backup files read completed'
+        goto 998
+     end if
+#endif
      ! Wait for the token
 #ifndef WITHOUTMPI
      if(IOGROUPSIZE>0) then
@@ -588,6 +595,8 @@ subroutine init_amr
      end do
 
   end if
+
+998 continue  ! HDF5 restore jumps here
 
   ! Test ksection exchange subroutines
   if(ordering=='ksection') call test_ksection_exchange()

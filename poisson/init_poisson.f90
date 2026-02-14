@@ -53,6 +53,13 @@ subroutine init_poisson
   ! For a restart, read poisson file
   !--------------------------------
   if(nrestart>0)then
+#ifdef HDF5
+     if(informat == 'hdf5') then
+        call restore_poisson_hdf5()
+        if(verbose)write(*,*)'HDF5 POISSON backup files read completed'
+        return
+     end if
+#endif
      ilun=ncpu+myid+10
      call title(nrestart,nchar)
      if(IOGROUPSIZEREP>0)then 

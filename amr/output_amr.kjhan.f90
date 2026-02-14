@@ -37,8 +37,8 @@ subroutine dump_all
      endif
 
      filecmd='mkdir -p '//TRIM(filedir)
-     
-     if (.not.withoutmkdir) then 
+
+     if (.not.withoutmkdir) then
 #ifdef NOSYSTEM
         call PXFMKDIR(TRIM(filedirini),LEN(TRIM(filedirini)),O'755',info)
         call PXFMKDIR(TRIM(filedir),LEN(TRIM(filedir)),O'755',info)
@@ -46,10 +46,24 @@ subroutine dump_all
         call system(filecmd)
 #endif
      endif
-     
+
 #ifndef WITHOUTMPI
      call MPI_BARRIER(MPI_COMM_WORLD,info)
 #endif
+
+#ifdef HDF5
+     if(outformat == 'hdf5') then
+        ! HDF5 single-file output
+        call dump_all_hdf5(filedir, nchar)
+        ! Still write info/header/namelist for compatibility
+        if(myid==1)then
+           filename=TRIM(filedir)//'info_'//TRIM(nchar)//'.txt'
+           call output_info(filename)
+        endif
+        return
+     end if
+#endif
+
      if(myid==1.and.print_when_io) write(*,*)'Start backup header'
      ! Output header: must be called by each process !
      filename=TRIM(filedir)//'header_'//TRIM(nchar)//'.txt'

@@ -904,6 +904,224 @@ As a rough estimate, each grid (oct = 8 cells) requires ${\sim}2$--$3$\,kB of vi
 \end{remark}
 
 
+%======================================================
+\chapter{HDF5 I/O}
+\label{ch:hdf5}
+%======================================================
+
+\section{Overview}
+
+Standard RAMSES writes one binary file per MPI process per data type (AMR, hydro, gravity, particles), producing $O(N_{\text{cpu}} \times 4)$ files per snapshot. This creates file management challenges at high core counts and requires the same number of MPI processes for restart.
+
+The HDF5 I/O module replaces the per-CPU binary output with a single HDF5 file per snapshot, using MPI parallel I/O (collective hyperslab writes) for performance. Key benefits:
+
+\begin{itemize}[leftmargin=2em]
+  \item \textbf{Single file}: one \texttt{data\_NNNNN.h5} per snapshot instead of thousands of files
+  \item \textbf{Parallel I/O}: MPI-IO backend ensures scalable write/read performance
+  \item \textbf{Self-describing}: HDF5 groups and attributes contain all metadata
+  \item \textbf{Cross-format}: \texttt{informat} and \texttt{outformat} can differ, enabling binary-to-HDF5 conversion
+\end{itemize}
+
+\begin{infobox}[Compilation]
+HDF5 support requires compilation with \texttt{make HDF5=1}. The HDF5 library must be built with \texttt{--enable-parallel} and \texttt{--enable-fortran} for the Intel \texttt{ifx} compiler. See Section~\ref{sec:hdf5_build} for build instructions.
+\end{infobox}
+
+
+\section{Building HDF5}
+\label{sec:hdf5_build}
+
+The HDF5 library must be compiled from source with parallel (MPI-IO) and Fortran support matching the Intel compiler used for RAMSES.
+
+\begin{codebox}[Build HDF5 from source]
+\begin{lstlisting}[style=bash,numbers=none]
+wget https://github.com/HDFGroup/hdf5/releases/download/\
+  hdf5_1.14.5/hdf5-1.14.5.tar.gz
+tar xf hdf5-1.14.5.tar.gz && cd hdf5-1.14.5
+CC=mpiicc FC=mpiifx ./configure \
+  --enable-fortran --enable-parallel \
+  --prefix=$HOME/local/hdf5
+make -j8 && make install
+\end{lstlisting}
+\end{codebox}
+
+The key configure flags:
+\begin{itemize}[leftmargin=2em]
+  \item \texttt{--enable-parallel}: MPI-IO support for collective parallel reads/writes
+  \item \texttt{--enable-fortran}: generates \texttt{hdf5.mod} (Fortran module) compatible with \texttt{ifx}
+\end{itemize}
+
+Then build RAMSES with the \texttt{HDF5=1} flag:
+
+\begin{codebox}[Build RAMSES with HDF5]
+\begin{lstlisting}[style=bash,numbers=none]
+cd bin
+make clean
+make HDF5=1
+\end{lstlisting}
+\end{codebox}
+
+The Makefile conditionally adds:
+\begin{lstlisting}[style=fortran,numbers=none]
+HDF5_DIR = $(HOME)/local/hdf5
+FFLAGS += -DHDF5 -I$(HDF5_DIR)/include
+LIBS += -L$(HDF5_DIR)/lib -lhdf5_fortran -lhdf5 -lz \
+        -Wl,-rpath,$(HDF5_DIR)/lib
+\end{lstlisting}
+
+Without \texttt{HDF5=1}, the code compiles identically to before (all HDF5 code is guarded by \texttt{\#ifdef HDF5}).
+
+
+\section{Namelist Parameters}
+
+Two parameters in \texttt{\&OUTPUT\_PARAMS} control the I/O format:
+
+\begin{center}
+\begin{tabular}{llll}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{outformat} & char(10) & \texttt{'original'} & Output format: \texttt{'original'} or \texttt{'hdf5'} \\
+\texttt{informat} & char(10) & \texttt{'original'} & Restart format: \texttt{'original'} or \texttt{'hdf5'} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{codebox}[Example namelist]
+\begin{lstlisting}[style=fortran,numbers=none]
+&OUTPUT_PARAMS
+noutput=1
+aout=1.0
+foutput=5
+outformat='hdf5'    ! write HDF5 snapshots
+/
+\end{lstlisting}
+\end{codebox}
+
+For restart from an HDF5 checkpoint:
+\begin{codebox}[Restart from HDF5]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+nrestart=1
+/
+&OUTPUT_PARAMS
+informat='hdf5'     ! read HDF5 checkpoint
+outformat='hdf5'    ! continue writing HDF5
+/
+\end{lstlisting}
+\end{codebox}
+
+
+\section{HDF5 File Structure}
+
+Each snapshot produces a single file \texttt{output\_NNNNN/data\_NNNNN.h5} with the following group hierarchy:
+
+\begin{lstlisting}[style=bash,numbers=none]
+data_NNNNN.h5
+  /header/              (attrs: ncpu, ndim, nlevelmax, nstep,
+                         boxlen, time, aexp, H0, omega_m, ...)
+      tout[noutput]     (dataset)
+      aout[noutput]     (dataset)
+      dtold[nlevelmax]  (dataset)
+      dtnew[nlevelmax]  (dataset)
+  /domain/              (ksection tree or bound_key)
+  /coarse/
+      son[ncoarse]      (dataset: integer)
+      cpu_map[ncoarse]  (dataset: integer)
+  /amr/level_LL/
+      xg[ngrid_total x 3]           (grid centres)
+      son[ngrid_total x twotondim]   (son indices)
+      cpu_map[ngrid_total x twotondim]
+      nbor[ngrid_total x twondim]    (Morton-computed)
+      ngrid_per_cpu[ncpu]
+  /hydro/level_LL/
+      uold[ngrid_total x twotondim x nvar]
+  /gravity/level_LL/
+      phi[ngrid_total x twotondim]
+      f[ngrid_total x twotondim x ndim]
+  /particles/
+      x[npart_total x ndim]    (positions)
+      v[npart_total x ndim]    (velocities)
+      m[npart_total]            (masses)
+      id[npart_total]           (particle IDs)
+      level[npart_total]        (AMR level)
+      tp[npart_total]           (birth time)
+      zp[npart_total]           (metallicity)
+      npart_per_cpu[ncpu]
+  /sinks/
+      idsink, msink, xsink, vsink, tsink, ...
+\end{lstlisting}
+
+\subsection{Parallel Write Strategy}
+
+Each AMR level is written using collective MPI-IO hyperslabs:
+
+\begin{enumerate}
+  \item \texttt{MPI\_Allgather(ngrid\_local)} to compute per-CPU offsets
+  \item Each CPU writes its portion via an HDF5 hyperslab selection
+  \item Collective I/O ensures efficient parallel access to the shared file
+\end{enumerate}
+
+Particles use the same hyperslab pattern: \texttt{MPI\_Allgather(npart\_local)} for offsets, then collective write.
+
+
+\section{Implementation Files}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{File} & \textbf{Description} \\
+\midrule
+\texttt{patch/cuda/ramses\_hdf5\_io.f90} & HDF5 wrapper module (create, open, write, read helpers) \\
+\texttt{patch/cuda/backup\_hdf5.f90} & HDF5 output: \texttt{dump\_all\_hdf5()} \\
+\texttt{patch/cuda/restore\_hdf5.f90} & HDF5 restart: \texttt{restore\_amr\_hdf5()}, etc. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Dispatch}
+
+The HDF5 output is dispatched from \texttt{dump\_all} in \texttt{output\_amr.kjhan.f90}:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+#ifdef HDF5
+if(outformat == 'hdf5') then
+   call dump_all_hdf5(filedir, nchar)
+   goto 998  ! skip binary output
+end if
+#endif
+\end{lstlisting}
+
+For restart, each \texttt{init\_*} subroutine checks \texttt{informat}:
+
+\begin{lstlisting}[style=fortran,numbers=none]
+#ifdef HDF5
+if(informat == 'hdf5') then
+   call restore_amr_hdf5()
+   return
+end if
+#endif
+\end{lstlisting}
+
+
+\section{Verification}
+
+The HDF5 output was tested with a 5-step cosmological simulation (12~MPI ranks, levelmin=8, levelmax=10, 200M particles):
+
+\begin{center}
+\begin{tabular}{lr}
+\toprule
+\textbf{Metric} & \textbf{Value} \\
+\midrule
+Output file & \texttt{data\_00001.h5} (3.65~GB) \\
+Step count & 5 \\
+econs at step 5 & 4.85E-03 \\
+I/O time & 4.1\,s (16.1\% of total) \\
+Total runtime & 20.6\,s \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
 \section{Poisson MG Fine-Level Optimization}
 
 The multigrid Poisson solver (\texttt{poisson-mg}) is typically the single largest time consumer, accounting for 29--55\% of total runtime. Several optimizations were applied to the fine-level V-cycle in \texttt{poisson/multigrid\_fine\_fine.kjhan.f90}:
@@ -1064,6 +1282,8 @@ Output control parameters.
 \texttt{fbackup} & integer & 1000000 & Backup every $N$ steps \\
 \texttt{aout} & real[] & 1.1 & Output expansion factors (cosmo) \\
 \texttt{tout} & real[] & 0.0 & Output times (non-cosmo) \\
+\texttt{outformat} & char(10) & \texttt{original} & Output format: \texttt{original} (per-CPU binary) or \texttt{hdf5} (single HDF5 file) \\
+\texttt{informat} & char(10) & \texttt{original} & Restart format: \texttt{original} or \texttt{hdf5}. Can differ from \texttt{outformat} \\
 \texttt{output\_mode} & integer & 0 & Hi-res output mode \\
 \texttt{gadget\_output} & logical & \texttt{.false.} & Write Gadget-format snapshots \\
 \texttt{walltime\_hrs} & real(dp) & $-1$ & Job walltime (hours, $<0$ = ignore) \\
@@ -1396,6 +1616,14 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{init\_part.f90} & Stream access particle IC \\
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
 \texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
+\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning \\
+\midrule
+\multicolumn{2}{l}{\textit{patch/cuda/ (HDF5 I/O --- new files)}} \\
+\midrule
+\texttt{ramses\_hdf5\_io.f90} & HDF5 wrapper module (parallel create/open/write/read) \\
+\texttt{backup\_hdf5.f90} & HDF5 output: AMR, hydro, gravity, particles, sinks \\
+\texttt{restore\_hdf5.f90} & HDF5 restart: AMR tree rebuild + data restore \\
+\texttt{output\_amr.kjhan.f90} & HDF5 dispatch in \texttt{dump\_all} \\
 \bottomrule
 \end{longtable}
 

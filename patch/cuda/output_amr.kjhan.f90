@@ -116,6 +116,13 @@ subroutine dump_all
 #endif
      if(myid==1.and.print_when_io) write(*,*)'End backup info etc.'
 
+#ifdef HDF5
+     if(outformat == 'hdf5') then
+        call dump_all_hdf5(filedir, nchar)
+        goto 998  ! skip binary output
+     end if
+#endif
+
      if(myid==1.and.print_when_io) write(*,*)'Start backup amr'
      filename=TRIM(filedir)//'amr_'//TRIM(nchar)//'.out'
      call backup_amr(filename)
@@ -191,6 +198,7 @@ subroutine dump_all
 #endif
         if(myid==1.and.print_when_io) write(*,*)'End backup gadget format'
      end if
+998  continue
   end if
 
 end subroutine dump_all

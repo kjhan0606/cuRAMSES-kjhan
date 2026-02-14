@@ -27,12 +27,12 @@ GITHASH = $(shell git log --pretty=format:'%H' -n 1)
 GITREPO = $(shell git config --get remote.origin.url)
 BUILDDATE = $(shell date +"%D-%T")
 DEFINES = -DNVECTOR=$(NVECTOR) -DNDIM=$(NDIM) -DNPRE=$(NPRE) -DNENER=$(NENER) -DNVAR=$(NVAR) \
-          -DSOLVER=$(SOLVER)  
+          -DSOLVER=$(SOLVER)
 #############################################################################
 # Fortran compiler options and directives
 
 # --- MPI, pgf90 syntax ------------------------------
-#F90 = mpif90 -O3  
+#F90 = mpif90 -O3
 #FFLAGS = -Mpreprocess $(DEFINES) -Mbackslash
 
 # --- MPI, ifort syntax ------------------------------
@@ -41,17 +41,32 @@ F90 = mpiifx -qopenmp -march=core-avx2
 FFLAGS = -cpp -O3 $(DEFINES) -DNOSYSTEM -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
 
 #############################################################################
+# HDF5 parallel I/O support (build with: make HDF5=1)
+#############################################################################
+ifdef HDF5
+  HDF5_DIR = $(HOME)/local/hdf5
+  FFLAGS += -DHDF5 -I$(HDF5_DIR)/include
+  LIBS_HDF5 = -L$(HDF5_DIR)/lib -lhdf5_fortran -lhdf5 -lz -Wl,-rpath,$(HDF5_DIR)/lib
+  HDF5_MODOBJ = ramses_hdf5_io.o
+  HDF5_OBJS = backup_hdf5.o restore_hdf5.o
+else
+  LIBS_HDF5 =
+  HDF5_MODOBJ =
+  HDF5_OBJS =
+endif
+
+#############################################################################
 MOD = mod
 #############################################################################
 # MPI librairies
-LIBMPI = 
+LIBMPI =
 #LIBMPI = -lfmpi -lmpi -lelan
 
 # --- CUDA libraries, for Titane ---
 LIBCUDA = -L/opt/cuda/lib  -lm -lcuda -lcudart
 
-LIBGRACKLE = -lgrackle -lhdf5 -lz 
-LIBS = $(LIBMPI) 
+LIBGRACKLE = -lgrackle -lhdf5 -lz
+LIBS = $(LIBMPI) $(LIBS_HDF5)
 #############################################################################
 # Sources directories are searched in this exact order
 VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
@@ -60,18 +75,19 @@ VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:.
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
 	 morton_keys.o morton_hash.o \
-	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o
+	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
+	 $(HDF5_MODOBJ)
 
 AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loop.jaehyun.o amr_step.jaehyun.o update_time.o \
          output_amr.kjhan.o flag_utils.kjhan.o physical_boundaries.kjhan.o virtual_boundaries.kjhan.o refine_utils.o nbors_utils.kjhan.o \
          hilbert.o load_balance.kjhan.o title.o sort.o cooling_fine.kjhan.o units.o light_cone.part.o light_cone.hydro2.o light_cone.sink2.o movie_mod.yonghwi_org.o kjhan.o\
 		 output_sphere_hydro.o output_sphere_part.o output_sphere_sink.o \
-         morton_init.o
+         morton_init.o $(HDF5_OBJS)
 # Particle-Mesh objects
 PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fine.o newdt_fine.kjhan.o particle_tree.kjhan.o \
         add_list.o remove_list.o star_formation.kjhan.o sink_particle.kjhan.o feedback.kjhan3.o \
 		clump_finder.o clump_merger.o \
-        flag_formation_sites.o init_sink.o output_sink.o 
+        flag_formation_sites.o init_sink.o output_sink.o
 # Poisson solver objects
 #POISSONOBJ = init_poisson.o phi_fine_cg.kisti.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
              multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
@@ -98,7 +114,7 @@ ramses_aton: $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o
 #############################################################################
 write_gitinfo.o: FORCE
 	$(F90) $(FFLAGS) -DPATCH=\'$(PATCH)\' -DGITBRANCH=\'$(GITBRANCH)\' -DGITHASH=\'"$(GITHASH)"\' \
- -DGITREPO=\'$(GITREPO)\' -DBUILDDATE=\'"$(BUILDDATE)"\' -c ../amr/write_gitinfo.f90 -o $@		
+ -DGITREPO=\'$(GITREPO)\' -DBUILDDATE=\'"$(BUILDDATE)"\' -c ../amr/write_gitinfo.f90 -o $@
 write_makefile.o: FORCE
 	../utils/scripts/cr_write_makefile.sh $(MAKEFILE_LIST)
 	$(F90) $(FFLAGS) -c write_makefile.f90 -o $@

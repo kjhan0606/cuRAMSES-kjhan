@@ -187,6 +187,13 @@ subroutine init_part
   ! Read part.tmp file
   !--------------------
   if(nrestart>0)then
+#ifdef HDF5
+     if(informat == 'hdf5') then
+        call restore_part_hdf5()
+        if(myid==1) write(*,*) 'HDF5 PART backup files read completed'
+        goto 999
+     end if
+#endif
 
      ilun=2*ncpu+myid+10
      call title(nrestart,nchar)
@@ -951,6 +958,8 @@ subroutine init_part
 
      end select
   end if
+
+999 continue  ! HDF5 restore jumps here
 
   call getmem(real_mem)
   call MPI_ALLREDUCE(real_mem,real_mem_tot,1,MPI_REAL,MPI_MAX,MPI_COMM_WORLD,info)

@@ -104,6 +104,8 @@ module amr_parameters
   integer::output_mode=0      ! Output mode (for hires runs)
   logical::gadget_output=.false. ! Output in gadget format
   logical::output_now=.false. ! write output next step
+  character(len=10)::informat  = 'original'  ! 'original' or 'hdf5'
+  character(len=10)::outformat = 'original'  ! 'original' or 'hdf5'
 !jhshin1
   real(dp)::walltime_hrs=-1.  ! Wallclock time for submitted job
   real(dp)::minutes_dump=1.   ! Dump an output minutes before walltime ends

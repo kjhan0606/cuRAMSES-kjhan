@@ -594,6 +594,50 @@ for periodic checkpointing in long runs.  Set to a very large number
 to effectively disable.
 \end{quote}
 
+% ------------------------------------------------------------------
+\paramheader{outformat}{character}{`original'}
+\label{param:outformat}
+
+\begin{quote}
+Output file format for snapshots.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`original'] Standard RAMSES per-CPU binary format.  Each MPI
+    process writes separate files (\texttt{amr\_NNNNN.outNNNNN},
+    \texttt{hydro\_NNNNN.outNNNNN}, etc.).
+  \item[`hdf5'] Single HDF5 file per snapshot (\texttt{data\_NNNNN.h5}).
+    Uses MPI parallel I/O for collective writes.  The HDF5 file stores
+    all AMR, hydro, gravity, particle, and sink data in a hierarchical
+    group structure.  \textbf{Requires compilation with}
+    \texttt{make~HDF5=1}.
+\end{description}
+
+\apinote{The standard auxiliary files (\texttt{info\_NNNNN.txt},
+\texttt{header\_NNNNN.txt}, \texttt{compilation.txt},
+\texttt{makefile.txt}, \texttt{namelist.txt}) are always written
+regardless of \texttt{outformat}.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{informat}{character}{`original'}
+\label{param:informat}
+
+\begin{quote}
+Input (restart) file format.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`original'] Read from standard per-CPU binary files.  The
+    number of MPI processes must match the run that produced the
+    checkpoint.
+  \item[`hdf5'] Read from the single HDF5 file
+    (\texttt{data\_NNNNN.h5}).  Currently requires the same number of
+    MPI processes as the original run.  \textbf{Requires compilation
+    with} \texttt{make~HDF5=1}.
+\end{description}
+
+\apinote{\texttt{informat} and \texttt{outformat} can be set
+independently, allowing cross-format conversion (e.g.\ restart from
+binary and output to HDF5, or vice versa).}
+\end{quote}
+
 
 %======================================================================
 \section{\texttt{\&INIT\_PARAMS} -- Initial Conditions}

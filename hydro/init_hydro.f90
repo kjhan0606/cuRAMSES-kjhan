@@ -38,6 +38,13 @@ subroutine init_hydro
   ! For a restart, read hydro file
   !--------------------------------
   if(nrestart>0)then
+#ifdef HDF5
+     if(informat == 'hdf5') then
+        call restore_hydro_hdf5()
+        if(verbose)write(*,*)'HDF5 HYDRO backup files read completed'
+        return
+     end if
+#endif
      ilun=ncpu+myid+10
      call title(nrestart,nchar)
 
