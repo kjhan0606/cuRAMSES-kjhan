@@ -1282,42 +1282,71 @@ The merged red-black exchange introduces a minor change in the energy conservati
 \label{ch:scaling}
 %======================================================
 
-Strong scaling tests were performed using a $200 \times 10^6$ particle cosmological simulation, restarted from an HDF5 checkpoint at coarse step~5 and evolved to step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC 7543 node (64 physical cores, 128 threads) with 1~TB of DDR4 memory.
+Strong scaling tests were performed using a $200 \times 10^6$ particle cosmological simulation (levelmin=8, levelmax=10), restarted from an HDF5 checkpoint at coarse step~5 and evolved to step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC 7543 node (64 physical cores, 128 threads via SMT) with 1~TB of DDR4 memory. The code was compiled with Intel MPI (\texttt{mpiifx}) and OpenMP (\texttt{-qopenmp}).
 
 The variable-\texttt{ncpu} restart allows the 12-rank checkpoint to be read with any number of MPI ranks. A forced \texttt{load\_balance} on the first coarse step ensures optimal grid distribution.
 
-\subsection{Results}
+\section{Pure MPI Scaling}
+
+All runs use \texttt{OMP\_NUM\_THREADS=1}.  Speedup is relative to the 2-rank baseline.
 
 \begin{center}
-\begin{tabular}{rrrrrrrrr}
+\begin{tabular}{rrrrrrrrrr}
 \toprule
-\textbf{ncpu} & \textbf{Elapsed} & \textbf{Particles} & \textbf{Poisson} & \textbf{MG} & \textbf{Hydro-GZ} & \textbf{Godunov} & \textbf{LoadBal} & \textbf{I/O} \\
- & (s) & (s) & (s) & (s) & (s) & (s) & (s) & (s) \\
+\textbf{Ranks} & \textbf{Elapsed} & \textbf{Speedup} & \textbf{Coarse} & \textbf{Particle} & \textbf{Poisson} & \textbf{MG} & \textbf{Hydro-GZ} & \textbf{Godunov} & \textbf{LoadBal} \\
+ & (s) & & (s) & (s) & (s) & (s) & (s) & (s) & (s) \\
 \midrule
-4  & 43.4  & 7.16 & 6.11 & 18.77 & 0.58 & 3.50 & 12.2 & 2.0 \\
-8  & 25.3  & 3.61 & 3.29 &  9.91 & 0.64 & 2.32 & 11.9 & 1.8 \\
-16 & 20.1  & 1.98 & 2.05 &  7.01 & 0.55 & 3.38 & 16.4 & 2.4 \\
-24 & 21.5  & 1.56 & 1.53 &  5.99 & 0.52 & 6.22 & 23.3 & 2.8 \\
-32 & 23.5  & 1.15 & 1.38 &  5.43 & 0.70 & 8.38 & 33.1 & 4.0 \\
-48 & 23.4  & 0.98 & 1.22 &  5.66 & 0.74 & 7.93 & 55.4 & 3.4 \\
-64 & 25.6  & 0.76 & 1.14 &  5.69 & 0.95 & 8.64 & 83.1 & 5.8 \\
+2   & 193.0 & 1.00$\times$ & 2.27 & 20.92 & 18.22 & 102.69 & 0.52 & 46.67 & 9.14 \\
+4   & 154.8 & 1.25$\times$ & 2.59 & 16.74 & 14.76 & 82.00  & 0.89 & 36.64 & 7.62 \\
+8   &  88.9 & 2.17$\times$ & 2.12 &  8.93 &  8.18 & 43.46  & 1.09 & 21.68 & 4.90 \\
+16  &  58.2 & 3.31$\times$ & 2.56 &  4.67 &  4.97 & 23.90  & 1.26 & 15.88 & 3.96 \\
+32  &  34.7 & 5.57$\times$ & 2.04 &  2.27 &  2.73 & 12.59  & 1.11 &  8.71 & 2.27 \\
+64  &  25.9 & 7.45$\times$ & 1.91 &  1.18 &  1.64 &  7.95  & 1.13 &  5.14 & 1.61 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Key Observations}
+\section{Hybrid MPI + OpenMP Scaling}
+
+All configurations use a fixed total of 64 physical cores.  Speedup is relative to the 2-rank pure MPI baseline (193.0\,s).
+
+\begin{center}
+\begin{tabular}{rrrrrrrrrr}
+\toprule
+\textbf{Ranks$\times$Thr} & \textbf{Elapsed} & \textbf{Speedup} & \textbf{Coarse} & \textbf{Particle} & \textbf{Poisson} & \textbf{MG} & \textbf{Hydro-GZ} & \textbf{Godunov} & \textbf{LoadBal} \\
+ & (s) & & (s) & (s) & (s) & (s) & (s) & (s) & (s) \\
+\midrule
+64$\times$1  & 25.9 & 7.45$\times$ & 1.91 & 1.18 & 1.64 & 7.95  & 1.13 & 5.14 & 1.61 \\
+\textbf{32$\times$2}  & \textbf{22.2} & \textbf{8.71$\times$} & 1.55 & 1.37 & 1.64 & 7.23  & 0.82 & 5.19 & 1.63 \\
+16$\times$4  & 24.9 & 7.76$\times$ & 1.49 & 2.23 & 2.31 & 8.81  & 0.66 & 5.22 & 2.46 \\
+8$\times$8   & 30.2 & 6.40$\times$ & 1.26 & 3.80 & 3.34 & 11.35 & 0.68 & 5.46 & 3.06 \\
+4$\times$16  & 44.4 & 4.34$\times$ & 1.35 & 6.99 & 5.66 & 17.22 & 0.67 & 6.21 & 5.27 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Key Observations}
 
 \begin{itemize}
-\item \textbf{Particle operations} scale nearly ideally: 7.16~s (4 ranks) to 0.76~s (64 ranks), a $9.4\times$ speedup for $16\times$ the ranks.
-\item \textbf{Multigrid Poisson solver} scales well up to 16 ranks (18.77~s $\to$ 7.01~s), then plateaus near 5.5~s beyond 32 ranks.
-\item \textbf{Ghost-zone exchange} remains sub-second across all \texttt{ncpu} thanks to the hierarchical k-section routing.
-\item \textbf{Load balancing overhead} grows with \texttt{ncpu} (12~s for 4 ranks to 83~s for 64 ranks). This is a one-time cost at the \texttt{nremap} interval.
-\item \textbf{Optimal wall-clock time} of 20.1~s is achieved at 16 ranks for this problem size, representing a $2.2\times$ speedup over the 4-rank baseline.
-\item All configurations produce bit-identical gravitational potential ($e_{\rm pot} = -1.88 \times 10^{-6}$) and kinetic energy ($e_{\rm kin} = 1.23 \times 10^{-6}$) at step~10.
+\item \textbf{Optimal configuration} is 32 ranks $\times$ 2 threads (22.2\,s), which is 14\% faster than 64 pure MPI ranks (25.9\,s) and $8.7\times$ faster than the 2-rank baseline.
+
+\item \textbf{Multigrid Poisson solver (MG)} dominates runtime and scales well: 102.7\,s (2 ranks) $\to$ 7.2\,s (32$\times$2), a $14.2\times$ speedup.
+
+\item \textbf{Godunov hydro solver} scales effectively with both MPI and OpenMP: 46.7\,s (2 ranks) $\to$ 5.2\,s (32$\times$2), a $9.0\times$ speedup.
+
+\item \textbf{Ghost-zone exchange (Hydro-GZ)} increases slightly with MPI rank count (0.52\,s at 2 ranks $\to$ 1.13\,s at 64 ranks) due to more MPI messages, but \emph{decreases} in hybrid mode (0.82\,s at 32$\times$2) since fewer ranks means fewer messages.
+
+\item \textbf{Hybrid advantage}: 32$\times$2 beats 64$\times$1 because halving the MPI rank count reduces communication overhead (ghost zones, load balancing) while the 2 OpenMP threads provide sufficient intra-rank parallelism for compute-bound kernels.
+
+\item \textbf{Diminishing returns from OpenMP}: beyond 4 threads per rank, OpenMP thread synchronization overhead outweighs the communication savings, causing performance to degrade (4$\times$16: 44.4\,s, worse than 8$\times$1: 88.9\,s with only 8 total cores).
+
+\item \textbf{Load balancing} scales well: 9.1\,s at 2 ranks $\to$ 1.6\,s at 64 ranks.  This is a per-\texttt{nremap} cost (default \texttt{nremap=5}).
+
+\item \textbf{Physics correctness}: all configurations produce identical $e_{\rm pot} = -1.88 \times 10^{-6}$ and $e_{\rm kin} = 1.23 \times 10^{-6}$ at step~10.
 \end{itemize}
 
-\begin{infobox}[Variable-ncpu Restart]
-The 12-rank same-\texttt{ncpu} restart (no forced load balance) shows significantly degraded performance: 144.7~s elapsed vs.\ 20.1~s for 16 ranks with variable-\texttt{ncpu} restart. This demonstrates the critical importance of the initial load balance step after restart.
+\begin{infobox}[Recommended Configuration]
+For a single dual-socket AMD EPYC node with 64 cores, we recommend \textbf{32 MPI ranks $\times$ 2 OpenMP threads} for cuRAMSES cosmological simulations with $\sim$$200 \times 10^6$ particles.  Set \texttt{OMP\_NUM\_THREADS=2}, \texttt{OMP\_PROC\_BIND=close}, \texttt{OMP\_PLACES=cores}, and \texttt{I\_MPI\_PIN\_DOMAIN=omp} in the job script.
 \end{infobox}
 
 
