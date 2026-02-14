@@ -1196,7 +1196,10 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   ! This routine average the hydro quantities inside the SN bubble
   !------------------------------------------------------------------------
   integer::ilevel,ncache,nSN,j,iSN,ind,ix,iy,iz,ngrid,iskip,nSN_tot,ielt
-  integer::i,nx_loc,igrid,info,jSN,kSN,iSNsize
+  integer::i,nx_loc,igrid,info
+  integer::nbin,ibx,iby,ibz,jbx,jby,jbz
+  real(dp)::bin_size,inv_bin_size
+  integer,allocatable::bin_head(:,:,:),sn_next(:)
   integer,dimension(1:nvector)::ind_grid,ind_cell
   real(dp)::x,y,z,dr_SN,d,u,v,w,ek,u2,v2,w2,dr_cell
   real(dp)::scale,dx,dxx,dyy,dzz,dx_min,dx_loc,vol_loc,rmax2,rmax
@@ -1261,6 +1264,21 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
+
+  ! Build spatial bins for SN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nSN)))
+  bin_head=0; sn_next=0
+  do iSN=1,nSN
+     ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+     sn_next(iSN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iSN
+  end do
+
   ! Initialize the averaged variables
   vol_gas=0.0;dq=0.0;u2Blast=0.0;ekBlast=0.0;ind_blast=-1
   mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0
@@ -1284,20 +1302,16 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
 
      ! Loop over grids
      ncache=active(ilevel)%ngrid
-!$omp parallel private(iSN,igrid,ngrid,i,ind_grid,ind,iskip,ind_cell,ok,x,y,z,&
-!$omp       dxx,dyy,dzz,dr_SN,dr_cell, &
-!$omp       d,u,v,w,ekk,eint,mload,Zload,ceload,ielt,jSN,kSN,iSNsize)
-     iSNsize = (nSN + nthreads-1)/nthreads
-     jSN = iSNsize*mythread + 1
-     kSN = iSNsize*(mythread+1) 
-     kSN = min(kSN,nSN)
+!$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell,ok,x,y,z, &
+!$omp       ibx,iby,ibz,jbx,jby,jbz,iSN,dxx,dyy,dzz,dr_SN,dr_cell, &
+!$omp       d,u,v,w,ekk,eint,mload,Zload,ceload,ielt) schedule(dynamic,16)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
            ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
         end do
         !    Loop over cells
-        do ind=1,twotondim  
+        do ind=1,twotondim
            iskip=ncoarse+(ind-1)*ngridmax
            do i=1,ngrid
               ind_cell(i)=iskip+ind_grid(i)
@@ -1313,78 +1327,91 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
                  x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-!!!!omp do schedule(dynamic,1000)
-!!! 	         do iSN=1,nSN
-	 do iSN=jSN,kSN
-                   ! Check if the cell lies within the SN radius
-                    dxx=x-xSN(iSN,1)
-                    dyy=y-xSN(iSN,2)
-                    dzz=z-xSN(iSN,3)
-                    dr_SN=dxx**2+dyy**2+dzz**2
-                    dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
-                    if(dr_SN.lt.rmax2)then
-                       vol_gas(iSN)=vol_gas(iSN)+vol_loc
-                       ! Take account for grid effects on the conservation of the
-                       ! normalized linear momentum
-                       u=dxx/rmax
-                       v=dyy/rmax
-                       w=dzz/rmax
-                       ! Add the local normalized linear momentum to the total linear
-                       ! momentum of the blast wave (should be zero with no grid effect)
-                       dq(iSN,1)=dq(iSN,1)+u*vol_loc
-                       dq(iSN,2)=dq(iSN,2)+v*vol_loc
-                       dq(iSN,3)=dq(iSN,3)+w*vol_loc
-                       u2Blast(iSN,1)=u2Blast(iSN,1)+u*u*vol_loc
-                       u2Blast(iSN,2)=u2Blast(iSN,2)+v*v*vol_loc
-                       u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
-                    endif
-                    if(dr_cell.le.dx_loc/2.0)then !same as above?
-                       ind_blast(iSN)=ind_cell(i)
-                       ekBlast  (iSN)=vol_loc
-                       d=uold(ind_blast(iSN),1)                                                                     
-                       u=uold(ind_blast(iSN),2)/d                                                                   
-                       v=uold(ind_blast(iSN),3)/d                                                                   
-                       w=uold(ind_blast(iSN),4)/d                                                                   
-                       ekk=0.5d0*d*(u*u+v*v+w*w)                                                                    
-                       eint=uold(ind_blast(iSN),5)-ekk                                                              
-                       ! Mass loading factor of the Sedov explosion                                                 
-                       ! Ensure that no more that 25% of the gas content is removed                                 
-                       mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)                                                     
-                       mloadSN(iSN)=mSN(iSN)+mload                                                                  
-                       ! Update gas mass and metal content in the cell                                              
-                       if(metal)then                                                                                
-                          Zload=uold(ind_blast(iSN),imetal)/d                                                       
-                          ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)                           
-                          uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
-                       endif                                                                                        
-                       do ielt=1,nelt                                                                               
-                          ceload=uold(ind_blast(iSN),ichem+ielt-1)/d                                                 
-                          celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)              
-                          uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
-                       enddo                                                                                        
-                       d=uold(ind_blast(iSN),1)-mload/vol_loc                                                       
-                                                                                                                    
-                       uold(ind_blast(iSN),1)=d                                                                     
-                       uold(ind_blast(iSN),2)=d*u                                                                   
-                       uold(ind_blast(iSN),3)=d*v                                                                   
-                       uold(ind_blast(iSN),4)=d*w                                                                   
-                       uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)                                            
-
-                       vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
-                       vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
-                       vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
-                    endif
-  		  end do ! End loop over nSN
+                 ! Find cell's bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                    iSN=bin_head(jbx,jby,jbz)
+                    do while(iSN > 0)
+                       ! Check if the cell lies within the SN radius
+                       dxx=x-xSN(iSN,1)
+                       dyy=y-xSN(iSN,2)
+                       dzz=z-xSN(iSN,3)
+                       dr_SN=dxx**2+dyy**2+dzz**2
+                       dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+                       if(dr_SN.lt.rmax2)then
+                          u=dxx/rmax
+                          v=dyy/rmax
+                          w=dzz/rmax
+                          !$omp atomic
+                          vol_gas(iSN)=vol_gas(iSN)+vol_loc
+                          !$omp atomic
+                          dq(iSN,1)=dq(iSN,1)+u*vol_loc
+                          !$omp atomic
+                          dq(iSN,2)=dq(iSN,2)+v*vol_loc
+                          !$omp atomic
+                          dq(iSN,3)=dq(iSN,3)+w*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,1)=u2Blast(iSN,1)+u*u*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,2)=u2Blast(iSN,2)+v*v*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
+                       endif
+                       if(dr_cell.le.dx_loc/2.0)then
+                          !$omp critical(ind_blast_lock)
+                          ind_blast(iSN)=ind_cell(i)
+                          ekBlast(iSN)=vol_loc
+                          d=uold(ind_blast(iSN),1)
+                          u=uold(ind_blast(iSN),2)/d
+                          v=uold(ind_blast(iSN),3)/d
+                          w=uold(ind_blast(iSN),4)/d
+                          ekk=0.5d0*d*(u*u+v*v+w*w)
+                          eint=uold(ind_blast(iSN),5)-ekk
+                          mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)
+                          mloadSN(iSN)=mSN(iSN)+mload
+                          if(metal)then
+                             Zload=uold(ind_blast(iSN),imetal)/d
+                             ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)
+                             uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
+                          endif
+                          do ielt=1,nelt
+                             ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+                             celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)
+                             uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
+                          enddo
+                          d=uold(ind_blast(iSN),1)-mload/vol_loc
+                          uold(ind_blast(iSN),1)=d
+                          uold(ind_blast(iSN),2)=d*u
+                          uold(ind_blast(iSN),3)=d*v
+                          uold(ind_blast(iSN),4)=d*w
+                          uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+                          vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
+                          vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
+                          vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
+                          !$omp end critical(ind_blast_lock)
+                       endif
+                       iSN=sn_next(iSN)
+                    end do
+                 end do
+                 end do
+                 end do
               endif
            end do
-           
+
         end do
            ! End loop over cells
      end do
      ! End loop over grids
-!$omp end parallel
+!$omp end parallel do
   end do
   ! End loop over levels
+
+  deallocate(bin_head,sn_next)
 
 #ifndef WITHOUTMPI
   vol_gas_mpi=0d0; dq_mpi=0d0; u2Blast_mpi=0d0
@@ -1485,6 +1512,9 @@ subroutine Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN
   !------------------------------------------------------------------------
   integer::ilevel,j,iSN,nSN,ind,ix,iy,iz,ngrid,iskip,ielt
   integer::i,nx_loc,igrid,info,ncache
+  integer::nbin,ibx,iby,ibz,jbx,jby,jbz
+  real(dp)::bin_size,inv_bin_size
+  integer,allocatable::bin_head(:,:,:),sn_next(:)
   integer,dimension(1:nvector)::ind_grid,ind_cell
   real(dp)::x,y,z,dx,dxx,dyy,dzz,dr_SN,d,u,v,w,ek,u_r,ESN,d_gas
   real(dp)::scale,dx_min,dx_loc,vol_loc,rmax2,rmax
@@ -1534,6 +1564,21 @@ subroutine Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN
      endif
   end do
 
+
+  ! Build spatial bins for SN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nSN)))
+  bin_head=0; sn_next=0
+  do iSN=1,nSN
+     ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+     sn_next(iSN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iSN
+  end do
+
   ! Loop over levels
   do ilevel=levelmin,nlevelmax
      ! Computing local volume (important for averaging hydro quantities) 
@@ -1552,8 +1597,9 @@ subroutine Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN
 
      ! Loop over grids
      ncache=active(ilevel)%ngrid
-!$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell,&
-!$omp             ok,x,y,z,iSN,dxx,dyy,dzz,dr_SN,d_gas,ielt,u,v,w)
+!$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell, &
+!$omp       ok,x,y,z,ibx,iby,ibz,jbx,jby,jbz,iSN,dxx,dyy,dzz,dr_SN, &
+!$omp       d_gas,ielt,u,v,w) schedule(dynamic,16)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
@@ -1578,32 +1624,45 @@ subroutine Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN
                  x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-                 do iSN=1,nSN
-                    ! Check if the cell lies within the SN radius
-                    dxx=x-xSN(iSN,1)
-                    dyy=y-xSN(iSN,2)
-                    dzz=z-xSN(iSN,3)
-                    dr_SN=dxx**2+dyy**2+dzz**2
-                    if(dr_SN.lt.rmax2)then
-                       d_gas=mloadSN(iSN)/vol_gas(iSN)
-                       ! Compute the mass density in the cell
-                       uold(ind_cell(i),1)=uold(ind_cell(i),1)+d_gas
-                       ! Compute the metal density in the cell
-                       if(metal)uold(ind_cell(i),imetal)=uold(ind_cell(i),imetal)+d_gas*ZloadSN(iSN)
-                       do ielt=1,nelt
-                          if (d_gas*celoadSN(iSN,ielt)>0d0) uold(ind_cell(i),ichem+ielt-1)=uold(ind_cell(i),ichem+ielt-1)+d_gas*celoadSN(iSN,ielt)
-                       enddo
-                      ! Velocity at a given dr_SN linearly interpolated between zero and uSedov
-                       u=uSedov(iSN)*(dxx/rmax-dq(iSN,1))+vloadSN(iSN,1)
-                       v=uSedov(iSN)*(dyy/rmax-dq(iSN,2))+vloadSN(iSN,2)
-                       w=uSedov(iSN)*(dzz/rmax-dq(iSN,3))+vloadSN(iSN,3)
-                       ! Add each momentum component of the blast wave to the gas
-                       uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u
-                       uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v
-                       uold(ind_cell(i),4)=uold(ind_cell(i),4)+d_gas*w
-                       ! Finally update the total energy of the gas
-                       uold(ind_cell(i),5)=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)+p_gas(iSN)
-                    endif
+                 ! Find cell's bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                    iSN=bin_head(jbx,jby,jbz)
+                    do while(iSN > 0)
+                       ! Check if the cell lies within the SN radius
+                       dxx=x-xSN(iSN,1)
+                       dyy=y-xSN(iSN,2)
+                       dzz=z-xSN(iSN,3)
+                       dr_SN=dxx**2+dyy**2+dzz**2
+                       if(dr_SN.lt.rmax2)then
+                          d_gas=mloadSN(iSN)/vol_gas(iSN)
+                          ! Compute the mass density in the cell
+                          uold(ind_cell(i),1)=uold(ind_cell(i),1)+d_gas
+                          ! Compute the metal density in the cell
+                          if(metal)uold(ind_cell(i),imetal)=uold(ind_cell(i),imetal)+d_gas*ZloadSN(iSN)
+                          do ielt=1,nelt
+                             if (d_gas*celoadSN(iSN,ielt)>0d0) uold(ind_cell(i),ichem+ielt-1)=uold(ind_cell(i),ichem+ielt-1)+d_gas*celoadSN(iSN,ielt)
+                          enddo
+                         ! Velocity at a given dr_SN linearly interpolated between zero and uSedov
+                          u=uSedov(iSN)*(dxx/rmax-dq(iSN,1))+vloadSN(iSN,1)
+                          v=uSedov(iSN)*(dyy/rmax-dq(iSN,2))+vloadSN(iSN,2)
+                          w=uSedov(iSN)*(dzz/rmax-dq(iSN,3))+vloadSN(iSN,3)
+                          ! Add each momentum component of the blast wave to the gas
+                          uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u
+                          uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v
+                          uold(ind_cell(i),4)=uold(ind_cell(i),4)+d_gas*w
+                          ! Finally update the total energy of the gas
+                          uold(ind_cell(i),5)=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)+p_gas(iSN)
+                       endif
+                       iSN=sn_next(iSN)
+                    end do
+                 end do
+                 end do
                  end do
               endif
            end do
@@ -1614,6 +1673,8 @@ subroutine Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN
      ! End loop over grids
   end do
   ! End loop over levels
+
+  deallocate(bin_head,sn_next)
 
   do iSN=1,nSN
      if(vol_gas(iSN)==0d0)then

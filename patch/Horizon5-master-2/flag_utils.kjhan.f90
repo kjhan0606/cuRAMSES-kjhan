@@ -323,17 +323,20 @@ end subroutine ensure_ref_rules
 subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
   use amr_commons
   use hydro_commons
+  use pm_commons    ! headp, nextp, idp, tp, xp for sink particle check
   use cooling_module
   implicit none
   integer::ilevel
   ! -------------------------------------------------------------------
   ! This routine flag for refinement cells that satisfies
-  ! some user-defined physical criteria at the level ilevel. 
+  ! some user-defined physical criteria at the level ilevel.
   ! -------------------------------------------------------------------
   integer::i,j,ncache,nok,ix,iy,iz,iskip,iflag,jflag
   integer::igrid,ind,idim,ngrid,ivar
   integer::nx_loc
+  integer::ipart,ind_part
   integer,dimension(1:nvector)::ind_grid,ind_cell
+  integer,dimension(1:nvector)::sink_mask
 
   logical,dimension(1:nvector)::ok
 
@@ -352,6 +355,25 @@ subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
      ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
   end do
 
+  ! Pre-compute sink particle child cell bitmask per grid
+  sink_mask(1:ngrid) = 0
+  if(sink_refine .and. sink .and. pic)then
+     do i=1,ngrid
+        ipart = headp(ind_grid(i))
+        do while(ipart > 0)
+           if(idp(ipart) < 0 .and. tp(ipart) == 0d0)then
+              ! Determine child cell index (1..8) from particle position
+              ind_part = 1
+              if(xp(ipart,1) > xg(ind_grid(i),1)) ind_part = ind_part + 1
+              if(xp(ipart,2) > xg(ind_grid(i),2)) ind_part = ind_part + 2
+              if(xp(ipart,3) > xg(ind_grid(i),3)) ind_part = ind_part + 4
+              sink_mask(i) = ior(sink_mask(i), ishft(1, ind_part-1))
+           end if
+           ipart = nextp(ipart)
+        end do
+     end do
+  end if
+
   ! Loop over cells
   do ind=1,twotondim
 
@@ -368,6 +390,12 @@ subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
      ! Apply purely local Lagrangian refinement criteria
      if(m_refine(ilevel)>-1.0d0)then
         call poisson_refine(ind_cell,ok,ngrid,ilevel)
+        ! Apply sink particle refinement from pre-computed bitmask
+        if(sink_refine .and. sink .and. pic)then
+           do i=1,ngrid
+              if(btest(sink_mask(i), ind-1)) ok(i) = .true.
+           end do
+        end if
         ! Apply geometry-based refinement criteria
         if(r_refine(ilevel)>-1.0)then
            ! Compute cell center in code units
