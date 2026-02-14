@@ -1122,6 +1122,84 @@ Total runtime & 20.6\,s \\
 \end{center}
 
 
+\section{Variable-NCPU Restart: Distributed Grid Creation}
+\label{sec:varcpu-dist}
+
+When restarting an HDF5 checkpoint with a different number of MPI ranks (\texttt{ncpu\_file} $\neq$ \texttt{ncpu}), the original implementation allocated \emph{all} grids from the file on \emph{every} rank.  For a file with 11.17\,M grids, this required \texttt{ngridmax} $\geq$ 11.17\,M per rank, consuming $\sim$20\,GB per rank.  With 32 ranks the total memory exceeded 640\,GB, causing out-of-memory failures on systems with $\leq$560\,GB.
+
+\subsection{Distributed Algorithm}
+
+The new implementation creates only the grids each rank actually needs.  For each level $L = 1$ to \texttt{nlevelmax\_file}:
+
+\begin{enumerate}
+  \item \textbf{Phase 1 --- Active grid creation.}
+    All ranks read the file data for level~$L$ (grid positions and \texttt{son\_flag}), but each rank only allocates grids whose father cell satisfies \texttt{cpu\_map(father\_cell) == myid}.
+    For $L \geq 2$, the father grid is located via Morton hash lookup at level $L-1$; if the lookup returns zero (father not present on this rank), the grid is not local and is skipped.
+    Active grids have their \texttt{xg}, \texttt{flag1}, \texttt{cpu\_map}, \texttt{cpu\_map2}, \texttt{father}, and \texttt{son} set from the file data, and are inserted into the Morton hash table.
+
+  \item \textbf{Phase 2 --- Virtual grid creation.}
+    Virtual (ghost) grids are created using RAMSES's existing refinement infrastructure:
+    \begin{itemize}
+      \item $L = 1$: \texttt{flag\_coarse} $\to$ \texttt{refine\_coarse}
+      \item $L \geq 2$: \texttt{refine\_fine($L-1$)}
+    \end{itemize}
+    Since active grids already set \texttt{son(father\_cell)} $> 0$, \texttt{refine\_fine} skips those cells and only creates virtual grids where \texttt{flag1 == 1} and \texttt{son == 0}.
+    The flag \texttt{balance = .true.}\ causes \texttt{make\_grid\_fine} to skip hydro variable interpolation (line~791 of \texttt{refine\_utils.f90}).
+
+  \item \textbf{Communication setup.}
+    \texttt{build\_comm($L$)} establishes emission/reception arrays, followed by
+    \texttt{make\_virtual\_fine\_int} exchanges for \texttt{flag1}, \texttt{cpu\_map}, and \texttt{cpu\_map2}.
+    This ensures the next level's \texttt{refine\_fine} has correct flag values on virtual grids.
+\end{enumerate}
+
+After all levels, hydro and Poisson data are restored from the file (same read-all-scatter pattern) and exchanged to virtual grids via \texttt{make\_virtual\_fine\_dp}.
+
+\subsection{Key Design Decisions}
+
+\begin{itemize}
+  \item \textbf{Father lookup as filter.}
+    For $L \geq 2$, the Morton hash lookup at level $L-1$ serves as an implicit ownership test: if the father grid does not exist locally, the child grid cannot be active on this rank.
+  \item \textbf{Hash table sizing.}
+    The per-level hash table is sized for local grids: \texttt{max(4 * (ngrid\_total / ncpu + 1), 16)} instead of \texttt{2 * ngrid\_total}, reducing hash table memory proportionally.
+  \item \textbf{No changes to other files.}
+    \texttt{refine\_coarse}, \texttt{refine\_fine}, \texttt{build\_comm}, \texttt{authorize\_fine}, and \texttt{make\_grid\_fine} all work unmodified.
+    The same-ncpu restart path is also unchanged.
+\end{itemize}
+
+\subsection{Verification}
+
+A 12-CPU HDF5 checkpoint (levelmin=8, levelmax=10, 200M particles) was restarted with 8~CPUs.  The reference is the same checkpoint restarted with 12~CPUs (same-ncpu path).
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Metric} & \textbf{Reference (12$\to$12)} & \textbf{Distributed (12$\to$8)} \\
+\midrule
+ngrid per rank       & 2,396,745    & 352,379   \\
+Memory per rank      & 8.0\,GB      & 6.9\,GB   \\
+Grid reduction       & ---          & 6.8$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{center}
+\begin{tabular}{lrrrrrr}
+\toprule
+\textbf{Step} & \multicolumn{2}{c}{\textbf{econs}} & \multicolumn{2}{c}{\textbf{epot}} & \multicolumn{2}{c}{\textbf{ekin}} \\
+ & Ref & Dist & Ref & Dist & Ref & Dist \\
+\midrule
+6  & 8.18E-03 & 8.17E-03 & $-$1.01E-06 & $-$1.01E-06 & 6.49E-07 & 6.49E-07 \\
+7  & 7.26E-03 & 7.25E-03 & $-$1.26E-06 & $-$1.26E-06 & 8.17E-07 & 8.17E-07 \\
+8  & 6.43E-03 & 6.42E-03 & $-$1.48E-06 & $-$1.48E-06 & 9.63E-07 & 9.63E-07 \\
+9  & 5.79E-03 & 5.79E-03 & $-$1.68E-06 & $-$1.68E-06 & 1.09E-06 & 1.09E-06 \\
+10 & 5.26E-03 & 5.25E-03 & $-$1.88E-06 & $-$1.88E-06 & 1.23E-06 & 1.23E-06 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The epot and ekin values are \textbf{identical} across all steps.  The econs differences (last display digit) arise from different domain decomposition with 8 vs.\ 12 CPUs.  With 32~CPUs the grid reduction would be $\sim$20$\times$, bringing the previously OOM scenario (640\,GB) well within a 560\,GB memory budget.
+
+
 \section{Poisson MG Fine-Level Optimization}
 
 The multigrid Poisson solver (\texttt{poisson-mg}) is typically the single largest time consumer, accounting for 29--55\% of total runtime. Several optimizations were applied to the fine-level V-cycle in \texttt{poisson/multigrid\_fine\_fine.kjhan.f90}:
