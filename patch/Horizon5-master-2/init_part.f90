@@ -189,6 +189,7 @@ subroutine init_part
   if(nrestart>0)then
 #ifdef HDF5
      if(informat == 'hdf5') then
+        if(sink) call init_sink_alloc
         call restore_part_hdf5()
         if(myid==1) write(*,*) 'HDF5 PART backup files read completed'
         goto 999
@@ -967,7 +968,7 @@ subroutine init_part
       call writemem(real_mem_tot)
   endif
 
-  if(sink)call init_sink
+  if(sink .and. .not. allocated(idsink)) call init_sink
 
 end subroutine init_part
 #define TIME_START(cs) call SYSTEM_CLOCK(COUNT=cs)

@@ -87,11 +87,20 @@ subroutine restore_amr_hdf5()
   call hdf5_read_attr_dp(grp_id, 'time', t)
   call hdf5_read_attr_int(grp_id, 'nstep', nstep)
   call hdf5_read_attr_int(grp_id, 'nstep_coarse', nstep_coarse)
-  call hdf5_read_attr_int(grp_id, 'noutput', noutput)
-  call hdf5_read_attr_int(grp_id, 'iout', iout)
-  call hdf5_read_attr_int(grp_id, 'ifout', ifout)
-  call hdf5_read_attr_1d_dp(grp_id, 'tout', tout, noutput)
-  call hdf5_read_attr_1d_dp(grp_id, 'aout', aout, noutput)
+  ! Output scheduling (noutput/tout/aout) is set by the namelist.
+  ! Only restore the output counters (iout/ifout) from the file.
+  ! Read noutput_file to skip the stored arrays.
+  block
+    integer :: noutput_file
+    real(dp), allocatable :: dummy_dp(:)
+    call hdf5_read_attr_int(grp_id, 'noutput', noutput_file)
+    call hdf5_read_attr_int(grp_id, 'iout', iout)
+    call hdf5_read_attr_int(grp_id, 'ifout', ifout)
+    allocate(dummy_dp(noutput_file))
+    call hdf5_read_attr_1d_dp(grp_id, 'tout', dummy_dp, noutput_file)
+    call hdf5_read_attr_1d_dp(grp_id, 'aout', dummy_dp, noutput_file)
+    deallocate(dummy_dp)
+  end block
   call hdf5_read_attr_1d_dp(grp_id, 'dtold', dtold, nlevelmax)
   call hdf5_read_attr_1d_dp(grp_id, 'dtnew', dtnew, nlevelmax)
   call hdf5_read_attr_dp(grp_id, 'const', const)

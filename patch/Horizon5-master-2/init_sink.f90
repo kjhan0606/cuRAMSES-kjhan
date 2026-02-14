@@ -217,3 +217,82 @@ subroutine init_sink
   end if
 
 end subroutine init_sink
+
+!-------------------------------------------------------
+! Allocate sink arrays only (no file I/O).
+! Called before restore_part_hdf5 so that sink arrays
+! exist before HDF5 restore writes into them.
+!-------------------------------------------------------
+subroutine init_sink_alloc
+  use amr_commons
+  use pm_commons
+  implicit none
+
+  allocate(total_volume(1:nsinkmax))
+  allocate(wdens(1:nsinkmax))
+  allocate(wvol(1:nsinkmax))
+  allocate(wmom(1:nsinkmax,1:ndim))
+  allocate(wc2(1:nsinkmax))
+  allocate(wdens_new(1:nsinkmax))
+  allocate(wvol_new(1:nsinkmax))
+  allocate(wmom_new(1:nsinkmax,1:ndim))
+  allocate(wc2_new(1:nsinkmax))
+  allocate(msink(1:nsinkmax))
+  allocate(msink_new(1:nsinkmax))
+  allocate(msink_all(1:nsinkmax))
+  allocate(idsink(1:nsinkmax))
+  idsink=0
+  allocate(idsink_new(1:nsinkmax))
+  allocate(idsink_all(1:nsinkmax))
+  allocate(tsink(1:nsinkmax))
+  allocate(tsink_new(1:nsinkmax))
+  allocate(tsink_all(1:nsinkmax))
+  allocate(vsink(1:nsinkmax,1:ndim))
+  allocate(xsink(1:nsinkmax,1:ndim))
+  allocate(vsink_new(1:nsinkmax,1:ndim))
+  allocate(vsink_all(1:nsinkmax,1:ndim))
+  allocate(xsink_new(1:nsinkmax,1:ndim))
+  allocate(xsink_all(1:nsinkmax,1:ndim))
+  allocate(dMBHoverdt(1:nsinkmax))
+  allocate(dMEdoverdt(1:nsinkmax))
+  allocate(r2sink(1:nsinkmax))
+  allocate(r2k(1:nsinkmax))
+  allocate(v2sink(1:nsinkmax))
+  allocate(c2sink(1:nsinkmax))
+  allocate(v2sink_new(1:nsinkmax))
+  allocate(c2sink_new(1:nsinkmax))
+  allocate(v2sink_all(1:nsinkmax))
+  allocate(c2sink_all(1:nsinkmax))
+  allocate(weighted_density(1:nsinkmax,1:nlevelmax))
+  allocate(weighted_volume (1:nsinkmax,1:nlevelmax))
+  allocate(weighted_momentum(1:nsinkmax,1:nlevelmax,1:ndim))
+  allocate(weighted_c2 (1:nsinkmax,1:nlevelmax))
+  allocate(oksink_new(1:nsinkmax))
+  allocate(oksink_all(1:nsinkmax))
+  allocate(jsink(1:nsinkmax,1:ndim))
+  allocate(jsink_new(1:nsinkmax,1:ndim))
+  allocate(jsink_all(1:nsinkmax,1:ndim))
+  allocate(dMBH_coarse    (1:nsinkmax))
+  allocate(dMEd_coarse    (1:nsinkmax))
+  allocate(dMsmbh         (1:nsinkmax))
+  allocate(Esave          (1:nsinkmax))
+  allocate(dMBH_coarse_new(1:nsinkmax))
+  allocate(dMEd_coarse_new(1:nsinkmax))
+  allocate(dMsmbh_new     (1:nsinkmax))
+  allocate(Esave_new      (1:nsinkmax))
+  allocate(dMBH_coarse_all(1:nsinkmax))
+  allocate(dMEd_coarse_all(1:nsinkmax))
+  allocate(dMsmbh_all     (1:nsinkmax))
+  allocate(Esave_all      (1:nsinkmax))
+  allocate(sink_stat      (1:nsinkmax,levelmin:nlevelmax,1:ndim*2+1))
+  allocate(sink_stat_all  (1:nsinkmax,levelmin:nlevelmax,1:ndim*2+1))
+  allocate(v_avgptr(1:nsinkmax))
+  allocate(c_avgptr(1:nsinkmax))
+  allocate(d_avgptr(1:nsinkmax))
+  allocate(spinmag(1:nsinkmax),bhspin(1:nsinkmax,1:ndim))
+  allocate(spinmag_new(1:nsinkmax),bhspin_new(1:nsinkmax,1:ndim))
+  allocate(spinmag_all(1:nsinkmax),bhspin_all(1:nsinkmax,1:ndim))
+  allocate(eps_sink(1:nsinkmax))
+  eps_sink=0.057190958d0
+
+end subroutine init_sink_alloc
