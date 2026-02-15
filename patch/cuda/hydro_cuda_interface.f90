@@ -79,6 +79,39 @@ module hydro_cuda_interface
        type(c_ptr), value :: h_flux, h_tmp
        integer(c_int), value :: ngrid, stream_slot
      end subroutine
+
+     ! gradient_phi CUDA kernel
+     subroutine gradient_phi_cuda_async_c( &
+          h_phi_buf, h_f_buf, a, b, ngrid, stream_slot) &
+          bind(C, name='gradient_phi_cuda_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_phi_buf, h_f_buf
+       real(c_double), value :: a, b
+       integer(c_int), value :: ngrid, stream_slot
+     end subroutine
+
+     subroutine gradient_phi_cuda_sync_c(stream_slot) &
+          bind(C, name='gradient_phi_cuda_sync')
+       import :: c_int
+       integer(c_int), value :: stream_slot
+     end subroutine
+
+     ! upload_fine CUDA kernel
+     subroutine upload_fine_cuda_async_c( &
+          h_child_buf, h_parent_buf, &
+          nsplit, nvar, ndim, smallr, do_eint, stream_slot) &
+          bind(C, name='upload_fine_cuda_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_child_buf, h_parent_buf
+       integer(c_int), value :: nsplit, nvar, ndim, do_eint, stream_slot
+       real(c_double), value :: smallr
+     end subroutine
+
+     subroutine upload_fine_cuda_sync_c(stream_slot) &
+          bind(C, name='upload_fine_cuda_sync')
+       import :: c_int
+       integer(c_int), value :: stream_slot
+     end subroutine
   end interface
 
 contains
@@ -218,5 +251,50 @@ contains
     call hydro_cuda_gather_unsplit_sync_c( &
          c_loc(flux(1)), c_loc(tmp(1)), ngrid, stream_slot)
   end subroutine hydro_cuda_gather_unsplit_sync_f
+
+  !-----------------------------------------------------------
+  ! gradient_phi CUDA: async launch
+  !-----------------------------------------------------------
+  subroutine gradient_phi_cuda_async_f(phi_buf, f_buf, a, b, ngrid, stream_slot)
+    implicit none
+    real(c_double), intent(in), target :: phi_buf(*)
+    real(c_double), intent(inout), target :: f_buf(*)
+    real(c_double), intent(in) :: a, b
+    integer(c_int), intent(in) :: ngrid, stream_slot
+    call gradient_phi_cuda_async_c(c_loc(phi_buf(1)), c_loc(f_buf(1)), &
+         a, b, ngrid, stream_slot)
+  end subroutine gradient_phi_cuda_async_f
+
+  !-----------------------------------------------------------
+  ! gradient_phi CUDA: sync
+  !-----------------------------------------------------------
+  subroutine gradient_phi_cuda_sync_f(stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: stream_slot
+    call gradient_phi_cuda_sync_c(stream_slot)
+  end subroutine gradient_phi_cuda_sync_f
+
+  !-----------------------------------------------------------
+  ! upload_fine CUDA: async launch
+  !-----------------------------------------------------------
+  subroutine upload_fine_cuda_async_f(child_buf, parent_buf, &
+       nsplit, nvar_in, ndim_in, smallr_in, do_eint, stream_slot)
+    implicit none
+    real(c_double), intent(in), target :: child_buf(*)
+    real(c_double), intent(inout), target :: parent_buf(*)
+    integer(c_int), intent(in) :: nsplit, nvar_in, ndim_in, do_eint, stream_slot
+    real(c_double), intent(in) :: smallr_in
+    call upload_fine_cuda_async_c(c_loc(child_buf(1)), c_loc(parent_buf(1)), &
+         nsplit, nvar_in, ndim_in, smallr_in, do_eint, stream_slot)
+  end subroutine upload_fine_cuda_async_f
+
+  !-----------------------------------------------------------
+  ! upload_fine CUDA: sync
+  !-----------------------------------------------------------
+  subroutine upload_fine_cuda_sync_f(stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: stream_slot
+    call upload_fine_cuda_sync_c(stream_slot)
+  end subroutine upload_fine_cuda_sync_f
 
 end module hydro_cuda_interface

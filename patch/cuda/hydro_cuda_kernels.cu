@@ -1304,3 +1304,166 @@ void hydro_cuda_gather_unsplit_sync(
 }
 
 } // extern "C"
+
+// ====================================================================
+// Auxiliary CUDA Kernels: gradient_phi and upload_fine
+// For dynamic OMP/CUDA hybrid dispatch
+// ====================================================================
+
+// gradient_phi: 5-point FDA force from pre-gathered phi stencil
+// phi_buf layout: phi_buf[idx*4 + 0..3] = phi1,phi2,phi3,phi4
+// f_buf layout: f_buf[idx] = a*(phi1-phi2) - b*(phi3-phi4)
+// total = ngrid * 8 * 3 (cells * dims)
+__global__ void gradient_phi_kernel(
+    const double* __restrict__ phi_buf,
+    double* __restrict__ f_buf,
+    double a, double b,
+    int total)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= total) return;
+    int base = idx * 4;
+    f_buf[idx] = a * (phi_buf[base] - phi_buf[base+1])
+               - b * (phi_buf[base+2] - phi_buf[base+3]);
+}
+
+// upload_fine: restriction (average 8 children per parent)
+// child_buf layout (Fortran col-major): child_buf[v + nvar*(c + 8*p)]
+// parent_buf layout: parent_buf[v + (nvar+1)*p]
+//   v=0..nvar-1: averaged conservative variables
+//   v=nvar: averaged internal energy (if do_eint)
+__global__ void upload_fine_kernel(
+    const double* __restrict__ child_buf,
+    double* __restrict__ parent_buf,
+    int nsplit, int nvar, int ndim, double smallr, int do_eint)
+{
+    int p = blockIdx.x * blockDim.x + threadIdx.x;
+    if (p >= nsplit) return;
+
+    int out_stride = nvar + 1;
+
+    // Average all conservative variables
+    for (int v = 0; v < nvar; v++) {
+        double sum = 0;
+        for (int c = 0; c < 8; c++) {
+            sum += child_buf[v + nvar * (c + 8 * p)];
+        }
+        parent_buf[v + out_stride * p] = sum * 0.125;
+    }
+
+    // Compute averaged internal energy if needed
+    if (do_eint) {
+        double avg_eint = 0;
+        for (int c = 0; c < 8; c++) {
+            int base = nvar * (c + 8 * p);
+            double rho = fmax(child_buf[base], smallr);
+            double ekin = 0;
+            for (int d = 0; d < ndim; d++) {
+                double mom = child_buf[base + 1 + d];
+                ekin += 0.5 * mom * mom / rho;
+            }
+            double etot = child_buf[base + ndim + 1];
+            // erad = 0 for NENER=0
+            avg_eint += (etot - ekin);
+        }
+        parent_buf[nvar + out_stride * p] = avg_eint * 0.125;
+    }
+}
+
+// Per-stream auxiliary buffers for gradient_phi and upload_fine
+struct AuxBuffers {
+    double *d_phi_buf, *d_f_buf;
+    int phi_cap;
+    double *d_child_buf, *d_parent_buf;
+    int child_cap, child_nvar;
+};
+
+static AuxBuffers g_aux[N_STREAMS];
+static bool g_aux_initialized = false;
+
+static void init_aux_buffers() {
+    if (g_aux_initialized) return;
+    memset(g_aux, 0, sizeof(g_aux));
+    g_aux_initialized = true;
+}
+
+extern "C" {
+
+void gradient_phi_cuda_async(
+    const double* h_phi_buf, double* h_f_buf,
+    double a, double b, int ngrid, int stream_slot)
+{
+    if (!is_pool_initialized()) return;
+    init_aux_buffers();
+    AuxBuffers& aux = g_aux[stream_slot];
+    cudaStream_t strm = cuda_get_stream_internal(stream_slot);
+
+    if (ngrid > aux.phi_cap) {
+        int cap = ngrid * 2;
+        if (aux.d_phi_buf) cudaFree(aux.d_phi_buf);
+        if (aux.d_f_buf)   cudaFree(aux.d_f_buf);
+        cudaMalloc(&aux.d_phi_buf, (size_t)cap * 24 * 4 * sizeof(double));
+        cudaMalloc(&aux.d_f_buf,   (size_t)cap * 24 * sizeof(double));
+        aux.phi_cap = cap;
+    }
+
+    int total = ngrid * 24;
+    size_t phi_bytes = (size_t)total * 4 * sizeof(double);
+    size_t f_bytes   = (size_t)total * sizeof(double);
+
+    cudaMemcpyAsync(aux.d_phi_buf, h_phi_buf, phi_bytes, cudaMemcpyHostToDevice, strm);
+    int nth = 256;
+    gradient_phi_kernel<<<(total+nth-1)/nth, nth, 0, strm>>>(
+        aux.d_phi_buf, aux.d_f_buf, a, b, total);
+    cudaMemcpyAsync(h_f_buf, aux.d_f_buf, f_bytes, cudaMemcpyDeviceToHost, strm);
+}
+
+void gradient_phi_cuda_sync(int stream_slot) {
+    if (!is_pool_initialized()) return;
+    cudaStreamSynchronize(cuda_get_stream_internal(stream_slot));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        fprintf(stderr, "CUDA gradient_phi error (slot %d): %s\n",
+                stream_slot, cudaGetErrorString(err));
+}
+
+void upload_fine_cuda_async(
+    const double* h_child_buf, double* h_parent_buf,
+    int nsplit, int nvar, int ndim,
+    double smallr, int do_eint, int stream_slot)
+{
+    if (!is_pool_initialized()) return;
+    init_aux_buffers();
+    AuxBuffers& aux = g_aux[stream_slot];
+    cudaStream_t strm = cuda_get_stream_internal(stream_slot);
+
+    if (nsplit > aux.child_cap || nvar != aux.child_nvar) {
+        int cap = (nsplit > 512) ? nsplit * 2 : 1024;
+        if (aux.d_child_buf)  cudaFree(aux.d_child_buf);
+        if (aux.d_parent_buf) cudaFree(aux.d_parent_buf);
+        cudaMalloc(&aux.d_child_buf,  (size_t)cap * 8 * nvar * sizeof(double));
+        cudaMalloc(&aux.d_parent_buf, (size_t)cap * (nvar + 1) * sizeof(double));
+        aux.child_cap = cap;
+        aux.child_nvar = nvar;
+    }
+
+    size_t child_bytes  = (size_t)nsplit * 8 * nvar * sizeof(double);
+    size_t parent_bytes = (size_t)nsplit * (nvar + 1) * sizeof(double);
+
+    cudaMemcpyAsync(aux.d_child_buf, h_child_buf, child_bytes, cudaMemcpyHostToDevice, strm);
+    int nth = 256;
+    upload_fine_kernel<<<(nsplit+nth-1)/nth, nth, 0, strm>>>(
+        aux.d_child_buf, aux.d_parent_buf, nsplit, nvar, ndim, smallr, do_eint);
+    cudaMemcpyAsync(h_parent_buf, aux.d_parent_buf, parent_bytes, cudaMemcpyDeviceToHost, strm);
+}
+
+void upload_fine_cuda_sync(int stream_slot) {
+    if (!is_pool_initialized()) return;
+    cudaStreamSynchronize(cuda_get_stream_internal(stream_slot));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        fprintf(stderr, "CUDA upload_fine error (slot %d): %s\n",
+                stream_slot, cudaGetErrorString(err));
+}
+
+} // extern "C" -- auxiliary kernels
