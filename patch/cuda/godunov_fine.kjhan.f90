@@ -19,12 +19,19 @@ module hydro_hybrid_commons
   end type scatter_buf_t
 
   type gpu_state_t
-     real(dp), allocatable :: super_uloc(:,:,:,:,:)
-     real(dp), allocatable :: super_gloc(:,:,:,:,:)
-     real(dp), allocatable :: super_flux(:,:,:,:,:,:)
-     real(dp), allocatable :: super_tmp(:,:,:,:,:,:)
-     logical,  allocatable :: super_ok(:,:,:,:)
-     integer,  allocatable :: super_ind_grid(:)
+     ! H2D super buffers (uloc/gloc/ok uploaded per flush)
+     real(dp), allocatable :: super_uloc(:,:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2, 1:nvar)
+     real(dp), allocatable :: super_gloc(:,:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2, 1:ndim)
+     integer,  allocatable :: super_ok_int(:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2)
+     ! D2H compact output buffers (scatter-reduce results)
+     real(dp), allocatable :: super_add_unew(:,:,:)       ! (SUPER_SIZE, 8, nvar)
+     real(dp), allocatable :: super_add_lm1(:,:,:)        ! (SUPER_SIZE, 6, nvar)
+     real(dp), allocatable :: super_add_divu_l(:,:)       ! (SUPER_SIZE, 8) [pressure_fix]
+     real(dp), allocatable :: super_add_enew_l(:,:)       ! (SUPER_SIZE, 8)
+     real(dp), allocatable :: super_add_divu_lm1(:,:)     ! (SUPER_SIZE, 6)
+     real(dp), allocatable :: super_add_enew_lm1(:,:)     ! (SUPER_SIZE, 6)
+     ! Grid info
+     integer,  allocatable :: super_ind_grid(:)           ! (SUPER_SIZE)
      integer :: off = 0
   end type gpu_state_t
 
@@ -34,9 +41,33 @@ module hydro_hybrid_commons
 
   ! Timing accumulators
   real(dp), save :: acc_gather = 0, acc_gpu = 0, acc_scatter_l = 0, acc_merge = 0
-  integer, save :: n_gpu_flushes = 0, n_cpu_batches = 0
+  integer, save :: n_gpu_flushes = 0, n_cpu_batches = 0, n_hybrid_calls = 0
 
 contains
+
+  subroutine pin_5d_dp(arr)
+    use iso_c_binding, only: c_loc, c_long_long
+    use hydro_cuda_interface, only: cuda_host_register_c
+    real(dp), intent(in), target :: arr(:,:,:,:,:)
+    integer :: irc
+    irc = cuda_host_register_c(c_loc(arr), int(size(arr)*8, c_long_long))
+  end subroutine
+
+  subroutine pin_4d_int(arr)
+    use iso_c_binding, only: c_loc, c_long_long
+    use hydro_cuda_interface, only: cuda_host_register_c
+    integer, intent(in), target :: arr(:,:,:,:)
+    integer :: irc
+    irc = cuda_host_register_c(c_loc(arr), int(size(arr)*4, c_long_long))
+  end subroutine
+
+  subroutine pin_3d_dp(arr)
+    use iso_c_binding, only: c_loc, c_long_long
+    use hydro_cuda_interface, only: cuda_host_register_c
+    real(dp), intent(in), target :: arr(:,:,:)
+    integer :: irc
+    irc = cuda_host_register_c(c_loc(arr), int(size(arr)*8, c_long_long))
+  end subroutine
 
   subroutine scatter_buf_init(buf, cap, nv)
     type(scatter_buf_t), intent(inout) :: buf
@@ -940,21 +971,24 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
   use amr_commons
   use hydro_commons
   use hydro_parameters
+  use poisson_commons
   use hydro_hybrid_commons
-  use iso_c_binding, only: c_int
+  use iso_c_binding, only: c_int, c_long_long, c_loc
   use cuda_commons
   use hydro_cuda_interface
   implicit none
   integer, intent(in) :: ilevel, ncache
   !-------------------------------------------------------------------
   ! Dynamic hybrid CPU/GPU dispatcher for Godunov solver.
-  ! OMP threads acquire GPU streams dynamically; fallback to CPU.
-  ! Level L scatter: direct to unew (conflict-free).
-  ! Level L-1 scatter: per-thread buffer, serial merge after barrier.
+  ! Scatter-reduce: H2D uloc/gloc/ok → 5 kernels + scatter_reduce
+  ! → D2H compact add_unew/add_lm1 (~5 MB vs 98 MB).
+  ! No mesh upload required.
   !-------------------------------------------------------------------
   integer :: tid, nthreads, stream_slot, igrid, ngrid
-  integer :: it, i, ic, ivar
+  integer :: it, i, ic, ivar, irc
   integer(kind=8) :: t_start, t_now, clock_rate
+  real(dp), pointer :: ptr_dp(:)
+  integer, pointer :: ptr_int(:)
 
   call system_clock(count_rate=clock_rate)
 
@@ -969,6 +1003,8 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      end do
      allocate(gpu_states(0:max(cuda_n_streams,1)-1))
   end if
+
+  n_hybrid_calls = n_hybrid_calls + 1
 
   ! Reset scatter buffer counts (serial)
   do it = 0, hybrid_max_threads-1
@@ -985,11 +1021,25 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      if (.not. allocated(gpu_states(stream_slot)%super_uloc)) then
         allocate(gpu_states(stream_slot)%super_uloc(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2,1:nvar))
         allocate(gpu_states(stream_slot)%super_gloc(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2,1:ndim))
-        allocate(gpu_states(stream_slot)%super_flux(1:HYBRID_SUPER_SIZE,if1:if2,jf1:jf2,kf1:kf2,1:nvar,1:ndim))
-        allocate(gpu_states(stream_slot)%super_tmp (1:HYBRID_SUPER_SIZE,if1:if2,jf1:jf2,kf1:kf2,1:2,1:ndim))
-        allocate(gpu_states(stream_slot)%super_ok  (1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2))
+        allocate(gpu_states(stream_slot)%super_ok_int(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2))
+        allocate(gpu_states(stream_slot)%super_add_unew(1:HYBRID_SUPER_SIZE,1:8,1:nvar))
+        allocate(gpu_states(stream_slot)%super_add_lm1(1:HYBRID_SUPER_SIZE,1:6,1:nvar))
+        allocate(gpu_states(stream_slot)%super_add_divu_l(1:HYBRID_SUPER_SIZE,1:8))
+        allocate(gpu_states(stream_slot)%super_add_enew_l(1:HYBRID_SUPER_SIZE,1:8))
+        allocate(gpu_states(stream_slot)%super_add_divu_lm1(1:HYBRID_SUPER_SIZE,1:6))
+        allocate(gpu_states(stream_slot)%super_add_enew_lm1(1:HYBRID_SUPER_SIZE,1:6))
         allocate(gpu_states(stream_slot)%super_ind_grid(1:HYBRID_SUPER_SIZE))
-        gpu_states(stream_slot)%super_gloc = 0.0d0
+        ! Pin H2D buffers for fast DMA via cudaHostRegister
+        call pin_5d_dp(gpu_states(stream_slot)%super_uloc)
+        call pin_5d_dp(gpu_states(stream_slot)%super_gloc)
+        call pin_4d_int(gpu_states(stream_slot)%super_ok_int)
+        ! Pin D2H buffers
+        call pin_3d_dp(gpu_states(stream_slot)%super_add_unew)
+        call pin_3d_dp(gpu_states(stream_slot)%super_add_lm1)
+        ! Run bandwidth test once on first allocation
+        !$omp critical (bwtest)
+        if (n_hybrid_calls == 1) call cuda_h2d_bandwidth_test_c()
+        !$omp end critical (bwtest)
      end if
      gpu_states(stream_slot)%off = 0
   end if
@@ -1041,8 +1091,10 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      write(*,'(A,F8.3,A)') '   GPU compute : ', acc_gpu, ' s'
      write(*,'(A,F8.3,A)') '   L scatter   : ', acc_scatter_l, ' s'
      write(*,'(A,F8.3,A)') '   L-1 merge   : ', acc_merge, ' s'
+     write(*,'(A,I6)') '   hybrid calls: ', n_hybrid_calls
      write(*,'(A,I6)') '   GPU flushes : ', n_gpu_flushes
      write(*,'(A,I6)') '   CPU batches : ', n_cpu_batches
+     call hydro_cuda_profile_report_c()
   end if
 
 end subroutine godunov_fine_hybrid
@@ -1372,15 +1424,14 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
   use hydro_commons
   use hydro_parameters
   use poisson_commons
-  use morton_hash
   use hydro_hybrid_commons
-  use iso_c_binding, only: c_int
   implicit none
   type(gpu_state_t), intent(inout) :: gstate
   integer, intent(in) :: ilevel, igrid_start, ngrid, stream_slot
   type(scatter_buf_t), intent(inout) :: sbuf
   !-------------------------------------------------------------------
-  ! GPU path: gather stencil into super buffer, flush when full.
+  ! GPU path: gather uloc/gloc/ok into super buffer, flush when full.
+  ! Traditional H2D approach (no mesh upload).
   !-------------------------------------------------------------------
   integer ,dimension(1:nvector)::ind_grid_loc,igrid_nbor,ind_cell
   integer ,dimension(1:nvector)::ind_exist,ind_nexist,ind_buffer
@@ -1419,6 +1470,9 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
   do i=1,ngrid
      ind_grid_loc(i) = active(ilevel)%igrid(igrid_start+i-1)
   end do
+
+  ! Initialize gloc to zero (gravity source term default)
+  gstate%super_gloc(off+1:off+ngrid,iu1:iu2,ju1:ju2,ku1:ku2,1:ndim) = 0.0d0
 
   ! Gather father cells
   do i=1,ngrid
@@ -1471,6 +1525,7 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
         if(ndim>1)j3=1+2*(j1-1)+j2
         if(ndim>2)k3=1+2*(k1-1)+k2
 
+        ! Store uloc values
         do ivar=1,nvar
            do i=1,nexist
               gstate%super_uloc(off+ind_exist(i),i3,j3,k3,ivar)=uold(ind_cell(i),ivar)
@@ -1480,6 +1535,7 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
            end do
         end do
 
+        ! Store gloc values (gravity)
         if(poisson)then
            do idim=1,ndim
               do i=1,nexist
@@ -1491,11 +1547,12 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
            end do
         end if
 
+        ! Store ok flags as integer (1=refined, 0=not)
         do i=1,nexist
-           gstate%super_ok(off+ind_exist(i),i3,j3,k3)=son(ind_cell(i))>0
+           gstate%super_ok_int(off+ind_exist(i),i3,j3,k3) = merge(1,0,son(ind_cell(i))>0)
         end do
         do i=1,nbuffer
-           gstate%super_ok(off+ind_nexist(i),i3,j3,k3)=.false.
+           gstate%super_ok_int(off+ind_nexist(i),i3,j3,k3) = 0
         end do
 
      end do
@@ -1538,16 +1595,14 @@ subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   type(scatter_buf_t), intent(inout) :: sbuf
   !-------------------------------------------------------------------
   ! GPU compute + scatter for accumulated super buffer.
-  ! Level L scatter: direct to unew (conflict-free).
-  ! Level L-1 scatter: pre-summed entries to per-thread buffer.
+  ! Scatter-reduce: GPU does 5 kernels + scatter_reduce kernel.
+  ! D2H: only compact add_unew/add_lm1 (~5 MB vs 98 MB).
+  ! CPU applies results to unew/sbuf.
   !-------------------------------------------------------------------
   integer :: super_total, g, ig, ic, igridn_tmp, icell_nbor, idx
-  integer :: i0, j0, k0, i2, j2, k2, i3, j3, k3, ind_son, iskip, ivar, idim
-  integer :: i2min,i2max,j2min,j2max,k2min,k2max
-  integer :: i3min,i3max,j3min,j3max,k3min,k3max
+  integer :: ind_son, iskip, ivar, face
   integer :: nx_loc
-  real(dp) :: dx, scale, oneontwotondim, dt_val
-  real(dp) :: acc_unew(1:nvar), acc_ddivu, acc_denew
+  real(dp) :: dx, scale, dt_val
   integer(kind=8) :: t_start, t_now, clock_rate
 
   call system_clock(count_rate=clock_rate)
@@ -1558,170 +1613,65 @@ subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   nx_loc = icoarse_max-icoarse_min+1
   scale = boxlen/dble(nx_loc)
   dx = 0.5D0**ilevel*scale
-  oneontwotondim = 1.d0/dble(twotondim)
 
-  i2min=0; i2max=0; i3min=1; i3max=1
-  j2min=0; j2max=0; j3min=1; j3max=1
-  k2min=0; k2max=0; k3min=1; k3max=1
-  if(ndim>0)then
-     i2max=1; i3max=2
-  end if
-  if(ndim>1)then
-     j2max=1; j3max=2
-  end if
-  if(ndim>2)then
-     k2max=1; k3max=2
-  end if
-
-  ! GPU compute
+  ! GPU compute: H2D uloc/gloc/ok → 5 kernels + scatter_reduce → D2H compact
   call system_clock(t_start)
-  call hydro_cuda_unsplit_async_f( &
-       gstate%super_uloc, gstate%super_gloc, gstate%super_flux, gstate%super_tmp, &
+  call hydro_cuda_unsplit_reduce_async_f( &
+       gstate%super_uloc, gstate%super_gloc, gstate%super_ok_int, &
+       gstate%super_add_unew, gstate%super_add_lm1, &
+       gstate%super_add_divu_l, gstate%super_add_enew_l, &
+       gstate%super_add_divu_lm1, gstate%super_add_enew_lm1, &
        real(dx, c_double), real(dx, c_double), real(dx, c_double), &
        real(dtnew(ilevel), c_double), &
-       int(super_total, c_int), int(HYBRID_SUPER_SIZE, c_int), int(stream_slot, c_int))
-  call hydro_cuda_unsplit_sync_f( &
-       gstate%super_flux, gstate%super_tmp, int(super_total, c_int), int(stream_slot, c_int))
+       int(super_total, c_int), int(HYBRID_SUPER_SIZE, c_int), &
+       int(stream_slot, c_int), pressure_fix)
+  call hydro_cuda_unsplit_reduce_sync_f( &
+       int(super_total, c_int), int(stream_slot, c_int))
+  call hydro_cuda_profile_accumulate_c(int(stream_slot, c_int), int(super_total, c_int))
   call system_clock(t_now)
   dt_val = dble(t_now - t_start) / dble(clock_rate)
   !$omp atomic
   acc_gpu = acc_gpu + dt_val
 
-  ! Scatter phase
+  ! Apply compact results to unew
   call system_clock(t_start)
 
-  ! Flux reset at refined interfaces
-  do g=1,super_total
-     do idim=1,ndim
-        i0=0; j0=0; k0=0
-        if(idim==1)i0=1
-        if(idim==2)j0=1
-        if(idim==3)k0=1
-        do k3=k3min,k3max+k0
-        do j3=j3min,j3max+j0
-        do i3=i3min,i3max+i0
-           if(gstate%super_ok(g,i3-i0,j3-j0,k3-k0) .or. gstate%super_ok(g,i3,j3,k3))then
-              do ivar=1,nvar
-                 gstate%super_flux(g,i3,j3,k3,ivar,idim)=0.0d0
-              end do
-              if(pressure_fix)then
-                 gstate%super_tmp(g,i3,j3,k3,1,idim)=0.0d0
-                 gstate%super_tmp(g,i3,j3,k3,2,idim)=0.0d0
-              end if
-           end if
+  ! Level L scatter (direct, conflict-free): apply add_unew to unew
+  do g = 1, super_total
+     ig = gstate%super_ind_grid(g)
+     do ind_son = 1, 8
+        iskip = ncoarse + (ind_son-1)*ngridmax
+        ic = iskip + ig
+        do ivar = 1, nvar
+           unew(ic, ivar) = unew(ic, ivar) + gstate%super_add_unew(g, ind_son, ivar)
         end do
-        end do
-        end do
+        if (pressure_fix) then
+           divu(ic) = divu(ic) + gstate%super_add_divu_l(g, ind_son)
+           enew(ic) = enew(ic) + gstate%super_add_enew_l(g, ind_son)
+        end if
      end do
   end do
 
-  ! Level L scatter (direct, conflict-free)
-  do g=1,super_total
+  ! Level L-1 scatter: apply add_lm1 entries to per-thread buffer
+  ! face 1=-x, 2=+x, 3=-y, 4=+y, 5=-z, 6=+z (RAMSES convention)
+  do g = 1, super_total
      ig = gstate%super_ind_grid(g)
-     do idim=1,ndim
-        i0=0; j0=0; k0=0
-        if(idim==1)i0=1
-        if(idim==2)j0=1
-        if(idim==3)k0=1
-        do k2=k2min,k2max
-        do j2=j2min,j2max
-        do i2=i2min,i2max
-           ind_son=1+i2+2*j2+4*k2
-           iskip=ncoarse+(ind_son-1)*ngridmax
-           ic = iskip + ig
-           i3=1+i2
-           j3=1+j2
-           k3=1+k2
-           do ivar=1,nvar
-              unew(ic,ivar)=unew(ic,ivar)+ &
-                   & (gstate%super_flux(g,i3   ,j3   ,k3   ,ivar,idim) &
-                   & -gstate%super_flux(g,i3+i0,j3+j0,k3+k0,ivar,idim))
-           end do
-           if(pressure_fix)then
-              divu(ic)=divu(ic)+ &
-                   & (gstate%super_tmp(g,i3   ,j3   ,k3   ,1,idim) &
-                   & -gstate%super_tmp(g,i3+i0,j3+j0,k3+k0,1,idim))
-              enew(ic)=enew(ic)+ &
-                   & (gstate%super_tmp(g,i3   ,j3   ,k3   ,2,idim) &
-                   & -gstate%super_tmp(g,i3+i0,j3+j0,k3+k0,2,idim))
-           end if
-        end do
-        end do
-        end do
-     end do
-  end do
-
-  ! Level L-1 scatter (to per-thread buffer)
-  do g=1,super_total
-     ig = gstate%super_ind_grid(g)
-     do idim=1,ndim
-        i0=0; j0=0; k0=0
-        if(idim==1)i0=1
-        if(idim==2)j0=1
-        if(idim==3)k0=1
-
-        ! Left boundary
-        igridn_tmp = morton_nbor_grid(ig,ilevel,2*idim-1)
-        if (igridn_tmp==0) then
-           icell_nbor = morton_nbor_cell(ig,ilevel,2*idim-1)
-           acc_unew(1:nvar) = 0.0d0
-           acc_ddivu = 0.0d0; acc_denew = 0.0d0
-           do k3=k3min,k3max-k0
-           do j3=j3min,j3max-j0
-           do i3=i3min,i3max-i0
-              do ivar=1,nvar
-                 acc_unew(ivar) = acc_unew(ivar) &
-                      & - gstate%super_flux(g,i3,j3,k3,ivar,idim)*oneontwotondim
-              end do
-              if(pressure_fix)then
-                 acc_ddivu = acc_ddivu - gstate%super_tmp(g,i3,j3,k3,1,idim)*oneontwotondim
-                 acc_denew = acc_denew - gstate%super_tmp(g,i3,j3,k3,2,idim)*oneontwotondim
-              end if
-           end do
-           end do
-           end do
+     do face = 1, 2*ndim
+        igridn_tmp = morton_nbor_grid(ig, ilevel, face)
+        if (igridn_tmp == 0) then
+           icell_nbor = morton_nbor_cell(ig, ilevel, face)
            sbuf%count = sbuf%count + 1
            idx = sbuf%count
            if (idx > sbuf%capacity) call scatter_buf_grow(sbuf)
            sbuf%icell(idx) = icell_nbor
-           sbuf%dunew(idx, 1:nvar) = acc_unew(1:nvar)
-           if(pressure_fix) then
-              sbuf%ddivu(idx) = acc_ddivu
-              sbuf%denew(idx) = acc_denew
+           do ivar = 1, nvar
+              sbuf%dunew(idx, ivar) = gstate%super_add_lm1(g, face, ivar)
+           end do
+           if (pressure_fix) then
+              sbuf%ddivu(idx) = gstate%super_add_divu_lm1(g, face)
+              sbuf%denew(idx) = gstate%super_add_enew_lm1(g, face)
            end if
         end if
-
-        ! Right boundary
-        igridn_tmp = morton_nbor_grid(ig,ilevel,2*idim)
-        if (igridn_tmp==0) then
-           icell_nbor = morton_nbor_cell(ig,ilevel,2*idim)
-           acc_unew(1:nvar) = 0.0d0
-           acc_ddivu = 0.0d0; acc_denew = 0.0d0
-           do k3=k3min+k0,k3max
-           do j3=j3min+j0,j3max
-           do i3=i3min+i0,i3max
-              do ivar=1,nvar
-                 acc_unew(ivar) = acc_unew(ivar) &
-                      & + gstate%super_flux(g,i3+i0,j3+j0,k3+k0,ivar,idim)*oneontwotondim
-              end do
-              if(pressure_fix)then
-                 acc_ddivu = acc_ddivu + gstate%super_tmp(g,i3+i0,j3+j0,k3+k0,1,idim)*oneontwotondim
-                 acc_denew = acc_denew + gstate%super_tmp(g,i3+i0,j3+j0,k3+k0,2,idim)*oneontwotondim
-              end if
-           end do
-           end do
-           end do
-           sbuf%count = sbuf%count + 1
-           idx = sbuf%count
-           if (idx > sbuf%capacity) call scatter_buf_grow(sbuf)
-           sbuf%icell(idx) = icell_nbor
-           sbuf%dunew(idx, 1:nvar) = acc_unew(1:nvar)
-           if(pressure_fix) then
-              sbuf%ddivu(idx) = acc_ddivu
-              sbuf%denew(idx) = acc_denew
-           end if
-        end if
-
      end do
   end do
 

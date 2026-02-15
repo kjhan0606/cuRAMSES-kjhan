@@ -13,6 +13,15 @@ static StreamSlot g_pool[N_STREAMS];
 static bool pool_initialized = false;
 static int g_device_id = 0;
 
+// Per-kernel profiling accumulators (ms -> converted to seconds for report)
+// Phases: 0=H2D, 1=ctoprim, 2=uslope, 3=trace3d, 4=flux, 5=difmag, 6=D2H
+static double g_profile_ms[7] = {0,0,0,0,0,0,0};
+static long long g_profile_grids = 0;
+static int g_profile_flushes = 0;
+static const char* g_profile_names[7] = {
+    "H2D transfer", "ctoprim", "uslope", "trace3d", "flux+memset", "difmag", "D2H transfer"
+};
+
 // Persistent GPU-resident mesh arrays (uploaded once per step)
 static double*    d_mesh_uold = nullptr;
 static double*    d_mesh_f    = nullptr;
@@ -90,6 +99,49 @@ static void ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
     }
 }
 
+static void ensure_reduce_buffers(int slot, int ngrid) {
+    StreamSlot& s = g_pool[slot];
+    if (ngrid <= s.reduce_cap) return;
+    int cap = ngrid * 2;
+
+    if (s.d_ok_int)       cudaFree(s.d_ok_int);
+    if (s.d_add_unew)     cudaFree(s.d_add_unew);
+    if (s.d_add_lm1)      cudaFree(s.d_add_lm1);
+    if (s.d_add_divu_l)   cudaFree(s.d_add_divu_l);
+    if (s.d_add_enew_l)   cudaFree(s.d_add_enew_l);
+    if (s.d_add_divu_lm1) cudaFree(s.d_add_divu_lm1);
+    if (s.d_add_enew_lm1) cudaFree(s.d_add_enew_lm1);
+
+    size_t ok_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+    cudaMalloc(&s.d_ok_int, ok_sz);
+    cudaMalloc(&s.d_add_unew,     (size_t)cap * 8 * NVAR * sizeof(double));
+    cudaMalloc(&s.d_add_lm1,      (size_t)cap * 6 * NVAR * sizeof(double));
+    cudaMalloc(&s.d_add_divu_l,   (size_t)cap * 8 * sizeof(double));
+    cudaMalloc(&s.d_add_enew_l,   (size_t)cap * 8 * sizeof(double));
+    cudaMalloc(&s.d_add_divu_lm1, (size_t)cap * 6 * sizeof(double));
+    cudaMalloc(&s.d_add_enew_lm1, (size_t)cap * 6 * sizeof(double));
+    s.reduce_cap = cap;
+}
+
+static void ensure_pinned_buffers(int slot, int ngrid) {
+    StreamSlot& s = g_pool[slot];
+    if (ngrid <= s.pin_cap) return;
+    int cap = ngrid * 2;
+
+    if (s.h_uloc_pin) cudaFreeHost(s.h_uloc_pin);
+    if (s.h_gloc_pin) cudaFreeHost(s.h_gloc_pin);
+    if (s.h_ok_pin)   cudaFreeHost(s.h_ok_pin);
+
+    size_t uloc_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NVAR * sizeof(double);
+    size_t gloc_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NDIM * sizeof(double);
+    size_t ok_sz   = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+
+    cudaMallocHost(&s.h_uloc_pin, uloc_sz);
+    cudaMallocHost(&s.h_gloc_pin, gloc_sz);
+    cudaMallocHost(&s.h_ok_pin,   ok_sz);
+    s.pin_cap = cap;
+}
+
 // ============================================================================
 // Public C API
 // ============================================================================
@@ -126,6 +178,18 @@ void cuda_pool_init(int local_rank) {
         g_pool[s].d_stencil_idx = nullptr; g_pool[s].d_stencil_grav = nullptr;
         g_pool[s].d_interp_vals = nullptr;
         g_pool[s].stencil_cap = 0; g_pool[s].interp_cap = 0;
+        g_pool[s].d_ok_int = nullptr;
+        g_pool[s].d_add_unew = nullptr; g_pool[s].d_add_lm1 = nullptr;
+        g_pool[s].d_add_divu_l = nullptr; g_pool[s].d_add_enew_l = nullptr;
+        g_pool[s].d_add_divu_lm1 = nullptr; g_pool[s].d_add_enew_lm1 = nullptr;
+        g_pool[s].reduce_cap = 0;
+        g_pool[s].h_uloc_pin = nullptr; g_pool[s].h_gloc_pin = nullptr;
+        g_pool[s].h_ok_pin = nullptr; g_pool[s].pin_cap = 0;
+        // Initialize profiling events
+        for (int e = 0; e < N_PROFILE_EVENTS; e++) {
+            cudaEventCreate(&g_pool[s].ev_profile[e]);
+        }
+        g_pool[s].ev_initialized = 1;
     }
 
     pool_initialized = true;
@@ -195,6 +259,21 @@ void cuda_pool_finalize(void) {
         if (g_pool[s].d_stencil_idx)  cudaFree(g_pool[s].d_stencil_idx);
         if (g_pool[s].d_stencil_grav) cudaFree(g_pool[s].d_stencil_grav);
         if (g_pool[s].d_interp_vals)  cudaFree(g_pool[s].d_interp_vals);
+        if (g_pool[s].d_ok_int)       cudaFree(g_pool[s].d_ok_int);
+        if (g_pool[s].d_add_unew)     cudaFree(g_pool[s].d_add_unew);
+        if (g_pool[s].d_add_lm1)      cudaFree(g_pool[s].d_add_lm1);
+        if (g_pool[s].d_add_divu_l)   cudaFree(g_pool[s].d_add_divu_l);
+        if (g_pool[s].d_add_enew_l)   cudaFree(g_pool[s].d_add_enew_l);
+        if (g_pool[s].d_add_divu_lm1) cudaFree(g_pool[s].d_add_divu_lm1);
+        if (g_pool[s].d_add_enew_lm1) cudaFree(g_pool[s].d_add_enew_lm1);
+        if (g_pool[s].h_uloc_pin) cudaFreeHost(g_pool[s].h_uloc_pin);
+        if (g_pool[s].h_gloc_pin) cudaFreeHost(g_pool[s].h_gloc_pin);
+        if (g_pool[s].h_ok_pin)   cudaFreeHost(g_pool[s].h_ok_pin);
+        if (g_pool[s].ev_initialized) {
+            for (int e = 0; e < N_PROFILE_EVENTS; e++) {
+                cudaEventDestroy(g_pool[s].ev_profile[e]);
+            }
+        }
     }
     // Free persistent mesh arrays
     if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
@@ -245,6 +324,118 @@ void cuda_mesh_free(void) {
     g_mesh_ncell = 0;
 }
 
+void hydro_cuda_profile_accumulate(int stream_slot, int ngrid) {
+    if (stream_slot < 0 || stream_slot >= N_STREAMS) return;
+    StreamSlot& s = g_pool[stream_slot];
+    if (!s.ev_initialized) return;
+    // Events must already be recorded and stream synchronized
+    for (int p = 0; p < 7; p++) {
+        float ms = 0;
+        cudaEventElapsedTime(&ms, s.ev_profile[p], s.ev_profile[p+1]);
+        g_profile_ms[p] += (double)ms;
+    }
+    g_profile_grids += ngrid;
+    g_profile_flushes++;
+}
+
+void hydro_cuda_profile_report(void) {
+    double total = 0;
+    for (int p = 0; p < 7; p++) total += g_profile_ms[p];
+    if (total <= 0 || g_profile_flushes == 0) return;
+
+    printf(" === GPU Hydro Kernel Profiling ===\n");
+    printf("   Flushes: %d, Total grids: %lld\n", g_profile_flushes, g_profile_grids);
+    printf("   %-14s %10s %6s\n", "Phase", "Time(s)", "%");
+    for (int p = 0; p < 7; p++) {
+        printf("   %-14s %10.3f %5.1f%%\n",
+               g_profile_names[p], g_profile_ms[p] / 1000.0,
+               g_profile_ms[p] / total * 100.0);
+    }
+    printf("   %-14s %10.3f\n", "Total", total / 1000.0);
+}
+
+void hydro_cuda_profile_reset(void) {
+    for (int p = 0; p < 7; p++) g_profile_ms[p] = 0;
+    g_profile_grids = 0;
+    g_profile_flushes = 0;
+}
+
+int cuda_host_register(void* ptr, long long nbytes) {
+    if (!pool_initialized || !ptr || nbytes <= 0) return -1;
+    cudaError_t err = cudaHostRegister(ptr, (size_t)nbytes, cudaHostRegisterDefault);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "cudaHostRegister(%p, %lld bytes) failed: %s\n",
+                ptr, nbytes, cudaGetErrorString(err));
+        return -1;
+    }
+    return 0;
+}
+
+void cuda_host_unregister(void* ptr) {
+    if (!pool_initialized || !ptr) return;
+    cudaHostUnregister(ptr);
+}
+
+void cuda_h2d_bandwidth_test(void) {
+    if (!pool_initialized) return;
+    const size_t test_sz = 100 * 1024 * 1024; // 100 MB
+    double *h_pin = nullptr, *d_buf = nullptr;
+    double *h_page = (double*)malloc(test_sz);
+    cudaMallocHost(&h_pin, test_sz);
+    cudaMalloc(&d_buf, test_sz);
+    if (!h_pin || !d_buf || !h_page) {
+        printf("CUDA BW test: alloc failed\n");
+        if (h_pin) cudaFreeHost(h_pin); if (d_buf) cudaFree(d_buf);
+        free(h_page);
+        return;
+    }
+    memset(h_pin, 0, test_sz);
+    memset(h_page, 0, test_sz);
+    cudaDeviceSynchronize();
+
+    // Test 1: pinned H2D
+    cudaEvent_t e0, e1;
+    cudaEventCreate(&e0); cudaEventCreate(&e1);
+    cudaEventRecord(e0);
+    for (int i = 0; i < 10; i++)
+        cudaMemcpy(d_buf, h_pin, test_sz, cudaMemcpyHostToDevice);
+    cudaEventRecord(e1);
+    cudaEventSynchronize(e1);
+    float ms1 = 0;
+    cudaEventElapsedTime(&ms1, e0, e1);
+    double bw_pin = 10.0 * test_sz / (ms1 / 1000.0) / 1e9;
+
+    // Test 2: pageable H2D
+    cudaEventRecord(e0);
+    for (int i = 0; i < 10; i++)
+        cudaMemcpy(d_buf, h_page, test_sz, cudaMemcpyHostToDevice);
+    cudaEventRecord(e1);
+    cudaEventSynchronize(e1);
+    float ms2 = 0;
+    cudaEventElapsedTime(&ms2, e0, e1);
+    double bw_page = 10.0 * test_sz / (ms2 / 1000.0) / 1e9;
+
+    // Test 3: registered H2D
+    cudaHostRegister(h_page, test_sz, cudaHostRegisterDefault);
+    cudaEventRecord(e0);
+    for (int i = 0; i < 10; i++)
+        cudaMemcpy(d_buf, h_page, test_sz, cudaMemcpyHostToDevice);
+    cudaEventRecord(e1);
+    cudaEventSynchronize(e1);
+    float ms3 = 0;
+    cudaEventElapsedTime(&ms3, e0, e1);
+    double bw_reg = 10.0 * test_sz / (ms3 / 1000.0) / 1e9;
+    cudaHostUnregister(h_page);
+
+    printf(" CUDA H2D bandwidth test (100 MB x 10):\n");
+    printf("   Pinned:     %.1f ms -> %.1f GB/s\n", ms1, bw_pin);
+    printf("   Pageable:   %.1f ms -> %.1f GB/s\n", ms2, bw_page);
+    printf("   Registered: %.1f ms -> %.1f GB/s\n", ms3, bw_reg);
+
+    cudaEventDestroy(e0); cudaEventDestroy(e1);
+    cudaFreeHost(h_pin); cudaFree(d_buf); free(h_page);
+}
+
 } // extern "C"
 
 // Internal helpers for other .cu files
@@ -258,6 +449,12 @@ cudaStream_t cuda_get_stream_internal(int slot) {
 }
 void pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
     ensure_stencil_buffers(slot, ngrid, n_interp);
+}
+void pool_ensure_reduce_buffers(int slot, int ngrid) {
+    ensure_reduce_buffers(slot, ngrid);
+}
+void pool_ensure_pinned_buffers(int slot, int ngrid) {
+    ensure_pinned_buffers(slot, ngrid);
 }
 double*   cuda_get_mesh_uold()  { return d_mesh_uold; }
 double*   cuda_get_mesh_f()     { return d_mesh_f; }

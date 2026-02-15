@@ -16,6 +16,7 @@
 #include "cuda_stream_pool.h"
 #include <cstdio>
 #include <cfloat>
+#include <cstring>
 
 // ---- Riemann solver IDs ----
 #define RIEMANN_LLF  0
@@ -1097,6 +1098,267 @@ __global__ void hydro_gather_kernel(
 // ====================================================================
 // Host-callable functions (C API for Fortran ISO_C_BINDING)
 // ====================================================================
+// ====================================================================
+// Kernel 6: scatter_reduce
+// Combines flux reset + Level L scatter + Level L-1 scatter into compact
+// output arrays, eliminating 98 MB D2H transfer of raw flux/tmp.
+//
+// Thread assignment (NVAR=11):
+//   tid 0..87   : Level L (8 children × 11 vars)
+//   tid 88..153 : Level L-1 (6 faces × 11 vars)
+//   tid 154..161: pressure_fix Level L divu+enew (8 children)
+//   tid 162..167: pressure_fix Level L-1 divu+enew (6 faces)
+//   tid 0..215  : shared memory loading (ok array)
+// Block size: 256 threads (8 warps)
+// ====================================================================
+__global__ void hydro_scatter_reduce_kernel(
+    const double* __restrict__ flux,
+    const double* __restrict__ tmp,
+    const int* __restrict__ ok_arr,
+    double* __restrict__ add_unew,
+    double* __restrict__ add_lm1,
+    double* __restrict__ add_divu_l,
+    double* __restrict__ add_enew_l,
+    double* __restrict__ add_divu_lm1,
+    double* __restrict__ add_enew_lm1,
+    double oneontwotondim,
+    int ngrid, int stride)
+{
+    const int g = blockIdx.x;
+    if (g >= ngrid) return;
+    const int tid = threadIdx.x;
+
+    const int nvar_ = d_hp.nvar;
+    const int pfix  = d_hp.pressure_fix;
+
+    // Load ok array into shared memory (216 ints = 864 bytes)
+    __shared__ int s_ok[STENCIL_NI * STENCIL_NJ * STENCIL_NK];
+    if (tid < NCELLS_PER_GRID) {
+        s_ok[tid] = ok_arr[g + (long)stride * (long)tid];
+    }
+    __syncthreads();
+
+    // ok(i,j,k) from shared memory (stencil indices -1..4)
+    #define LOK(i,j,k) s_ok[((i)-IU1) + STENCIL_NI*(((j)-JU1) + STENCIL_NJ*((k)-KU1))]
+
+    // Inline flux read with flux-reset check:
+    // flux at position (i3,j3,k3,ivar,idim) is zero if
+    //   ok(i3-i0, j3-j0, k3-k0) || ok(i3, j3, k3)
+    // where (i0,j0,k0) is the direction offset for idim.
+
+    // === Level L: threads 0..8*nvar-1 ===
+    if (tid < 8 * nvar_) {
+        int child = tid / nvar_;      // 0..7 (ind_son-1)
+        int ivar  = tid % nvar_ + 1;  // 1..nvar
+
+        int i2 = child & 1;
+        int j2 = (child >> 1) & 1;
+        int k2 = (child >> 2) & 1;
+        int i3 = 1 + i2, j3 = 1 + j2, k3 = 1 + k2;
+
+        double acc = 0.0;
+
+        // idim=1 (i0=1)
+        {
+            double fl = (LOK(i3-1,j3,k3) || LOK(i3,j3,k3)) ? 0.0
+                        : flux[IDX_FLUX(g, i3, j3, k3, ivar, 1, stride)];
+            double fr = (LOK(i3,j3,k3) || LOK(i3+1,j3,k3)) ? 0.0
+                        : flux[IDX_FLUX(g, i3+1, j3, k3, ivar, 1, stride)];
+            acc += fl - fr;
+        }
+        // idim=2 (j0=1)
+        {
+            double fl = (LOK(i3,j3-1,k3) || LOK(i3,j3,k3)) ? 0.0
+                        : flux[IDX_FLUX(g, i3, j3, k3, ivar, 2, stride)];
+            double fr = (LOK(i3,j3,k3) || LOK(i3,j3+1,k3)) ? 0.0
+                        : flux[IDX_FLUX(g, i3, j3+1, k3, ivar, 2, stride)];
+            acc += fl - fr;
+        }
+        // idim=3 (k0=1)
+        {
+            double fl = (LOK(i3,j3,k3-1) || LOK(i3,j3,k3)) ? 0.0
+                        : flux[IDX_FLUX(g, i3, j3, k3, ivar, 3, stride)];
+            double fr = (LOK(i3,j3,k3) || LOK(i3,j3,k3+1)) ? 0.0
+                        : flux[IDX_FLUX(g, i3, j3, k3+1, ivar, 3, stride)];
+            acc += fl - fr;
+        }
+
+        add_unew[g + (long)stride * (child + 8 * (ivar - 1))] = acc;
+    }
+
+    // === Level L-1: threads 8*nvar..14*nvar-1 ===
+    {
+        int lm1_tid = tid - 8 * nvar_;
+        if (lm1_tid >= 0 && lm1_tid < 6 * nvar_) {
+            int face = lm1_tid / nvar_;     // 0..5
+            int ivar = lm1_tid % nvar_ + 1; // 1..nvar
+
+            double acc = 0.0;
+
+            // face 0: -x  flux(g, 1, j, k, ivar, 1),  j∈{1,2}, k∈{1,2}
+            // face 1: +x  flux(g, 3, j, k, ivar, 1)
+            // face 2: -y  flux(g, i, 1, k, ivar, 2),  i∈{1,2}, k∈{1,2}
+            // face 3: +y  flux(g, i, 3, k, ivar, 2)
+            // face 4: -z  flux(g, i, j, 1, ivar, 3),  i∈{1,2}, j∈{1,2}
+            // face 5: +z  flux(g, i, j, 3, ivar, 3)
+            switch (face) {
+            case 0:
+                for (int kk=1; kk<=2; kk++)
+                for (int jj=1; jj<=2; jj++) {
+                    double f = (LOK(0,jj,kk) || LOK(1,jj,kk)) ? 0.0
+                               : flux[IDX_FLUX(g, 1, jj, kk, ivar, 1, stride)];
+                    acc -= f * oneontwotondim;
+                } break;
+            case 1:
+                for (int kk=1; kk<=2; kk++)
+                for (int jj=1; jj<=2; jj++) {
+                    double f = (LOK(2,jj,kk) || LOK(3,jj,kk)) ? 0.0
+                               : flux[IDX_FLUX(g, 3, jj, kk, ivar, 1, stride)];
+                    acc += f * oneontwotondim;
+                } break;
+            case 2:
+                for (int kk=1; kk<=2; kk++)
+                for (int ii=1; ii<=2; ii++) {
+                    double f = (LOK(ii,0,kk) || LOK(ii,1,kk)) ? 0.0
+                               : flux[IDX_FLUX(g, ii, 1, kk, ivar, 2, stride)];
+                    acc -= f * oneontwotondim;
+                } break;
+            case 3:
+                for (int kk=1; kk<=2; kk++)
+                for (int ii=1; ii<=2; ii++) {
+                    double f = (LOK(ii,2,kk) || LOK(ii,3,kk)) ? 0.0
+                               : flux[IDX_FLUX(g, ii, 3, kk, ivar, 2, stride)];
+                    acc += f * oneontwotondim;
+                } break;
+            case 4:
+                for (int jj=1; jj<=2; jj++)
+                for (int ii=1; ii<=2; ii++) {
+                    double f = (LOK(ii,jj,0) || LOK(ii,jj,1)) ? 0.0
+                               : flux[IDX_FLUX(g, ii, jj, 1, ivar, 3, stride)];
+                    acc -= f * oneontwotondim;
+                } break;
+            case 5:
+                for (int jj=1; jj<=2; jj++)
+                for (int ii=1; ii<=2; ii++) {
+                    double f = (LOK(ii,jj,2) || LOK(ii,jj,3)) ? 0.0
+                               : flux[IDX_FLUX(g, ii, jj, 3, ivar, 3, stride)];
+                    acc += f * oneontwotondim;
+                } break;
+            }
+
+            add_lm1[g + (long)stride * (face + 6 * (ivar - 1))] = acc;
+        }
+    }
+
+    // === pressure_fix: divu and enew ===
+    if (pfix) {
+        // Level L: threads 14*nvar..14*nvar+7
+        int pfix_l = tid - 14 * nvar_;
+        if (pfix_l >= 0 && pfix_l < 8) {
+            int child = pfix_l;
+            int i2 = child & 1;
+            int j2 = (child >> 1) & 1;
+            int k2 = (child >> 2) & 1;
+            int i3 = 1+i2, j3 = 1+j2, k3 = 1+k2;
+
+            double acc_d = 0.0, acc_e = 0.0;
+            // idim=1
+            {
+                int rl = LOK(i3-1,j3,k3) || LOK(i3,j3,k3);
+                int rr = LOK(i3,j3,k3) || LOK(i3+1,j3,k3);
+                acc_d += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,1,1,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3+1,j3,k3,1,1,stride)]);
+                acc_e += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,2,1,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3+1,j3,k3,2,1,stride)]);
+            }
+            // idim=2
+            {
+                int rl = LOK(i3,j3-1,k3) || LOK(i3,j3,k3);
+                int rr = LOK(i3,j3,k3) || LOK(i3,j3+1,k3);
+                acc_d += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,1,2,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3,j3+1,k3,1,2,stride)]);
+                acc_e += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,2,2,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3,j3+1,k3,2,2,stride)]);
+            }
+            // idim=3
+            {
+                int rl = LOK(i3,j3,k3-1) || LOK(i3,j3,k3);
+                int rr = LOK(i3,j3,k3) || LOK(i3,j3,k3+1);
+                acc_d += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,1,3,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3,j3,k3+1,1,3,stride)]);
+                acc_e += (rl?0.0:tmp[IDX_TMP(g,i3,j3,k3,2,3,stride)])
+                       - (rr?0.0:tmp[IDX_TMP(g,i3,j3,k3+1,2,3,stride)]);
+            }
+
+            add_divu_l[g + (long)stride * child] = acc_d;
+            add_enew_l[g + (long)stride * child] = acc_e;
+        }
+
+        // Level L-1: threads 14*nvar+8..14*nvar+13
+        int pfix_lm1 = tid - 14 * nvar_ - 8;
+        if (pfix_lm1 >= 0 && pfix_lm1 < 6) {
+            int face = pfix_lm1;
+            double acc_d = 0.0, acc_e = 0.0;
+
+            switch (face) {
+            case 0:
+                for (int kk=1; kk<=2; kk++)
+                for (int jj=1; jj<=2; jj++) {
+                    if (!(LOK(0,jj,kk)||LOK(1,jj,kk))) {
+                        acc_d -= tmp[IDX_TMP(g,1,jj,kk,1,1,stride)] * oneontwotondim;
+                        acc_e -= tmp[IDX_TMP(g,1,jj,kk,2,1,stride)] * oneontwotondim;
+                    }
+                } break;
+            case 1:
+                for (int kk=1; kk<=2; kk++)
+                for (int jj=1; jj<=2; jj++) {
+                    if (!(LOK(2,jj,kk)||LOK(3,jj,kk))) {
+                        acc_d += tmp[IDX_TMP(g,3,jj,kk,1,1,stride)] * oneontwotondim;
+                        acc_e += tmp[IDX_TMP(g,3,jj,kk,2,1,stride)] * oneontwotondim;
+                    }
+                } break;
+            case 2:
+                for (int kk=1; kk<=2; kk++)
+                for (int ii=1; ii<=2; ii++) {
+                    if (!(LOK(ii,0,kk)||LOK(ii,1,kk))) {
+                        acc_d -= tmp[IDX_TMP(g,ii,1,kk,1,2,stride)] * oneontwotondim;
+                        acc_e -= tmp[IDX_TMP(g,ii,1,kk,2,2,stride)] * oneontwotondim;
+                    }
+                } break;
+            case 3:
+                for (int kk=1; kk<=2; kk++)
+                for (int ii=1; ii<=2; ii++) {
+                    if (!(LOK(ii,2,kk)||LOK(ii,3,kk))) {
+                        acc_d += tmp[IDX_TMP(g,ii,3,kk,1,2,stride)] * oneontwotondim;
+                        acc_e += tmp[IDX_TMP(g,ii,3,kk,2,2,stride)] * oneontwotondim;
+                    }
+                } break;
+            case 4:
+                for (int jj=1; jj<=2; jj++)
+                for (int ii=1; ii<=2; ii++) {
+                    if (!(LOK(ii,jj,0)||LOK(ii,jj,1))) {
+                        acc_d -= tmp[IDX_TMP(g,ii,jj,1,1,3,stride)] * oneontwotondim;
+                        acc_e -= tmp[IDX_TMP(g,ii,jj,1,2,3,stride)] * oneontwotondim;
+                    }
+                } break;
+            case 5:
+                for (int jj=1; jj<=2; jj++)
+                for (int ii=1; ii<=2; ii++) {
+                    if (!(LOK(ii,jj,2)||LOK(ii,jj,3))) {
+                        acc_d += tmp[IDX_TMP(g,ii,jj,3,1,3,stride)] * oneontwotondim;
+                        acc_e += tmp[IDX_TMP(g,ii,jj,3,2,3,stride)] * oneontwotondim;
+                    }
+                } break;
+            }
+
+            add_divu_lm1[g + (long)stride * face] = acc_d;
+            add_enew_lm1[g + (long)stride * face] = acc_e;
+        }
+    }
+
+    #undef LOK
+}
+
 extern "C" {
 
 void hydro_cuda_init(
@@ -1148,9 +1410,14 @@ void hydro_cuda_unsplit_async(
     size_t flux_bytes = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * NVAR * NDIM * sizeof(double);
     size_t tmp_bytes  = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * 2 * NDIM * sizeof(double);
 
+    // Profile events: [0]H2D[1]ctoprim[2]uslope[3]trace3d[4]flux[5]difmag[6]D2H[7]
+    cudaEvent_t* ev = s->ev_profile;
+
     // H -> D: upload input arrays (full NVECTOR-strided arrays)
+    cudaEventRecord(ev[0], strm);
     cudaMemcpyAsync(s->d_uloc, h_uloc, uloc_bytes, cudaMemcpyHostToDevice, strm);
     cudaMemcpyAsync(s->d_gloc, h_gloc, gloc_bytes, cudaMemcpyHostToDevice, strm);
+    cudaEventRecord(ev[1], strm);
 
     // Kernel launch: one block per ACTIVE grid, 216 threads per block.
     // Grids g=0..ngrid-1 are active; g=ngrid..stride-1 are unused padding.
@@ -1165,14 +1432,17 @@ void hydro_cuda_unsplit_async(
     // Kernel 1: Conservative to primitive
     hydro_ctoprim_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_uloc, s->d_gloc, s->d_q, s->d_c, dt, stride);
+    cudaEventRecord(ev[2], strm);
 
     // Kernel 2: TVD slopes
     hydro_uslope_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_q, s->d_dq, stride);
+    cudaEventRecord(ev[3], strm);
 
     // Kernel 3: MUSCL-Hancock trace
     hydro_trace3d_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_q, s->d_dq, s->d_qm, s->d_qp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[4], strm);
 
     // Zero flux and tmp output arrays
     cudaMemsetAsync(s->d_flux, 0, flux_bytes, strm);
@@ -1181,15 +1451,18 @@ void hydro_cuda_unsplit_async(
     // Kernel 4: Riemann solves -> fluxes
     hydro_flux_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_qm, s->d_qp, s->d_flux, s->d_tmp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[5], strm);
 
     // Kernel 5: Artificial viscosity (difmag kernel)
     hydro_difmag_kernel<<<nblocks, nthreads,
         FLUX_NI * FLUX_NJ * FLUX_NK * sizeof(double), strm>>>(
         s->d_q, s->d_uloc, s->d_flux, dx, dy, dz, dt, stride);
+    cudaEventRecord(ev[6], strm);
 
     // D -> H: download results (full NVECTOR-strided arrays)
     cudaMemcpyAsync(h_flux, s->d_flux, flux_bytes, cudaMemcpyDeviceToHost, strm);
     cudaMemcpyAsync(h_tmp,  s->d_tmp,  tmp_bytes,  cudaMemcpyDeviceToHost, strm);
+    cudaEventRecord(ev[7], strm);
 }
 
 void hydro_cuda_unsplit_sync(
@@ -1231,8 +1504,12 @@ void hydro_cuda_gather_unsplit_async(
     cudaStream_t strm = s->stream;
     long long ncell = cuda_get_mesh_ncell();
 
+    // Profile events: [0]H2D[1]gather+ctoprim[2]uslope[3]trace3d[4]flux[5]difmag[6]D2H[7]
+    cudaEvent_t* ev = s->ev_profile;
+
     // Upload stencil indices (small: ~7 MB for stride=4096)
     size_t idx_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+    cudaEventRecord(ev[0], strm);
     cudaMemcpyAsync(s->d_stencil_idx,  h_stencil_idx,  idx_bytes, cudaMemcpyHostToDevice, strm);
     cudaMemcpyAsync(s->d_stencil_grav, h_stencil_grav, idx_bytes, cudaMemcpyHostToDevice, strm);
 
@@ -1241,6 +1518,7 @@ void hydro_cuda_gather_unsplit_async(
         size_t interp_bytes = (size_t)n_interp * NVAR * sizeof(double);
         cudaMemcpyAsync(s->d_interp_vals, h_interp_vals, interp_bytes, cudaMemcpyHostToDevice, strm);
     }
+    cudaEventRecord(ev[1], strm);
 
     int nblocks  = ngrid;
     int nthreads = NCELLS_PER_GRID;
@@ -1259,14 +1537,17 @@ void hydro_cuda_gather_unsplit_async(
     // Kernel 1: Conservative to primitive
     hydro_ctoprim_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_uloc, s->d_gloc, s->d_q, s->d_c, dt, stride);
+    cudaEventRecord(ev[2], strm);
 
     // Kernel 2: TVD slopes
     hydro_uslope_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_q, s->d_dq, stride);
+    cudaEventRecord(ev[3], strm);
 
     // Kernel 3: MUSCL-Hancock trace
     hydro_trace3d_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_q, s->d_dq, s->d_qm, s->d_qp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[4], strm);
 
     // Zero flux and tmp output arrays
     size_t flux_bytes = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * NVAR * NDIM * sizeof(double);
@@ -1277,15 +1558,18 @@ void hydro_cuda_gather_unsplit_async(
     // Kernel 4: Riemann solves -> fluxes
     hydro_flux_kernel<<<nblocks, nthreads, 0, strm>>>(
         s->d_qm, s->d_qp, s->d_flux, s->d_tmp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[5], strm);
 
     // Kernel 5: Artificial viscosity
     hydro_difmag_kernel<<<nblocks, nthreads,
         FLUX_NI * FLUX_NJ * FLUX_NK * sizeof(double), strm>>>(
         s->d_q, s->d_uloc, s->d_flux, dx, dy, dz, dt, stride);
+    cudaEventRecord(ev[6], strm);
 
     // D -> H: download results
     cudaMemcpyAsync(h_flux, s->d_flux, flux_bytes, cudaMemcpyDeviceToHost, strm);
     cudaMemcpyAsync(h_tmp,  s->d_tmp,  tmp_bytes,  cudaMemcpyDeviceToHost, strm);
+    cudaEventRecord(ev[7], strm);
 }
 
 void hydro_cuda_gather_unsplit_sync(
@@ -1299,6 +1583,115 @@ void hydro_cuda_gather_unsplit_sync(
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA gather-hydro error (slot %d, ngrid %d): %s\n",
+                stream_slot, ngrid, cudaGetErrorString(err));
+    }
+}
+
+// ====================================================================
+// Scatter-reduce: 5 standard kernels + scatter_reduce → compact D2H
+// Eliminates 98 MB D2H transfer, replaces with ~5 MB.
+// ====================================================================
+void hydro_cuda_unsplit_reduce_async(
+    const double* h_uloc, const double* h_gloc, const int* h_ok,
+    double* h_add_unew, double* h_add_lm1,
+    double* h_add_divu_l, double* h_add_enew_l,
+    double* h_add_divu_lm1, double* h_add_enew_lm1,
+    double dx, double dy, double dz, double dt,
+    int ngrid, int stride, int stream_slot)
+{
+    pool_ensure_hydro_buffers(stream_slot, stride);
+    pool_ensure_hydro_inter_buffers(stream_slot, stride);
+    pool_ensure_reduce_buffers(stream_slot, stride);
+
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStream_t strm = s->stream;
+
+    size_t uloc_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NVAR * sizeof(double);
+    size_t gloc_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NDIM * sizeof(double);
+    size_t ok_bytes   = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+    size_t flux_bytes = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * NVAR * NDIM * sizeof(double);
+    size_t tmp_bytes  = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * 2 * NDIM * sizeof(double);
+
+    cudaEvent_t* ev = s->ev_profile;
+
+    // H2D: direct DMA from host (caller must ensure pinned/registered memory)
+    cudaEventRecord(ev[0], strm);
+    cudaMemcpyAsync(s->d_uloc,   h_uloc, uloc_bytes, cudaMemcpyHostToDevice, strm);
+    cudaMemcpyAsync(s->d_gloc,   h_gloc, gloc_bytes, cudaMemcpyHostToDevice, strm);
+    cudaMemcpyAsync(s->d_ok_int, h_ok,   ok_bytes,   cudaMemcpyHostToDevice, strm);
+    cudaEventRecord(ev[1], strm);
+
+    int nblocks  = ngrid;
+    int nthreads = NCELLS_PER_GRID;  // 216
+    double dtdx = dt/dx, dtdy = dt/dy, dtdz = dt/dz;
+
+    // Kernel 1: ctoprim
+    hydro_ctoprim_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_uloc, s->d_gloc, s->d_q, s->d_c, dt, stride);
+    cudaEventRecord(ev[2], strm);
+
+    // Kernel 2: uslope
+    hydro_uslope_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, stride);
+    cudaEventRecord(ev[3], strm);
+
+    // Kernel 3: trace3d
+    hydro_trace3d_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, s->d_qm, s->d_qp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[4], strm);
+
+    // Zero flux/tmp
+    cudaMemsetAsync(s->d_flux, 0, flux_bytes, strm);
+    cudaMemsetAsync(s->d_tmp,  0, tmp_bytes,  strm);
+
+    // Kernel 4: Riemann fluxes
+    hydro_flux_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_qm, s->d_qp, s->d_flux, s->d_tmp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[5], strm);
+
+    // Kernel 5: difmag
+    hydro_difmag_kernel<<<nblocks, nthreads,
+        FLUX_NI * FLUX_NJ * FLUX_NK * sizeof(double), strm>>>(
+        s->d_q, s->d_uloc, s->d_flux, dx, dy, dz, dt, stride);
+    cudaEventRecord(ev[6], strm);
+
+    // Kernel 6: scatter_reduce (flux+tmp+ok → add_unew+add_lm1)
+    double oneontwotondim = 0.125;  // 1/8 for 3D
+    hydro_scatter_reduce_kernel<<<nblocks, 256, 0, strm>>>(
+        s->d_flux, s->d_tmp, s->d_ok_int,
+        s->d_add_unew, s->d_add_lm1,
+        s->d_add_divu_l, s->d_add_enew_l,
+        s->d_add_divu_lm1, s->d_add_enew_lm1,
+        oneontwotondim, ngrid, stride);
+
+    // D2H: compact output only (~5 MB vs 98 MB)
+    size_t unew_bytes     = (size_t)stride * 8 * NVAR * sizeof(double);
+    size_t lm1_bytes      = (size_t)stride * 6 * NVAR * sizeof(double);
+    size_t divu_l_bytes   = (size_t)stride * 8 * sizeof(double);
+    size_t enew_l_bytes   = (size_t)stride * 8 * sizeof(double);
+    size_t divu_lm1_bytes = (size_t)stride * 6 * sizeof(double);
+    size_t enew_lm1_bytes = (size_t)stride * 6 * sizeof(double);
+
+    cudaMemcpyAsync(h_add_unew, s->d_add_unew, unew_bytes, cudaMemcpyDeviceToHost, strm);
+    cudaMemcpyAsync(h_add_lm1,  s->d_add_lm1,  lm1_bytes,  cudaMemcpyDeviceToHost, strm);
+
+    if (h_add_divu_l) {
+        cudaMemcpyAsync(h_add_divu_l,   s->d_add_divu_l,   divu_l_bytes,   cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_enew_l,   s->d_add_enew_l,   enew_l_bytes,   cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_divu_lm1, s->d_add_divu_lm1, divu_lm1_bytes, cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_enew_lm1, s->d_add_enew_lm1, enew_lm1_bytes, cudaMemcpyDeviceToHost, strm);
+    }
+
+    cudaEventRecord(ev[7], strm);
+}
+
+void hydro_cuda_unsplit_reduce_sync(int ngrid, int stream_slot)
+{
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStreamSynchronize(s->stream);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA hydro reduce error (slot %d, ngrid %d): %s\n",
                 stream_slot, ngrid, cudaGetErrorString(err));
     }
 }

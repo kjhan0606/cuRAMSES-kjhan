@@ -80,6 +80,29 @@ module hydro_cuda_interface
        integer(c_int), value :: ngrid, stream_slot
      end subroutine
 
+     ! Scatter-reduce: 5 kernels + scatter_reduce, compact D2H
+     subroutine hydro_cuda_unsplit_reduce_async_c( &
+          h_uloc, h_gloc, h_ok, &
+          h_add_unew, h_add_lm1, &
+          h_add_divu_l, h_add_enew_l, &
+          h_add_divu_lm1, h_add_enew_lm1, &
+          dx, dy, dz, dt, ngrid, stride, stream_slot) &
+          bind(C, name='hydro_cuda_unsplit_reduce_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_uloc, h_gloc, h_ok
+       type(c_ptr), value :: h_add_unew, h_add_lm1
+       type(c_ptr), value :: h_add_divu_l, h_add_enew_l
+       type(c_ptr), value :: h_add_divu_lm1, h_add_enew_lm1
+       real(c_double), value :: dx, dy, dz, dt
+       integer(c_int), value :: ngrid, stride, stream_slot
+     end subroutine
+
+     subroutine hydro_cuda_unsplit_reduce_sync_c(ngrid, stream_slot) &
+          bind(C, name='hydro_cuda_unsplit_reduce_sync')
+       import :: c_int
+       integer(c_int), value :: ngrid, stream_slot
+     end subroutine
+
      ! gradient_phi CUDA kernel
      subroutine gradient_phi_cuda_async_c( &
           h_phi_buf, h_f_buf, a, b, ngrid, stream_slot) &
@@ -145,6 +168,40 @@ module hydro_cuda_interface
           bind(C, name='cmpdt_cuda_sync')
        import :: c_int
        integer(c_int), value :: stream_slot
+     end subroutine
+
+     ! Host memory pinning
+     function cuda_host_register_c(ptr, nbytes) result(rc) &
+          bind(C, name='cuda_host_register')
+       import :: c_ptr, c_long_long, c_int
+       type(c_ptr), value :: ptr
+       integer(c_long_long), value :: nbytes
+       integer(c_int) :: rc
+     end function
+
+     subroutine cuda_host_unregister_c(ptr) &
+          bind(C, name='cuda_host_unregister')
+       import :: c_ptr
+       type(c_ptr), value :: ptr
+     end subroutine
+
+     subroutine cuda_h2d_bandwidth_test_c() &
+          bind(C, name='cuda_h2d_bandwidth_test')
+     end subroutine
+
+     ! Per-kernel profiling
+     subroutine hydro_cuda_profile_accumulate_c(stream_slot, ngrid) &
+          bind(C, name='hydro_cuda_profile_accumulate')
+       import :: c_int
+       integer(c_int), value :: stream_slot, ngrid
+     end subroutine
+
+     subroutine hydro_cuda_profile_report_c() &
+          bind(C, name='hydro_cuda_profile_report')
+     end subroutine
+
+     subroutine hydro_cuda_profile_reset_c() &
+          bind(C, name='hydro_cuda_profile_reset')
      end subroutine
   end interface
 
@@ -245,6 +302,51 @@ contains
     call cuda_mesh_upload_c(c_loc(uold_arr(1)), f_ptr, c_loc(son_arr(1)), &
          ncell, nvar_in, ndim_in)
   end subroutine cuda_mesh_upload_f
+
+  !-----------------------------------------------------------
+  ! Scatter-reduce: 5 kernels + scatter_reduce, compact D2H
+  ! H2D: uloc+gloc+ok (~101 MB), D2H: add_unew+add_lm1 (~5 MB)
+  !-----------------------------------------------------------
+  subroutine hydro_cuda_unsplit_reduce_async_f( &
+       uloc, gravin, ok_int, &
+       add_unew, add_lm1, &
+       add_divu_l, add_enew_l, add_divu_lm1, add_enew_lm1, &
+       dx, dy, dz, dt, ngrid, stride, stream_slot, has_pfix)
+    implicit none
+    real(c_double), intent(in), target :: uloc(*), gravin(*)
+    integer(c_int), intent(in), target :: ok_int(*)
+    real(c_double), intent(inout), target :: add_unew(*), add_lm1(*)
+    real(c_double), intent(inout), target :: add_divu_l(*), add_enew_l(*)
+    real(c_double), intent(inout), target :: add_divu_lm1(*), add_enew_lm1(*)
+    real(c_double), intent(in) :: dx, dy, dz, dt
+    integer(c_int), intent(in) :: ngrid, stride, stream_slot
+    logical, intent(in) :: has_pfix
+    type(c_ptr) :: pfix_ptr_dl, pfix_ptr_el, pfix_ptr_dlm1, pfix_ptr_elm1
+
+    if (has_pfix) then
+       pfix_ptr_dl   = c_loc(add_divu_l(1))
+       pfix_ptr_el   = c_loc(add_enew_l(1))
+       pfix_ptr_dlm1 = c_loc(add_divu_lm1(1))
+       pfix_ptr_elm1 = c_loc(add_enew_lm1(1))
+    else
+       pfix_ptr_dl   = c_null_ptr
+       pfix_ptr_el   = c_null_ptr
+       pfix_ptr_dlm1 = c_null_ptr
+       pfix_ptr_elm1 = c_null_ptr
+    end if
+
+    call hydro_cuda_unsplit_reduce_async_c( &
+         c_loc(uloc(1)), c_loc(gravin(1)), c_loc(ok_int(1)), &
+         c_loc(add_unew(1)), c_loc(add_lm1(1)), &
+         pfix_ptr_dl, pfix_ptr_el, pfix_ptr_dlm1, pfix_ptr_elm1, &
+         dx, dy, dz, dt, ngrid, stride, stream_slot)
+  end subroutine hydro_cuda_unsplit_reduce_async_f
+
+  subroutine hydro_cuda_unsplit_reduce_sync_f(ngrid, stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: ngrid, stream_slot
+    call hydro_cuda_unsplit_reduce_sync_c(ngrid, stream_slot)
+  end subroutine hydro_cuda_unsplit_reduce_sync_f
 
   !-----------------------------------------------------------
   ! GPU-gather async: upload stencil indices, GPU gather+compute
