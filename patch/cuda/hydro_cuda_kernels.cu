@@ -1029,6 +1029,72 @@ __global__ void hydro_difmag_kernel(
 }
 
 // ====================================================================
+// Kernel 6: GPU Gather -- fills d_uloc/d_gloc from mesh + stencil indices
+// One block per grid, 216 threads per block.
+// stencil_idx > 0 => direct cell access into mesh_uold
+// stencil_idx < 0 => interpolated value from interp_vals (AoS layout)
+// stencil_grav > 0 => cell index into mesh_f; == 0 => zero gravity
+// ====================================================================
+__global__ void hydro_gather_kernel(
+    const int* __restrict__ stencil_idx,
+    const int* __restrict__ stencil_grav,
+    const double* __restrict__ interp_vals,
+    const double* __restrict__ mesh_uold,
+    const double* __restrict__ mesh_f,
+    double* __restrict__ uloc,
+    double* __restrict__ gloc,
+    long long ncell,
+    int ngrid,
+    int stride)
+{
+    const int g = blockIdx.x;
+    if (g >= ngrid) return;
+    const int tid = threadIdx.x;
+    if (tid >= NCELLS_PER_GRID) return;
+
+    int i, j, k;
+    thread_to_ijk(tid, i, j, k);
+
+    const int nvar_ = d_hp.nvar;
+    const int ndim_ = d_hp.ndim;
+
+    // Hydro data gather
+    int sidx = stencil_idx[IDX4(g, i, j, k, stride)];
+    if (sidx > 0) {
+        // Direct cell: sidx is 1-based Fortran index
+        long long cell = (long long)(sidx - 1);
+        for (int n = 1; n <= nvar_; n++) {
+            uloc[IDX5(g, i, j, k, n, stride)] =
+                mesh_uold[cell + ncell * (long long)(n - 1)];
+        }
+    } else if (sidx < 0) {
+        // Interpolated: -sidx is 1-based slot, AoS layout: base = (slot-1)*NVAR
+        int base = (-sidx - 1) * NVAR;
+        for (int n = 1; n <= nvar_; n++) {
+            uloc[IDX5(g, i, j, k, n, stride)] = interp_vals[base + n - 1];
+        }
+    } else {
+        for (int n = 1; n <= nvar_; n++) {
+            uloc[IDX5(g, i, j, k, n, stride)] = 0.0;
+        }
+    }
+
+    // Gravity gather
+    int gidx = stencil_grav[IDX4(g, i, j, k, stride)];
+    if (gidx > 0) {
+        long long cell = (long long)(gidx - 1);
+        for (int d = 1; d <= ndim_; d++) {
+            gloc[IDX5G(g, i, j, k, d, stride)] =
+                mesh_f[cell + ncell * (long long)(d - 1)];
+        }
+    } else {
+        for (int d = 1; d <= ndim_; d++) {
+            gloc[IDX5G(g, i, j, k, d, stride)] = 0.0;
+        }
+    }
+}
+
+// ====================================================================
 // Host-callable functions (C API for Fortran ISO_C_BINDING)
 // ====================================================================
 extern "C" {
@@ -1065,12 +1131,9 @@ void hydro_cuda_unsplit_async(
     const int* h_ok,
     double dx, double dy, double dz, double dt,
     int ngrid,
+    int stride,
     int stream_slot)
 {
-    // IMPORTANT: Fortran arrays have stride NVECTOR in the first dimension,
-    // even when ngrid < NVECTOR (partial batches). We must use NVECTOR as
-    // the stride for memcpy and kernel indexing to match Fortran layout.
-    const int stride = NVECTOR;
 
     // Ensure device buffers are large enough (use stride, not ngrid)
     pool_ensure_hydro_buffers(stream_slot, stride);
@@ -1140,6 +1203,102 @@ void hydro_cuda_unsplit_sync(
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA hydro error (slot %d, ngrid %d): %s\n",
+                stream_slot, ngrid, cudaGetErrorString(err));
+    }
+}
+
+// ====================================================================
+// GPU-gather variant: upload stencil indices, gather on GPU, compute
+// Eliminates 97 MB/chunk uloc/gloc PCIe transfer
+// ====================================================================
+void hydro_cuda_gather_unsplit_async(
+    const int* h_stencil_idx,
+    const int* h_stencil_grav,
+    const double* h_interp_vals,
+    double* h_flux,
+    double* h_tmp,
+    double dx, double dy, double dz, double dt,
+    int ngrid,
+    int stride,
+    int n_interp,
+    int stream_slot)
+{
+    pool_ensure_hydro_buffers(stream_slot, stride);
+    pool_ensure_hydro_inter_buffers(stream_slot, stride);
+    pool_ensure_stencil_buffers(stream_slot, stride, n_interp);
+
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStream_t strm = s->stream;
+    long long ncell = cuda_get_mesh_ncell();
+
+    // Upload stencil indices (small: ~7 MB for stride=4096)
+    size_t idx_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+    cudaMemcpyAsync(s->d_stencil_idx,  h_stencil_idx,  idx_bytes, cudaMemcpyHostToDevice, strm);
+    cudaMemcpyAsync(s->d_stencil_grav, h_stencil_grav, idx_bytes, cudaMemcpyHostToDevice, strm);
+
+    // Upload interpolation values (AoS: n_interp * NVAR doubles)
+    if (n_interp > 0 && h_interp_vals) {
+        size_t interp_bytes = (size_t)n_interp * NVAR * sizeof(double);
+        cudaMemcpyAsync(s->d_interp_vals, h_interp_vals, interp_bytes, cudaMemcpyHostToDevice, strm);
+    }
+
+    int nblocks  = ngrid;
+    int nthreads = NCELLS_PER_GRID;
+
+    // Kernel 0: GPU gather (fills d_uloc and d_gloc from mesh)
+    hydro_gather_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_stencil_idx, s->d_stencil_grav, s->d_interp_vals,
+        cuda_get_mesh_uold(), cuda_get_mesh_f(),
+        s->d_uloc, s->d_gloc,
+        ncell, ngrid, stride);
+
+    double dtdx = dt / dx;
+    double dtdy = dt / dy;
+    double dtdz = dt / dz;
+
+    // Kernel 1: Conservative to primitive
+    hydro_ctoprim_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_uloc, s->d_gloc, s->d_q, s->d_c, dt, stride);
+
+    // Kernel 2: TVD slopes
+    hydro_uslope_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, stride);
+
+    // Kernel 3: MUSCL-Hancock trace
+    hydro_trace3d_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, s->d_qm, s->d_qp, dtdx, dtdy, dtdz, stride);
+
+    // Zero flux and tmp output arrays
+    size_t flux_bytes = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * NVAR * NDIM * sizeof(double);
+    size_t tmp_bytes  = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * 2 * NDIM * sizeof(double);
+    cudaMemsetAsync(s->d_flux, 0, flux_bytes, strm);
+    cudaMemsetAsync(s->d_tmp,  0, tmp_bytes,  strm);
+
+    // Kernel 4: Riemann solves -> fluxes
+    hydro_flux_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_qm, s->d_qp, s->d_flux, s->d_tmp, dtdx, dtdy, dtdz, stride);
+
+    // Kernel 5: Artificial viscosity
+    hydro_difmag_kernel<<<nblocks, nthreads,
+        FLUX_NI * FLUX_NJ * FLUX_NK * sizeof(double), strm>>>(
+        s->d_q, s->d_uloc, s->d_flux, dx, dy, dz, dt, stride);
+
+    // D -> H: download results
+    cudaMemcpyAsync(h_flux, s->d_flux, flux_bytes, cudaMemcpyDeviceToHost, strm);
+    cudaMemcpyAsync(h_tmp,  s->d_tmp,  tmp_bytes,  cudaMemcpyDeviceToHost, strm);
+}
+
+void hydro_cuda_gather_unsplit_sync(
+    double* h_flux,
+    double* h_tmp,
+    int ngrid,
+    int stream_slot)
+{
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStreamSynchronize(s->stream);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA gather-hydro error (slot %d, ngrid %d): %s\n",
                 stream_slot, ngrid, cudaGetErrorString(err));
     }
 }

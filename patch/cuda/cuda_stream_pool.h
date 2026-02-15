@@ -59,6 +59,13 @@ typedef struct {
     // Hydro intermediate arrays (device only)
     double *d_q, *d_c, *d_dq, *d_qm, *d_qp;
     int hydro_inter_cap; // allocated grid capacity
+
+    // GPU-gather stencil index buffers (device only)
+    int *d_stencil_idx;     // (stride, NI, NJ, NK)
+    int *d_stencil_grav;    // (stride, NI, NJ, NK)
+    double *d_interp_vals;  // (n_interp, NVAR)
+    int stencil_cap;        // allocated stride capacity
+    int interp_cap;         // allocated interp capacity
 } StreamSlot;
 
 // C API (callable from Fortran via ISO_C_BINDING)
@@ -73,6 +80,11 @@ extern "C" {
     int  cuda_get_n_streams(void);
     void cuda_pool_finalize(void);
     int  cuda_pool_is_initialized(void);
+
+    // GPU-resident mesh arrays for GPU-gather
+    void cuda_mesh_upload(const double* uold, const double* f_grav,
+                          const int* son, long long ncell, int nvar, int ndim);
+    void cuda_mesh_free(void);
 #ifdef __cplusplus
 }
 #endif
@@ -83,7 +95,13 @@ StreamSlot* get_pool();
 bool is_pool_initialized();
 void pool_ensure_hydro_buffers(int slot, int ngrid);
 void pool_ensure_hydro_inter_buffers(int slot, int ngrid);
+void pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp);
 cudaStream_t cuda_get_stream_internal(int slot);
+// GPU-resident mesh array accessors
+double* cuda_get_mesh_uold();
+double* cuda_get_mesh_f();
+int*    cuda_get_mesh_son();
+long long cuda_get_mesh_ncell();
 #endif
 
 #endif // CUDA_STREAM_POOL_H
