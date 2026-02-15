@@ -112,6 +112,40 @@ module hydro_cuda_interface
        import :: c_int
        integer(c_int), value :: stream_slot
      end subroutine
+
+     ! synchro_hydro CUDA kernel
+     subroutine synchro_cuda_async_c( &
+          h_buf, smallr, dteff, ncell, ndim, stride, stream_slot) &
+          bind(C, name='synchro_cuda_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_buf
+       real(c_double), value :: smallr, dteff
+       integer(c_int), value :: ncell, ndim, stride, stream_slot
+     end subroutine
+
+     subroutine synchro_cuda_sync_c(stream_slot) &
+          bind(C, name='synchro_cuda_sync')
+       import :: c_int
+       integer(c_int), value :: stream_slot
+     end subroutine
+
+     ! cmpdt CUDA kernel
+     subroutine cmpdt_cuda_async_c( &
+          h_buf, h_dt_buf, &
+          dx, smallr, smallc, gamma_val, courant_factor, &
+          ncell, nvar, ndim, stride, stream_slot) &
+          bind(C, name='cmpdt_cuda_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_buf, h_dt_buf
+       real(c_double), value :: dx, smallr, smallc, gamma_val, courant_factor
+       integer(c_int), value :: ncell, nvar, ndim, stride, stream_slot
+     end subroutine
+
+     subroutine cmpdt_cuda_sync_c(stream_slot) &
+          bind(C, name='cmpdt_cuda_sync')
+       import :: c_int
+       integer(c_int), value :: stream_slot
+     end subroutine
   end interface
 
 contains
@@ -296,5 +330,49 @@ contains
     integer(c_int), intent(in) :: stream_slot
     call upload_fine_cuda_sync_c(stream_slot)
   end subroutine upload_fine_cuda_sync_f
+
+  !-----------------------------------------------------------
+  ! synchro_hydro CUDA: async launch
+  !-----------------------------------------------------------
+  subroutine synchro_cuda_async_f(buf, smallr_in, dteff, ncell, ndim_in, stride, stream_slot)
+    implicit none
+    real(c_double), intent(inout), target :: buf(*)
+    real(c_double), intent(in) :: smallr_in, dteff
+    integer(c_int), intent(in) :: ncell, ndim_in, stride, stream_slot
+    call synchro_cuda_async_c(c_loc(buf(1)), smallr_in, dteff, ncell, ndim_in, stride, stream_slot)
+  end subroutine synchro_cuda_async_f
+
+  !-----------------------------------------------------------
+  ! synchro_hydro CUDA: sync
+  !-----------------------------------------------------------
+  subroutine synchro_cuda_sync_f(stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: stream_slot
+    call synchro_cuda_sync_c(stream_slot)
+  end subroutine synchro_cuda_sync_f
+
+  !-----------------------------------------------------------
+  ! cmpdt CUDA: async launch
+  !-----------------------------------------------------------
+  subroutine cmpdt_cuda_async_f(buf, dt_buf, dx, smallr_in, smallc_in, &
+       gamma_in, courant_in, ncell, nvar_in, ndim_in, stride, stream_slot)
+    implicit none
+    real(c_double), intent(in), target :: buf(*)
+    real(c_double), intent(out), target :: dt_buf(*)
+    real(c_double), intent(in) :: dx, smallr_in, smallc_in, gamma_in, courant_in
+    integer(c_int), intent(in) :: ncell, nvar_in, ndim_in, stride, stream_slot
+    call cmpdt_cuda_async_c(c_loc(buf(1)), c_loc(dt_buf(1)), &
+         dx, smallr_in, smallc_in, gamma_in, courant_in, &
+         ncell, nvar_in, ndim_in, stride, stream_slot)
+  end subroutine cmpdt_cuda_async_f
+
+  !-----------------------------------------------------------
+  ! cmpdt CUDA: sync
+  !-----------------------------------------------------------
+  subroutine cmpdt_cuda_sync_f(stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: stream_slot
+    call cmpdt_cuda_sync_c(stream_slot)
+  end subroutine cmpdt_cuda_sync_f
 
 end module hydro_cuda_interface

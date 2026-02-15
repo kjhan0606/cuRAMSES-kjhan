@@ -1466,4 +1466,191 @@ void upload_fine_cuda_sync(int stream_slot) {
                 stream_slot, cudaGetErrorString(err));
 }
 
+// ====================================================================
+// synchro_hydro: gravity momentum + energy update
+// buf layout (Fortran column-major, SoA):
+//   buf[k + 0*stride] = rho, buf[k + d*stride] = momentum_d (d=1..ndim),
+//   buf[k + (ndim+1)*stride] = E_total,
+//   buf[k + (ndim+2+d-1)*stride] = f_grav_d (d=0..ndim-1)
+// In-place update: momentum += rho*f*dt, energy adjusted for kinetic
+// ====================================================================
+__global__ void synchro_hydro_kernel(
+    double* __restrict__ buf,
+    double smallr, double dteff,
+    int ncell, int ndim, int stride)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= ncell) return;
+
+    double rho = buf[k];
+    if (rho < smallr) rho = smallr;
+    double E = buf[k + (ndim + 1) * stride];
+
+    // Remove kinetic energy
+    for (int d = 0; d < ndim; d++) {
+        double mom = buf[k + (d + 1) * stride];
+        E -= 0.5 * mom * mom / rho;
+    }
+
+    // Update momentum
+    for (int d = 0; d < ndim; d++) {
+        double fg = buf[k + (ndim + 2 + d) * stride];
+        buf[k + (d + 1) * stride] += rho * fg * dteff;
+    }
+
+    // Add back kinetic energy with updated momentum
+    for (int d = 0; d < ndim; d++) {
+        double mom = buf[k + (d + 1) * stride];
+        E += 0.5 * mom * mom / rho;
+    }
+
+    buf[k + (ndim + 1) * stride] = E;
+}
+
+// Per-stream generic device buffers for synchro/cmpdt
+static double* g_generic_buf[N_STREAMS] = {};
+static size_t  g_generic_cap[N_STREAMS] = {};
+
+static void ensure_generic_buf(int slot, size_t needed) {
+    if (needed > g_generic_cap[slot]) {
+        if (g_generic_buf[slot]) cudaFree(g_generic_buf[slot]);
+        cudaError_t err = cudaMalloc(&g_generic_buf[slot], needed * 2);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "ensure_generic_buf: cudaMalloc(%zu) failed for slot %d: %s\n",
+                    needed * 2, slot, cudaGetErrorString(err));
+            g_generic_buf[slot] = nullptr;
+            g_generic_cap[slot] = 0;
+            return;
+        }
+        g_generic_cap[slot] = needed * 2;
+    }
+}
+
+void synchro_cuda_async(
+    double* h_buf,
+    double smallr, double dteff,
+    int ncell, int ndim, int stride, int stream_slot)
+{
+    if (!is_pool_initialized()) return;
+    cudaStream_t strm = cuda_get_stream_internal(stream_slot);
+
+    int nprops = ndim + 2 + ndim;
+    size_t total_bytes = (size_t)stride * nprops * sizeof(double);
+
+    ensure_generic_buf(stream_slot, total_bytes);
+    if (!g_generic_buf[stream_slot]) return;
+
+    cudaError_t err;
+    err = cudaMemcpyAsync(g_generic_buf[stream_slot], h_buf, total_bytes, cudaMemcpyHostToDevice, strm);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "synchro H2D memcpy error: %s (slot=%d bytes=%zu h_buf=%p d_buf=%p)\n",
+                cudaGetErrorString(err), stream_slot, total_bytes, (void*)h_buf, (void*)g_generic_buf[stream_slot]);
+        return;
+    }
+    int nth = 256;
+    synchro_hydro_kernel<<<(ncell+nth-1)/nth, nth, 0, strm>>>(
+        g_generic_buf[stream_slot], smallr, dteff, ncell, ndim, stride);
+    err = cudaMemcpyAsync(h_buf, g_generic_buf[stream_slot], total_bytes, cudaMemcpyDeviceToHost, strm);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "synchro D2H memcpy error: %s (slot=%d bytes=%zu)\n",
+                cudaGetErrorString(err), stream_slot, total_bytes);
+    }
+}
+
+void synchro_cuda_sync(int stream_slot) {
+    if (!is_pool_initialized()) return;
+    cudaStreamSynchronize(cuda_get_stream_internal(stream_slot));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        fprintf(stderr, "CUDA synchro error (slot %d): %s\n",
+                stream_slot, cudaGetErrorString(err));
+}
+
+// ====================================================================
+// cmpdt: CFL timestep computation per cell
+// Input buf (SoA): uold(1:nvar) + f(1:ndim) per cell
+// Output dt_buf: per-cell dt value (min-reduced on CPU)
+// ====================================================================
+__global__ void cmpdt_cuda_kernel(
+    const double* __restrict__ buf,
+    double* __restrict__ dt_buf,
+    double dx, double smallr, double smallc, double gamma_val, double courant_factor,
+    int ncell, int nvar, int ndim, int stride)
+{
+    int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= ncell) return;
+
+    double rho = buf[k];
+    if (rho < smallr) rho = smallr;
+
+    // Internal energy = E_total
+    double eint = buf[k + (ndim + 1) * stride];
+    // Subtract kinetic energy
+    for (int d = 0; d < ndim; d++) {
+        double v = buf[k + (d + 1) * stride] / rho;
+        eint -= 0.5 * rho * v * v;
+    }
+
+    // Pressure
+    double smallp = smallc * smallc / gamma_val;
+    double p = (gamma_val - 1.0) * eint;
+    if (p < rho * smallp) p = rho * smallp;
+
+    // Sound speed
+    double cs = sqrt(gamma_val * p / rho);
+
+    // Wave speed = ndim*cs + sum(|v|)
+    double wavespeed = (double)ndim * cs;
+    for (int d = 0; d < ndim; d++) {
+        double v = buf[k + (d + 1) * stride] / rho;
+        wavespeed += fabs(v);
+    }
+
+    // Gravity strength ratio
+    double grav_ratio = 0.0;
+    for (int d = 0; d < ndim; d++) {
+        grav_ratio += fabs(buf[k + (nvar + d) * stride]);
+    }
+    grav_ratio = grav_ratio * dx / (wavespeed * wavespeed);
+    if (grav_ratio < 0.0001) grav_ratio = 0.0001;
+
+    // CFL timestep
+    double dtcell = dx / wavespeed * (sqrt(1.0 + 2.0 * courant_factor * grav_ratio) - 1.0) / grav_ratio;
+    dt_buf[k] = dtcell;
+}
+
+void cmpdt_cuda_async(
+    double* h_buf, double* h_dt_buf,
+    double dx, double smallr, double smallc, double gamma_val, double courant_factor,
+    int ncell, int nvar, int ndim, int stride, int stream_slot)
+{
+    if (!is_pool_initialized()) return;
+    cudaStream_t strm = cuda_get_stream_internal(stream_slot);
+
+    int nprops = nvar + ndim;
+    size_t buf_bytes = (size_t)stride * nprops * sizeof(double);
+    size_t dt_bytes  = (size_t)ncell * sizeof(double);
+
+    ensure_generic_buf(stream_slot, buf_bytes + dt_bytes);
+    if (!g_generic_buf[stream_slot]) return;
+    double* d_buf = g_generic_buf[stream_slot];
+    double* d_dt  = d_buf + (size_t)stride * nprops;
+
+    cudaMemcpyAsync(d_buf, h_buf, buf_bytes, cudaMemcpyHostToDevice, strm);
+    int nth = 256;
+    cmpdt_cuda_kernel<<<(ncell+nth-1)/nth, nth, 0, strm>>>(
+        d_buf, d_dt, dx, smallr, smallc, gamma_val, courant_factor,
+        ncell, nvar, ndim, stride);
+    cudaMemcpyAsync(h_dt_buf, d_dt, dt_bytes, cudaMemcpyDeviceToHost, strm);
+}
+
+void cmpdt_cuda_sync(int stream_slot) {
+    if (!is_pool_initialized()) return;
+    cudaStreamSynchronize(cuda_get_stream_internal(stream_slot));
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess)
+        fprintf(stderr, "CUDA cmpdt error (slot %d): %s\n",
+                stream_slot, cudaGetErrorString(err));
+}
+
 } // extern "C" -- auxiliary kernels

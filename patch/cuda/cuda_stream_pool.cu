@@ -139,6 +139,8 @@ void cuda_pool_init(int local_rank) {
 
 int cuda_acquire_stream(void) {
     if (!pool_initialized) return -1;
+    // Ensure this OMP thread uses the correct GPU device (per-thread context)
+    cudaSetDevice(g_device_id);
     for (int s = 0; s < N_STREAMS; s++) {
         if (!g_pool[s].busy) {
             if (__sync_lock_test_and_set(&g_pool[s].busy, 1) == 0) {

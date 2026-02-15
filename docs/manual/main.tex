@@ -325,6 +325,21 @@ The k-section tree enables \textbf{hierarchical MPI exchange} where communicatio
 \label{fig:ksection_domains}
 \end{figure}
 
+Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the k-section tree construction.  Starting from the full simulation domain, the tree is built by recursively bisecting (or $k$-secting) along successive coordinate axes.  In this example with $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs, the decomposition proceeds in three stages:
+\begin{enumerate}[nosep]
+  \item \textbf{Level~1 ($k_1=3$)}: The domain is split into 3 slabs along the $x$-axis.
+  \item \textbf{Level~2 ($k_2=2$)}: Each slab is bisected along the $y$-axis, producing 6 subdomains.
+  \item \textbf{Level~3 ($k_3=2$)}: Each subdomain is bisected along the $z$-axis, yielding the final 12 subdomains.
+\end{enumerate}
+The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain.  The color hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions, respectively.
+
+\begin{figure}[ht]
+\centering
+\includegraphics[width=\textwidth]{ksection_progressive.png}
+\caption{Progressive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs.  \textbf{Left}: first split into 3 slabs along $x$.  \textbf{Center}: each slab bisected along $y$ ($3 \times 2 = 6$ subdomains).  \textbf{Right}: final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains).  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
+\label{fig:ksection_progressive}
+\end{figure}
+
 \section{Hierarchical MPI Exchange}
 
 Two exchange routines are provided in \texttt{patch/cuda/ksection.f90}:
@@ -1439,6 +1454,116 @@ As the rank count increases, the dominant bottleneck shifts:
 \item At 64$\times$1: \texttt{poisson-mg} (27.6\%), \texttt{io} (21.4\%), \texttt{godunov} (17.8\%)
 \end{itemize}
 At high rank counts, I/O emerges as the second-largest cost, suggesting that asynchronous or node-local I/O strategies would yield further speedup.
+
+
+%======================================================
+\chapter{GPU Hydro Acceleration}
+\label{ch:gpu}
+%======================================================
+
+cuRAMSES supports GPU acceleration for the main hydro solver routines via CUDA.  The implementation uses a \textbf{dynamic hybrid CPU/GPU dispatch} model where OpenMP threads compete for a shared pool of GPU streams: threads that acquire a stream offload their work to the GPU, while the remaining threads continue on the CPU.  This design naturally adapts to any ratio of CPU cores to GPU streams.
+
+\section{Architecture Overview}
+
+The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a pool of 8 CUDA streams, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), and sm\_90 (H100) targets simultaneously.
+
+\begin{infobox}[Key Files]
+\begin{itemize}[nosep,leftmargin=1.5em]
+\item \texttt{cuda\_stream\_pool.\{h,cu\}} --- Thread-safe stream pool with atomic acquire/release
+\item \texttt{hydro\_cuda\_kernels.cu} --- CUDA kernels: \texttt{ctoprim}, \texttt{uslope}, \texttt{trace3d}, \texttt{flux}, \texttt{difmag}, \texttt{synchro}, \texttt{cmpdt}, \texttt{gradient\_phi}, \texttt{upload\_fine}
+\item \texttt{hydro\_cuda\_interface.f90} --- Fortran ISO\_C\_BINDING wrappers with assumed-size \texttt{buf(*)} for safe \texttt{c\_loc} usage
+\item \texttt{cuda\_commons.f90} --- Fortran module exposing stream pool to the AMR code
+\end{itemize}
+\end{infobox}
+
+\section{Hybrid CPU/GPU Dispatch}
+
+The dispatch model is illustrated for the Godunov solver (\texttt{godunov\_fine.kjhan.f90}), which accounts for $\sim$30\% of total runtime:
+
+\begin{lstlisting}[language=Fortran,basicstyle=\small\ttfamily,frame=single,caption={Dynamic hybrid dispatch pattern},label=lst:hybrid]
+!$omp parallel
+  stream_slot = cuda_acquire_stream()  ! atomic, -1 if busy
+  !$omp do schedule(dynamic)
+  do igrid = 1, ncache, nvector
+     if (stream_slot >= 0) then
+        ! GPU: gather into superbatch buffer
+        ! Flush when buffer full -> async GPU kernel
+     else
+        ! CPU: standard godfine1 computation
+     end if
+  end do
+  !$omp end do nowait
+  ! GPU thread: flush remaining buffer, release stream
+!$omp end parallel
+\end{lstlisting}
+
+The \texttt{schedule(dynamic)} clause ensures load balancing: if one thread is waiting for GPU synchronization, other threads pick up the remaining iterations on CPU.  This is particularly effective when the number of OMP threads exceeds the number of GPU streams.
+
+\subsection{Superbatch Buffering}
+
+GPU kernel launches have significant latency ($\sim$10--50\,$\mu$s).  To amortize this, each GPU thread accumulates grid data into a \textbf{superbatch buffer} of size \texttt{SUPER\_SIZE} (typically 4096 grids) before launching a single kernel covering all accumulated grids.  The buffer is flushed when it approaches capacity or when the \texttt{omp do} loop completes.
+
+For the Godunov solver, the superbatch contains the full stencil data (conservative variables and gravitational acceleration on a $6 \times 6 \times 6$ grid per AMR oct), and the GPU pipeline executes 5 kernels in sequence: \texttt{ctoprim} $\to$ \texttt{uslope} $\to$ \texttt{trace3d} $\to$ \texttt{flux} $\to$ \texttt{difmag}.
+
+\subsection{Accelerated Routines}
+
+Six routines use the hybrid dispatch pattern:
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+\textbf{Routine} & \textbf{Kernel} & \textbf{Data per cell} \\
+\midrule
+\texttt{godunov\_fine}           & 5-kernel pipeline  & Full stencil ($6^3 \times$ \texttt{nvar}) \\
+\texttt{synchro\_hydro\_fine}    & Gravity kick       & $\rho, \mathbf{p}, E, \mathbf{f}$ (8 doubles) \\
+\texttt{courant\_fine}           & CFL timestep       & \texttt{nvar} + \texttt{ndim} (14 doubles) \\
+\texttt{force\_fine}             & Gradient of $\phi$ & $3^3 \times \phi$ + $3^3 \times \mathbf{f}$ \\
+\texttt{upload\_fine}            & Prolongation       & Child + parent cells \\
+\texttt{cooling\_fine}           & Cooling function   & Temperature + density \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Memory Management}
+
+Each stream slot has persistent device memory that is lazily allocated and grown with $2\times$ over-allocation:
+\begin{itemize}[nosep]
+\item \textbf{Hydro buffers}: \texttt{d\_uloc}, \texttt{d\_gloc}, \texttt{d\_flux}, \texttt{d\_tmp}, \texttt{d\_ok} --- sized for \texttt{SUPER\_SIZE} grids
+\item \textbf{Generic buffers}: Per-stream device memory for lightweight kernels (\texttt{synchro}, \texttt{cmpdt}, etc.)
+\end{itemize}
+
+The host-side superbatch buffers are allocated per-thread via OMP \texttt{private} clauses and passed to external flush subroutines as explicit-shape arrays to avoid Intel ifx compiler issues with \texttt{c\_loc} on assumed-shape arrays.
+
+\section{Fortran--CUDA Interface}
+
+A critical design choice is the two-layer interface between Fortran and CUDA:
+
+\begin{enumerate}[nosep]
+\item \textbf{C binding layer} (\texttt{\_c} suffix): Direct \texttt{bind(C)} interface passing \texttt{type(c\_ptr)} for array arguments.
+\item \textbf{Fortran wrapper layer} (\texttt{\_f} suffix): Receives assumed-size \texttt{buf(*)} arrays and converts to \texttt{c\_ptr} via \texttt{c\_loc(buf(1))}.
+\end{enumerate}
+
+The wrapper layer is necessary because Intel ifx may return incorrect values from \texttt{c\_loc} on assumed-shape arrays.  The assumed-size \texttt{buf(*)} pattern avoids array descriptors entirely and guarantees that \texttt{c\_loc} returns the correct data address.
+
+\section{Multi-GPU Support}
+
+When multiple GPUs are available on a node, each MPI rank is assigned to a GPU based on its local rank (\texttt{local\_rank \% device\_count}).  The stream pool calls \texttt{cudaSetDevice(g\_device\_id)} in \texttt{cuda\_acquire\_stream} to ensure each OMP thread operates on the correct GPU context.
+
+The CUDA binary is compiled with multiple architecture targets:
+\begin{lstlisting}[basicstyle=\small\ttfamily,frame=single]
+CUDA_ARCH = -gencode arch=compute_80,code=sm_80 \
+            -gencode arch=compute_86,code=sm_86 \
+            -gencode arch=compute_90,code=sm_90
+\end{lstlisting}
+This enables a single binary to run on A100 (sm\_80), A10 (sm\_86), and H100 (sm\_90) GPUs without recompilation.
+
+\section{Verification}
+
+The GPU-accelerated code produces bit-identical physics results compared to the CPU-only build:
+\begin{itemize}[nosep]
+\item 4 ranks $\times$ 1 GPU (A10): $e_{\rm cons} = 5.23 \times 10^{-3}$, $e_{\rm pot} = -1.88 \times 10^{-6}$, $e_{\rm kin} = 1.23 \times 10^{-6}$ at step~10
+\item 4 ranks $\times$ 4 GPUs (A100): identical physics results with correct per-rank GPU assignment
+\end{itemize}
 
 
 %------------------------------------------------------

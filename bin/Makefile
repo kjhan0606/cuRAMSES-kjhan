@@ -61,7 +61,7 @@ endif
 ifdef USE_CUDA
   CUDA_DIR = /opt/ohpc/pub/cuda/13.0.2
   NVCC = $(CUDA_DIR)/bin/nvcc
-  CUDA_ARCH = -arch=sm_86
+  CUDA_ARCH = -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_90,code=sm_90
   NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR)
   FFLAGS += -DHYDRO_CUDA
   LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
