@@ -56,6 +56,24 @@ else
 endif
 
 #############################################################################
+# CUDA GPU hydro support (build with: make USE_CUDA=1)
+#############################################################################
+ifdef USE_CUDA
+  CUDA_DIR = /opt/ohpc/pub/cuda/13.0.2
+  NVCC = $(CUDA_DIR)/bin/nvcc
+  CUDA_ARCH = -arch=sm_89
+  NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR)
+  FFLAGS += -DHYDRO_CUDA
+  LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
+  CUDA_MODOBJ = cuda_commons.o hydro_cuda_interface.o
+  CUDA_OBJS = cuda_stream_pool.o hydro_cuda_kernels.o
+else
+  LIBS_CUDA =
+  CUDA_MODOBJ =
+  CUDA_OBJS =
+endif
+
+#############################################################################
 MOD = mod
 #############################################################################
 # MPI librairies
@@ -66,7 +84,7 @@ LIBMPI =
 LIBCUDA = -L/opt/cuda/lib  -lm -lcuda -lcudart
 
 LIBGRACKLE = -lgrackle -lhdf5 -lz
-LIBS = $(LIBMPI) $(LIBS_HDF5)
+LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA)
 #############################################################################
 # Sources directories are searched in this exact order
 VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
@@ -76,7 +94,7 @@ MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o p
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
 	 morton_keys.o morton_hash.o \
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
-	 $(HDF5_MODOBJ)
+	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 
 AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loop.jaehyun.o amr_step.jaehyun.o update_time.o \
          output_amr.kjhan.o flag_utils.kjhan.o physical_boundaries.kjhan.o virtual_boundaries.kjhan.o refine_utils.o nbors_utils.kjhan.o \
@@ -103,8 +121,8 @@ AMRLIB = $(AMROBJ) $(HYDROOBJ) $(PMOBJ) $(POISSONOBJ)
 ATON_MODOBJ = timing.o radiation_commons.o rad_step.o
 ATON_OBJ = observe.o init_radiation.o rad_init.o rad_boundary.o rad_stars.o rad_backup.o ../aton/atonlib/libaton.a
 #############################################################################
-ramses:	$(MODOBJ) $(AMRLIB) ramses.o
-	$(F90) $(MODOBJ) $(AMRLIB) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
+ramses:	$(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o
+	$(F90) $(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
 	rm write_makefile.f90
 #	rm write_patch.f90
 ramses_aton: $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o
@@ -123,6 +141,13 @@ write_patch.o: FORCE
 	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
+ifdef USE_CUDA
+%.o:%.cu
+	$(NVCC) $(NVCCFLAGS) -c $< -o $@
+hydro_cuda_kernels.o: cuda_stream_pool.o
+hydro_cuda_interface.o: cuda_commons.o
+cuda_commons.o: amr_commons.kjhan.o
+endif
 FORCE:
 #############################################################################
 clean :
