@@ -31,6 +31,9 @@ subroutine load_balance
   integer,dimension(ncpu)::reqsend,reqrecv
   real(dp)::t_lb_start,t_lb_end
   real(dp)::t0,t1,t2,t3,t4,t5,t6
+  real(dp)::te_flag,te_refine,te_bcomm,te_virt,te_phys
+  real(dp)::ts_flag,ts_refine,ts_bcomm
+  real(dp)::tt0,tt1
 #endif
 
   if(ncpu==1)return
@@ -148,22 +151,43 @@ subroutine load_balance
   !------------------------------------------------------
   ! Expand boundaries to account for new mesh partition
   !------------------------------------------------------
+  te_flag=0d0; te_refine=0d0; te_bcomm=0d0; te_virt=0d0; te_phys=0d0
+
+  tt0 = MPI_WTIME()
   call flag_coarse
   call refine_coarse
+  tt1 = MPI_WTIME(); te_refine = te_refine + (tt1-tt0)
+
+  tt0 = tt1
   call build_comm(1)
-  call make_virtual_fine_int(cpu_map (1),1)
-  call make_virtual_fine_int(cpu_map2(1),1)
+  tt1 = MPI_WTIME(); te_bcomm = te_bcomm + (tt1-tt0)
+
+  tt0 = tt1
+  call make_virtual_fine_int_pair(cpu_map(1),cpu_map2(1),1)
+  tt1 = MPI_WTIME(); te_virt = te_virt + (tt1-tt0)
+
   do i=1,nlevelmax-1
+     tt0 = MPI_WTIME()
      call flag_fine(i,2)
+     tt1 = MPI_WTIME(); te_flag = te_flag + (tt1-tt0)
+
+     tt0 = tt1
      call refine_fine(i)
+     tt1 = MPI_WTIME(); te_refine = te_refine + (tt1-tt0)
+
+     tt0 = tt1
      call build_comm(i+1)
-     call make_virtual_fine_int(cpu_map (1),i+1)
-     call make_virtual_fine_int(cpu_map2(1),i+1)
+     tt1 = MPI_WTIME(); te_bcomm = te_bcomm + (tt1-tt0)
+
+     tt0 = tt1
+     call make_virtual_fine_int_pair(cpu_map(1),cpu_map2(1),i+1)
+     tt1 = MPI_WTIME(); te_virt = te_virt + (tt1-tt0)
   end do
 
   !--------------------------------------
   ! Update physical boundary conditions
   !--------------------------------------
+  tt0 = MPI_WTIME()
   do ilevel=nlevelmax,1,-1
      if(hydro)then
 #ifdef SOLVERmhd
@@ -188,6 +212,7 @@ subroutine load_balance
         call make_virtual_fine_dp_bulk(f,ndim,ilevel)
      end if
   end do
+  tt1 = MPI_WTIME(); te_phys = tt1 - tt0
 
   t3 = MPI_WTIME()
 
@@ -333,15 +358,28 @@ subroutine load_balance
   !--------------------------------------------
   ! Shrink boundaries around new mesh partition
   !--------------------------------------------
+  ts_flag=0d0; ts_refine=0d0; ts_bcomm=0d0
   shrink=.true.
   do i=nlevelmax-1,1,-1
+     tt0 = MPI_WTIME()
      call flag_fine(i,2)
+     tt1 = MPI_WTIME(); ts_flag = ts_flag + (tt1-tt0)
+
+     tt0 = tt1
      call refine_fine(i)
+     tt1 = MPI_WTIME(); ts_refine = ts_refine + (tt1-tt0)
+
+     tt0 = tt1
      call build_comm(i+1)
-  end do  
+     tt1 = MPI_WTIME(); ts_bcomm = ts_bcomm + (tt1-tt0)
+  end do
+  tt0 = MPI_WTIME()
   call flag_coarse
   call refine_coarse
+  tt1 = MPI_WTIME(); ts_refine = ts_refine + (tt1-tt0)
+  tt0 = tt1
   call build_comm(1)
+  tt1 = MPI_WTIME(); ts_bcomm = ts_bcomm + (tt1-tt0)
   shrink=.false.
 
   balance=.false.
@@ -353,9 +391,17 @@ subroutine load_balance
      write(*,'(A,F8.3,A)') '   numbp_sync:               ', t1 - t0, ' s'
      write(*,'(A,F8.3,A)') '   cmp_new_cpu_map:          ', t2 - t1, ' s'
      write(*,'(A,F8.3,A)') '   expand_pass:              ', t3 - t2, ' s'
+     write(*,'(A,F8.3,A)') '     flag_fine:              ', te_flag, ' s'
+     write(*,'(A,F8.3,A)') '     refine:                 ', te_refine, ' s'
+     write(*,'(A,F8.3,A)') '     build_comm:             ', te_bcomm, ' s'
+     write(*,'(A,F8.3,A)') '     virtual_int_pair:       ', te_virt, ' s'
+     write(*,'(A,F8.3,A)') '     phys_boundary:          ', te_phys, ' s'
      write(*,'(A,F8.3,A)') '   grid_migration:           ', t4 - t3, ' s'
      write(*,'(A,F8.3,A)') '   allreduce+cpumap_update:  ', t5 - t4, ' s'
      write(*,'(A,F8.3,A)') '   shrink_pass:              ', t6 - t5, ' s'
+     write(*,'(A,F8.3,A)') '     flag_fine:              ', ts_flag, ' s'
+     write(*,'(A,F8.3,A)') '     refine:                 ', ts_refine, ' s'
+     write(*,'(A,F8.3,A)') '     build_comm:             ', ts_bcomm, ' s'
   end if
 
   if(verbose)then

@@ -1485,6 +1485,100 @@ end subroutine make_virtual_fine_int_ksec
 !################################################################
 !################################################################
 !################################################################
+subroutine make_virtual_fine_int_pair(xx1,xx2,ilevel)
+  use amr_commons
+  implicit none
+  integer::ilevel
+  integer,dimension(1:ncoarse+ngridmax*twotondim)::xx1,xx2
+  ! -------------------------------------------------------------------
+  ! Exchange two integer arrays simultaneously in a single communication
+  ! round. Used for cpu_map + cpu_map2 in load_balance expand pass.
+  ! -------------------------------------------------------------------
+
+  if(numbtot(1,ilevel)==0)return
+
+  if(ordering=='ksection') then
+     call make_virtual_fine_int_pair_ksec(xx1,xx2,ilevel)
+     return
+  end if
+
+  ! Fallback: two separate calls
+  call make_virtual_fine_int(xx1,ilevel)
+  call make_virtual_fine_int(xx2,ilevel)
+
+end subroutine make_virtual_fine_int_pair
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine make_virtual_fine_int_pair_ksec(xx1,xx2,ilevel)
+  use amr_commons
+  use ksection
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer::ilevel
+  integer,dimension(1:ncoarse+ngridmax*twotondim)::xx1,xx2
+  ! -------------------------------------------------------------------
+  ! Ksection-based forward exchange for two integer arrays at once.
+  ! Packs 2*twotondim cells + 2 metadata per emission grid.
+  ! -------------------------------------------------------------------
+  integer::icpu,i,j,idx,ntotal,nrecv,nprops_ksec,sender,ridx,igrid
+  real(dp),allocatable::sendbuf(:,:),recvbuf(:,:)
+  integer,allocatable::dest_cpu(:)
+
+#ifndef WITHOUTMPI
+  nprops_ksec = 2 * twotondim + 2
+
+  ! Count total emission items
+  ntotal = 0
+  do icpu = 1, ncpu
+     ntotal = ntotal + emission(icpu,ilevel)%ngrid
+  end do
+
+  ! Pack sendbuf (int->dp) + dest_cpu
+  allocate(sendbuf(1:nprops_ksec, 1:max(ntotal,1)))
+  allocate(dest_cpu(1:max(ntotal,1)))
+  idx = 0
+  do icpu = 1, ncpu
+     do i = 1, emission(icpu,ilevel)%ngrid
+        idx = idx + 1
+        dest_cpu(idx) = icpu
+        do j = 1, twotondim
+           sendbuf(j, idx) = dble(xx1(emission(icpu,ilevel)%igrid(i) &
+                & + ncoarse + (j-1)*ngridmax))
+           sendbuf(twotondim + j, idx) = dble(xx2(emission(icpu,ilevel)%igrid(i) &
+                & + ncoarse + (j-1)*ngridmax))
+        end do
+        sendbuf(2*twotondim + 1, idx) = dble(myid)
+        sendbuf(2*twotondim + 2, idx) = dble(i)
+     end do
+  end do
+
+  ! Exchange via ksection tree
+  call ksection_exchange_dp(sendbuf, ntotal, dest_cpu, nprops_ksec, &
+       & recvbuf, nrecv)
+
+  ! Scatter received data (dp->int) to reception grids
+  do i = 1, nrecv
+     sender = nint(recvbuf(2*twotondim + 1, i))
+     ridx   = nint(recvbuf(2*twotondim + 2, i))
+     igrid  = reception(sender, ilevel)%igrid(ridx)
+     do j = 1, twotondim
+        xx1(igrid + ncoarse + (j-1)*ngridmax) = nint(recvbuf(j, i))
+        xx2(igrid + ncoarse + (j-1)*ngridmax) = nint(recvbuf(twotondim + j, i))
+     end do
+  end do
+
+  deallocate(sendbuf, dest_cpu, recvbuf)
+#endif
+
+end subroutine make_virtual_fine_int_pair_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
 subroutine make_virtual_reverse_int_ksec(xx,ilevel)
   use amr_commons
   use ksection

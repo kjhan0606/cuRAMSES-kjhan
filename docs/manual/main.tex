@@ -1465,7 +1465,7 @@ cuRAMSES supports GPU acceleration for the main hydro solver routines via CUDA. 
 
 \section{Architecture Overview}
 
-The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a pool of 8 CUDA streams, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), and sm\_90 (H100) targets simultaneously.
+The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a pool of 8 CUDA streams, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), sm\_89 (RTX 5000 Ada), and sm\_90 (H100) targets simultaneously.
 
 \begin{infobox}[Key Files]
 \begin{itemize}[nosep,leftmargin=1.5em]
@@ -1532,7 +1532,20 @@ Each stream slot has persistent device memory that is lazily allocated and grown
 \item \textbf{Generic buffers}: Per-stream device memory for lightweight kernels (\texttt{synchro}, \texttt{cmpdt}, etc.)
 \end{itemize}
 
-The host-side superbatch buffers are allocated per-thread via OMP \texttt{private} clauses and passed to external flush subroutines as explicit-shape arrays to avoid Intel ifx compiler issues with \texttt{c\_loc} on assumed-shape arrays.
+The host-side superbatch buffers (\texttt{gpu\_state\_t}) are allocated lazily per stream slot via the \texttt{hydro\_hybrid\_commons} module, with pinned host memory (\texttt{cudaHostRegister}) for faster DMA transfers.
+
+\subsection{Per-Thread Scatter Buffer (Lock-Free Level L-1)}
+
+The Godunov solver updates conservative variables at both the current level~$L$ and the coarser level~$L{-}1$.  A key insight is that \textbf{Level~$L$ writes are conflict-free}: each grid's cell indices $\texttt{ncoarse} + (\texttt{ind\_son}-1) \times \texttt{ngridmax} + \texttt{ind\_grid}$ are unique per grid, so different OMP threads never touch the same cells.  However, \textbf{Level~$L{-}1$ writes can conflict}: multiple fine grids may share the same coarse parent cell.
+
+The original code serialized \emph{both} levels with \texttt{!\$omp critical (godunov)}, destroying all OMP parallelism in the scatter phase.  The hybrid dispatch eliminates this lock entirely:
+
+\begin{itemize}[nosep]
+\item \textbf{Level $L$}: Written directly to \texttt{unew} without any synchronization (conflict-free by construction).
+\item \textbf{Level $L{-}1$}: Each thread appends pre-summed flux contributions to a private \texttt{scatter\_buf\_t} buffer.  After the \texttt{!\$omp end parallel} barrier, a serial merge applies all buffered entries to \texttt{unew}.
+\end{itemize}
+
+The \texttt{scatter\_buf\_t} type (SoA layout) stores per-entry: the coarse cell index, per-variable flux deltas (\texttt{dunew}), and optionally divergence/energy corrections (\texttt{ddivu}, \texttt{denew}) for \texttt{pressure\_fix}.  Buffers start at 65\,536 entries and double capacity on demand via \texttt{move\_alloc}.  This approach is exact---no approximation or race condition---and the merge cost is negligible ($< 0.01$\,s in all tests).
 
 \section{Fortran--CUDA Interface}
 
@@ -1553,17 +1566,79 @@ The CUDA binary is compiled with multiple architecture targets:
 \begin{lstlisting}[basicstyle=\small\ttfamily,frame=single]
 CUDA_ARCH = -gencode arch=compute_80,code=sm_80 \
             -gencode arch=compute_86,code=sm_86 \
+            -gencode arch=compute_89,code=sm_89 \
             -gencode arch=compute_90,code=sm_90
 \end{lstlisting}
-This enables a single binary to run on A100 (sm\_80), A10 (sm\_86), and H100 (sm\_90) GPUs without recompilation.
+This enables a single binary to run on A100 (sm\_80), A10 (sm\_86), RTX~5000 Ada (sm\_89), and H100 (sm\_90) GPUs without recompilation.
 
-\section{Verification}
+\section{Scatter-Reduce GPU Kernel}
 
-The GPU-accelerated code produces bit-identical physics results compared to the CPU-only build:
+The Godunov GPU pipeline includes an on-device \textbf{scatter-reduce} kernel that computes the conservative update entirely on the GPU.  Instead of transferring the full flux array back to the host ($\sim$98\,MB per flush), the GPU kernel reduces fluxes into compact per-grid output arrays:
+
 \begin{itemize}[nosep]
-\item 4 ranks $\times$ 1 GPU (A10): $e_{\rm cons} = 5.23 \times 10^{-3}$, $e_{\rm pot} = -1.88 \times 10^{-6}$, $e_{\rm kin} = 1.23 \times 10^{-6}$ at step~10
-\item 4 ranks $\times$ 4 GPUs (A100): identical physics results with correct per-rank GPU assignment
+\item \texttt{add\_unew(SUPER\_SIZE, 8, nvar)}: Level~$L$ conservative update per child cell
+\item \texttt{add\_lm1(SUPER\_SIZE, 6, nvar)}: Level~$L{-}1$ boundary flux per face direction
+\item \texttt{add\_divu\_l/enew\_l}, \texttt{add\_divu\_lm1/enew\_lm1}: Pressure-fix divergence and internal energy corrections
 \end{itemize}
+
+The D2H transfer is reduced to $\sim$5\,MB per flush (vs.\ 98\,MB for the raw flux array), a $20\times$ reduction in PCIe bandwidth usage.  The host applies Level~$L$ results directly to \texttt{unew} (conflict-free) and appends Level~$L{-}1$ results to the per-thread scatter buffer for deferred merge.
+
+\section{Verification and Performance}
+
+The GPU-accelerated code produces bit-identical physics results compared to the CPU-only build across all tested configurations.  All tests use 10 coarse steps of a $256^3$ cosmological simulation with \texttt{levelmax=10}.
+
+\subsection{Physics Verification}
+
+\begin{center}
+\begin{tabular}{llccc}
+\toprule
+\textbf{Configuration} & \textbf{GPU} & $e_{\rm cons}$ & $e_{\rm pot}$ & $e_{\rm kin}$ \\
+\midrule
+CPU-only (4r$\times$2t)            & ---               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Hybrid 8-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Hybrid 1-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Hybrid 8-stream (4r$\times$2t)     & A10               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Performance (RTX 5000 Ada, 8 cores)}
+
+\begin{center}
+\begin{tabular}{lrrrr}
+\toprule
+\textbf{Configuration} & \textbf{Godunov (s)} & \textbf{Total (s)} & \textbf{GPU flushes} & \textbf{CPU batches} \\
+\midrule
+CPU-only (4r$\times$2t)            & 22.0 & 90.1  & ---  & ---    \\
+Hybrid 8-stream (4r$\times$2t)     & 18.4 & 89.4  & 648  & 0      \\
+Hybrid 1-stream (4r$\times$2t)     & 19.0 & 88.0  & 358  & 36\,848 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+With 8 streams and 2 OMP threads per rank, all threads acquire GPU streams (0 CPU batches), achieving a \textbf{16\% speedup} on the Godunov solver (22.0\,s $\to$ 18.4\,s).  With 1 stream per rank, the hybrid mode activates: 1 GPU thread and 1 CPU thread process work concurrently (358 GPU flushes + 36\,848 CPU batches), still producing identical physics.
+
+\subsection{GPU Kernel Breakdown (8-stream, RTX 5000 Ada)}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Phase} & \textbf{Time (s)} & \textbf{\%} \\
+\midrule
+H2D transfer        & 5.07  & 50.2 \\
+ctoprim             & 1.10  & 10.9 \\
+uslope              & 1.19  & 11.8 \\
+trace3d             & 1.23  & 12.1 \\
+flux+memset         & 0.70  &  6.9 \\
+difmag              & 0.43  &  4.2 \\
+D2H transfer        & 0.38  &  3.8 \\
+\midrule
+Total               & 10.09 & 100.0 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+H2D transfer dominates at 50\% of GPU time, indicating that further optimization via GPU-side gather (uploading mesh arrays once and using stencil indices instead of full $6^3$ stencils) would yield significant additional speedup.
 
 
 %------------------------------------------------------
