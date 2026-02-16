@@ -916,7 +916,8 @@ subroutine kinetic_feedback
   use amr_commons
   use pm_commons
   use hydro_commons
-  use cooling_module, ONLY: XH=>X, rhoc, mH 
+  use cooling_module, ONLY: XH=>X, rhoc, mH
+  use ksection, only: ksection_exchange_dp, ksection_exchange_dp_overlap
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -961,8 +962,21 @@ subroutine kinetic_feedback
   common /kinetic_fb/ mythread,jSN
 !$omp threadprivate(/kinetic_fb/)
   integer, dimension(:), allocatable:: nparticles, ptrhead,mynewSN
-  integer:: start_mynewSN 
+  integer:: start_mynewSN
   integer:: iskip,ind
+  ! K-section exchange variables
+  integer::nprops_ex1,nprops_ex2,nprops_ex3,nrecv_ex1,nrecv_ex2,nrecv_ex3
+  integer::ncontrib,idx,idim,j
+  real(dp)::rmax_code,drSN_code,ESN_code,u2_ksec,v2_ksec,w2_ksec
+  real(dp),allocatable::sendbuf_ex1(:,:),xmin_ex1(:,:),xmax_ex1(:,:),recvbuf_ex1(:,:)
+  real(dp),allocatable::sendbuf_ex2(:,:),recvbuf_ex2(:,:)
+  real(dp),allocatable::sendbuf_ex3(:,:),xmin_ex3(:,:),xmax_ex3(:,:),recvbuf_ex3(:,:)
+  integer,allocatable::dest_cpu_ex2(:),owner_cpu_arr(:),owner_idx_arr(:)
+  real(dp),allocatable::vol_gas_agg(:),dq_agg(:,:),u2Blast_agg(:,:)
+  real(dp),allocatable::u2Blast_loc(:,:),ekBlast_vol(:)
+  real(dp),allocatable::mloadSN_agg(:),ZloadSN_agg(:),vloadSN_agg(:,:),celoadSN_agg(:,:)
+  real(dp),allocatable::ekBlast_vol_agg(:),uSedov_agg(:),p_gas_agg(:)
+  integer,allocatable::blast_center_cpu(:)
 
   if(.not. hydro)return
   if(ndim.ne.3)return
@@ -1045,6 +1059,326 @@ subroutine kinetic_feedback
   if(myid .eq. 1) write(*,*)'Time elapsed in counting SNII: ',tt1-tt0
 #endif
 
+  if(TRIM(ordering)=='ksection') then
+  !============================================================
+  ! K-SECTION PATH: overlap exchange instead of MPI_ALLREDUCE
+  !============================================================
+
+  ! Allocate LOCAL arrays (nSN_loc, not nSN_tot)
+  allocate(xSN_tot(1:max(1,nSN_loc),1:3),vSN_tot(1:max(1,nSN_loc),1:3))
+  allocate(mSN_tot(1:max(1,nSN_loc)),ZSN_tot(1:max(1,nSN_loc)))
+  allocate(ceSN_tot(1:max(1,nSN_loc),1:nelt),NbSN_tot(1:max(1,nSN_loc)))
+  xSN_tot=0.;vSN_tot=0.;mSN_tot=0.;ZSN_tot=0.;ceSN_tot=0.;NbSN_tot=0.
+
+  ! Store position and mass into LOCAL SN array (offset from 0)
+  iSN=0
+!$omp parallel
+  if(mythread==0) then
+     jSN = 0
+  else
+     jSN = sum(mynewSN(0:mythread-1))
+  endif
+!$omp end parallel
+
+  do icpu=1,ncpu
+     if(numbl(icpu,levelmin) .le.0) cycle
+     call pthreadLinkedList(headl(icpu,levelmin),numbl(icpu,levelmin),nthreads,nparticles,ptrhead,next)
+!$omp parallel private(subnump,igrid)
+     subnump = nparticles(mythread)
+     igrid = ptrhead(mythread)
+     call sub2_kinetic_feedback(icpu,igrid,subnump,n11,n22,jSN,nSN_loc,xSN_tot,vSN_tot,mSN_tot,ZSN_tot,NbSN_tot,ceSN_tot)
+!$omp end parallel
+  end do
+
+#ifndef WITHOUTMPI
+  tt2=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in building SNII arrays: ',tt2-tt1
+#endif
+  deallocate(nparticles,ptrhead,mynewSN)
+
+  ! Conversion factor from user units to cgs units
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+  ! Compute rmax for bounding box (same as in average_SN / getSNonmyid)
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_min=scale*0.5D0**nlevelmax
+  rmax_code=MAX(rcell*dx_min*scale_l/aexp,rbubble*3.08d18)
+  rmax_code=rmax_code/scale_l
+  drSN_code=2d0*rmax_code
+
+  ! ===== Exchange 1: Overlap broadcast of SN properties =====
+  nprops_ex1 = 11 + nelt
+  allocate(sendbuf_ex1(1:nprops_ex1, 1:max(1,nSN_loc)))
+  allocate(xmin_ex1(1:ndim, 1:max(1,nSN_loc)))
+  allocate(xmax_ex1(1:ndim, 1:max(1,nSN_loc)))
+
+  do iSN=1,nSN_loc
+     sendbuf_ex1(1,iSN) = xSN_tot(iSN,1)
+     sendbuf_ex1(2,iSN) = xSN_tot(iSN,2)
+     sendbuf_ex1(3,iSN) = xSN_tot(iSN,3)
+     sendbuf_ex1(4,iSN) = vSN_tot(iSN,1)
+     sendbuf_ex1(5,iSN) = vSN_tot(iSN,2)
+     sendbuf_ex1(6,iSN) = vSN_tot(iSN,3)
+     sendbuf_ex1(7,iSN) = mSN_tot(iSN)
+     sendbuf_ex1(8,iSN) = ZSN_tot(iSN)
+     sendbuf_ex1(9,iSN) = NbSN_tot(iSN)
+     sendbuf_ex1(10,iSN) = dble(myid)      ! owner_cpu
+     sendbuf_ex1(11,iSN) = dble(iSN)       ! owner_local_idx
+     do ielt=1,nelt
+        sendbuf_ex1(11+ielt,iSN) = ceSN_tot(iSN,ielt)
+     enddo
+     ! Bounding box: [xSN - drSN, xSN + drSN]
+     xmin_ex1(1,iSN) = xSN_tot(iSN,1) - drSN_code
+     xmin_ex1(2,iSN) = xSN_tot(iSN,2) - drSN_code
+     xmin_ex1(3,iSN) = xSN_tot(iSN,3) - drSN_code
+     xmax_ex1(1,iSN) = xSN_tot(iSN,1) + drSN_code
+     xmax_ex1(2,iSN) = xSN_tot(iSN,2) + drSN_code
+     xmax_ex1(3,iSN) = xSN_tot(iSN,3) + drSN_code
+  enddo
+
+  call ksection_exchange_dp_overlap(sendbuf_ex1, nSN_loc, xmin_ex1, xmax_ex1, &
+       nprops_ex1, recvbuf_ex1, nrecv_ex1, periodic=.true.)
+
+  deallocate(sendbuf_ex1, xmin_ex1, xmax_ex1)
+
+#ifndef WITHOUTMPI
+  tt3=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 1 (overlap): ',tt3-tt2
+#endif
+
+  ! Unpack received SN
+  nSN = nrecv_ex1
+  allocate(xSN(1:max(1,nSN),1:3), vSN(1:max(1,nSN),1:3))
+  allocate(mSN(1:max(1,nSN)), ZSN(1:max(1,nSN)), NbSN(1:max(1,nSN)))
+  allocate(ceSN(1:max(1,nSN),1:nelt))
+  allocate(owner_cpu_arr(1:max(1,nSN)), owner_idx_arr(1:max(1,nSN)))
+
+  do iSN=1,nSN
+     xSN(iSN,1) = recvbuf_ex1(1,iSN)
+     xSN(iSN,2) = recvbuf_ex1(2,iSN)
+     xSN(iSN,3) = recvbuf_ex1(3,iSN)
+     vSN(iSN,1) = recvbuf_ex1(4,iSN)
+     vSN(iSN,2) = recvbuf_ex1(5,iSN)
+     vSN(iSN,3) = recvbuf_ex1(6,iSN)
+     mSN(iSN)   = recvbuf_ex1(7,iSN)
+     ZSN(iSN)   = recvbuf_ex1(8,iSN)
+     NbSN(iSN)  = recvbuf_ex1(9,iSN)
+     owner_cpu_arr(iSN) = nint(recvbuf_ex1(10,iSN))
+     owner_idx_arr(iSN) = nint(recvbuf_ex1(11,iSN))
+     do ielt=1,nelt
+        ceSN(iSN,ielt) = recvbuf_ex1(11+ielt,iSN)
+     enddo
+  enddo
+  deallocate(recvbuf_ex1)
+
+  ! ===== average_SN_ksec: Local cell contributions =====
+  allocate(vol_gas(1:max(1,nSN)), dq(1:max(1,nSN),1:3), u2Blast_loc(1:max(1,nSN),1:3))
+  allocate(indSN(1:max(1,nSN)), ekBlast_vol(1:max(1,nSN)))
+  allocate(mloadSN(1:max(1,nSN)), ZloadSN(1:max(1,nSN)))
+  allocate(celoadSN(1:max(1,nSN),1:nelt), vloadSN(1:max(1,nSN),1:3))
+
+  call average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast_loc,indSN,nSN, &
+       mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN,ekBlast_vol)
+
+#ifndef WITHOUTMPI
+  tt4=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in average_SN_ksec: ',tt4-tt3
+#endif
+
+  ! ===== Exchange 2: Exclusive → owner (cell contributions) =====
+  ncontrib = 0
+  do iSN=1,nSN
+     if(vol_gas(iSN) > 0d0 .or. indSN(iSN) > 0) ncontrib = ncontrib + 1
+  enddo
+
+  nprops_ex2 = 16 + nelt
+  allocate(sendbuf_ex2(1:nprops_ex2, 1:max(1,ncontrib)))
+  allocate(dest_cpu_ex2(1:max(1,ncontrib)))
+
+  j = 0
+  do iSN=1,nSN
+     if(vol_gas(iSN) > 0d0 .or. indSN(iSN) > 0) then
+        j = j + 1
+        sendbuf_ex2(1,j) = vol_gas(iSN)
+        sendbuf_ex2(2,j) = dq(iSN,1)
+        sendbuf_ex2(3,j) = dq(iSN,2)
+        sendbuf_ex2(4,j) = dq(iSN,3)
+        sendbuf_ex2(5,j) = u2Blast_loc(iSN,1)
+        sendbuf_ex2(6,j) = u2Blast_loc(iSN,2)
+        sendbuf_ex2(7,j) = u2Blast_loc(iSN,3)
+        sendbuf_ex2(8,j) = mloadSN(iSN)
+        sendbuf_ex2(9,j) = ZloadSN(iSN)
+        sendbuf_ex2(10,j) = vloadSN(iSN,1)
+        sendbuf_ex2(11,j) = vloadSN(iSN,2)
+        sendbuf_ex2(12,j) = vloadSN(iSN,3)
+        if(indSN(iSN) > 0) then
+           sendbuf_ex2(13,j) = 1d0  ! has_blast_center
+        else
+           sendbuf_ex2(13,j) = 0d0
+        endif
+        sendbuf_ex2(14,j) = ekBlast_vol(iSN)
+        sendbuf_ex2(15,j) = dble(myid)               ! blast_src_cpu
+        sendbuf_ex2(16,j) = dble(owner_idx_arr(iSN))  ! owner_local_idx
+        do ielt=1,nelt
+           sendbuf_ex2(16+ielt,j) = celoadSN(iSN,ielt)
+        enddo
+        dest_cpu_ex2(j) = owner_cpu_arr(iSN)
+     endif
+  enddo
+
+  call ksection_exchange_dp(sendbuf_ex2, ncontrib, dest_cpu_ex2, nprops_ex2, &
+       recvbuf_ex2, nrecv_ex2)
+
+  deallocate(sendbuf_ex2, dest_cpu_ex2)
+  deallocate(vol_gas, dq, u2Blast_loc, mloadSN, ZloadSN, celoadSN, vloadSN, ekBlast_vol)
+
+#ifndef WITHOUTMPI
+  tt5=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 2 (exclusive): ',tt5-tt4
+#endif
+
+  ! ===== Owner aggregation =====
+  allocate(vol_gas_agg(1:max(1,nSN_loc)), dq_agg(1:max(1,nSN_loc),1:3))
+  allocate(u2Blast_agg(1:max(1,nSN_loc),1:3))
+  allocate(mloadSN_agg(1:max(1,nSN_loc)), ZloadSN_agg(1:max(1,nSN_loc)))
+  allocate(vloadSN_agg(1:max(1,nSN_loc),1:3))
+  allocate(celoadSN_agg(1:max(1,nSN_loc),1:nelt))
+  allocate(ekBlast_vol_agg(1:max(1,nSN_loc)))
+  allocate(blast_center_cpu(1:max(1,nSN_loc)))
+  allocate(uSedov_agg(1:max(1,nSN_loc)), p_gas_agg(1:max(1,nSN_loc)))
+
+  vol_gas_agg=0d0; dq_agg=0d0; u2Blast_agg=0d0
+  mloadSN_agg=0d0; ZloadSN_agg=0d0; vloadSN_agg=0d0; celoadSN_agg=0d0
+  ekBlast_vol_agg=0d0; blast_center_cpu=0
+  uSedov_agg=0d0; p_gas_agg=0d0
+
+  do j=1,nrecv_ex2
+     idx = nint(recvbuf_ex2(16,j))  ! owner_local_idx
+     vol_gas_agg(idx) = vol_gas_agg(idx) + recvbuf_ex2(1,j)
+     dq_agg(idx,1) = dq_agg(idx,1) + recvbuf_ex2(2,j)
+     dq_agg(idx,2) = dq_agg(idx,2) + recvbuf_ex2(3,j)
+     dq_agg(idx,3) = dq_agg(idx,3) + recvbuf_ex2(4,j)
+     u2Blast_agg(idx,1) = u2Blast_agg(idx,1) + recvbuf_ex2(5,j)
+     u2Blast_agg(idx,2) = u2Blast_agg(idx,2) + recvbuf_ex2(6,j)
+     u2Blast_agg(idx,3) = u2Blast_agg(idx,3) + recvbuf_ex2(7,j)
+     if(nint(recvbuf_ex2(13,j)) == 1) then  ! has_blast_center
+        mloadSN_agg(idx) = recvbuf_ex2(8,j)
+        ZloadSN_agg(idx) = recvbuf_ex2(9,j)
+        vloadSN_agg(idx,1) = recvbuf_ex2(10,j)
+        vloadSN_agg(idx,2) = recvbuf_ex2(11,j)
+        vloadSN_agg(idx,3) = recvbuf_ex2(12,j)
+        do ielt=1,nelt
+           celoadSN_agg(idx,ielt) = recvbuf_ex2(16+ielt,j)
+        enddo
+        blast_center_cpu(idx) = nint(recvbuf_ex2(15,j))
+        ekBlast_vol_agg(idx) = recvbuf_ex2(14,j)
+     endif
+  enddo
+  deallocate(recvbuf_ex2)
+
+  ! Compute Sedov parameters at owner
+  ESN_code = (eps_sn2/(10d0*2d33))/scale_v**2
+
+  do iSN=1,nSN_loc
+     if(vol_gas_agg(iSN) > 0d0) then
+        dq_agg(iSN,1) = dq_agg(iSN,1) / vol_gas_agg(iSN)
+        dq_agg(iSN,2) = dq_agg(iSN,2) / vol_gas_agg(iSN)
+        dq_agg(iSN,3) = dq_agg(iSN,3) / vol_gas_agg(iSN)
+        u2Blast_agg(iSN,1) = u2Blast_agg(iSN,1) / vol_gas_agg(iSN)
+        u2Blast_agg(iSN,2) = u2Blast_agg(iSN,2) / vol_gas_agg(iSN)
+        u2Blast_agg(iSN,3) = u2Blast_agg(iSN,3) / vol_gas_agg(iSN)
+        u2_ksec = u2Blast_agg(iSN,1) - dq_agg(iSN,1)**2
+        v2_ksec = u2Blast_agg(iSN,2) - dq_agg(iSN,2)**2
+        w2_ksec = u2Blast_agg(iSN,3) - dq_agg(iSN,3)**2
+        ekBlast_vol_agg(iSN) = max(0.5d0*(u2_ksec+v2_ksec+w2_ksec), 0d0)
+        if(ekBlast_vol_agg(iSN) == 0d0) then
+           p_gas_agg(iSN) = NbSN_tot(iSN) * ESN_code / vol_gas_agg(iSN)
+           uSedov_agg(iSN) = 0d0
+        else
+           p_gas_agg(iSN) = (1d0-f_ek) * NbSN_tot(iSN) * ESN_code / vol_gas_agg(iSN)
+           uSedov_agg(iSN) = sqrt(f_ek * NbSN_tot(iSN) * ESN_code / &
+                mloadSN_agg(iSN) / ekBlast_vol_agg(iSN))
+        endif
+     else
+        ! Fallback: vol_gas=0, use nearest cell volume
+        if(ekBlast_vol_agg(iSN) > 0d0) then
+           p_gas_agg(iSN) = NbSN_tot(iSN) * ESN_code / ekBlast_vol_agg(iSN)
+        endif
+        uSedov_agg(iSN) = 0d0
+     endif
+  enddo
+
+  ! ===== Exchange 3: Overlap broadcast Sedov parameters =====
+  nprops_ex3 = 18 + nelt
+  allocate(sendbuf_ex3(1:nprops_ex3, 1:max(1,nSN_loc)))
+  allocate(xmin_ex3(1:ndim, 1:max(1,nSN_loc)))
+  allocate(xmax_ex3(1:ndim, 1:max(1,nSN_loc)))
+
+  do iSN=1,nSN_loc
+     sendbuf_ex3(1,iSN) = xSN_tot(iSN,1)
+     sendbuf_ex3(2,iSN) = xSN_tot(iSN,2)
+     sendbuf_ex3(3,iSN) = xSN_tot(iSN,3)
+     sendbuf_ex3(4,iSN) = dq_agg(iSN,1)
+     sendbuf_ex3(5,iSN) = dq_agg(iSN,2)
+     sendbuf_ex3(6,iSN) = dq_agg(iSN,3)
+     sendbuf_ex3(7,iSN) = vloadSN_agg(iSN,1)
+     sendbuf_ex3(8,iSN) = vloadSN_agg(iSN,2)
+     sendbuf_ex3(9,iSN) = vloadSN_agg(iSN,3)
+     sendbuf_ex3(10,iSN) = mloadSN_agg(iSN)
+     sendbuf_ex3(11,iSN) = ZloadSN_agg(iSN)
+     sendbuf_ex3(12,iSN) = uSedov_agg(iSN)
+     sendbuf_ex3(13,iSN) = p_gas_agg(iSN)
+     sendbuf_ex3(14,iSN) = vol_gas_agg(iSN)
+     sendbuf_ex3(15,iSN) = ekBlast_vol_agg(iSN)
+     sendbuf_ex3(16,iSN) = dble(blast_center_cpu(iSN))
+     sendbuf_ex3(17,iSN) = dble(myid)      ! owner_cpu
+     sendbuf_ex3(18,iSN) = dble(iSN)       ! owner_idx
+     do ielt=1,nelt
+        sendbuf_ex3(18+ielt,iSN) = celoadSN_agg(iSN,ielt)
+     enddo
+     xmin_ex3(1,iSN) = xSN_tot(iSN,1) - drSN_code
+     xmin_ex3(2,iSN) = xSN_tot(iSN,2) - drSN_code
+     xmin_ex3(3,iSN) = xSN_tot(iSN,3) - drSN_code
+     xmax_ex3(1,iSN) = xSN_tot(iSN,1) + drSN_code
+     xmax_ex3(2,iSN) = xSN_tot(iSN,2) + drSN_code
+     xmax_ex3(3,iSN) = xSN_tot(iSN,3) + drSN_code
+  enddo
+
+  call ksection_exchange_dp_overlap(sendbuf_ex3, nSN_loc, xmin_ex3, xmax_ex3, &
+       nprops_ex3, recvbuf_ex3, nrecv_ex3, periodic=.true.)
+
+  deallocate(sendbuf_ex3, xmin_ex3, xmax_ex3)
+  deallocate(xSN_tot, vSN_tot, mSN_tot, ZSN_tot, NbSN_tot, ceSN_tot)
+  deallocate(vol_gas_agg, dq_agg, u2Blast_agg, mloadSN_agg, ZloadSN_agg)
+  deallocate(vloadSN_agg, celoadSN_agg, ekBlast_vol_agg, uSedov_agg, p_gas_agg)
+  deallocate(blast_center_cpu)
+
+#ifndef WITHOUTMPI
+  tt6=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 3 (overlap): ',tt6-tt5
+#endif
+
+  ! ===== Sedov_blast_ksec =====
+  call Sedov_blast_ksec(recvbuf_ex3, nrecv_ex3, nprops_ex3, &
+       indSN, nSN, owner_cpu_arr, owner_idx_arr)
+
+  deallocate(recvbuf_ex3)
+  deallocate(indSN, xSN, vSN, mSN, ZSN, NbSN, ceSN)
+  deallocate(owner_cpu_arr, owner_idx_arr)
+  deallocate(astarproper)
+
+#ifndef WITHOUTMPI
+  tt7=MPI_WTIME()
+  if(myid .eq. 1) write(*,*)'Time elapsed in Sedov_blast_ksec: ',tt7-tt6
+  if(myid .eq. 1) write(*,*)'Total time in SNII kinetic feedback (ksec): ',tt7-tt0
+#endif
+
+  else
+  !============================================================
+  ! ORIGINAL PATH: MPI_ALLREDUCE
+  !============================================================
+
   ! Allocate arrays for the position and the mass of the SN
   allocate(xSN_tot(1:nSN_tot,1:3),vSN_tot(1:nSN_tot,1:3))
   allocate(mSN_tot(1:nSN_tot),ZSN_tot(1:nSN_tot),ceSN_tot(1:nSN_tot,1:nelt),NbSN_tot(1:nSN_tot),itemp(1:nSN_tot))
@@ -1071,13 +1405,13 @@ subroutine kinetic_feedback
   do icpu=1,ncpu
      if(numbl(icpu,levelmin) .le.0) goto 14
      call pthreadLinkedList(headl(icpu,levelmin),numbl(icpu,levelmin),nthreads,nparticles,ptrhead,next)
-!$omp parallel private(subnump,igrid) 
+!$omp parallel private(subnump,igrid)
      subnump = nparticles(mythread)
      igrid = ptrhead(mythread)
      call sub2_kinetic_feedback(icpu,igrid,subnump,n11,n22,jSN,nSN_tot,xSN_tot,vSN_tot,mSN_tot,ZSN_tot,NbSN_tot,ceSN_tot)
 !$omp end parallel
 14   continue
-  end do 
+  end do
   ! End loop over levels
 
 #ifndef WITHOUTMPI
@@ -1117,7 +1451,7 @@ subroutine kinetic_feedback
 #endif
 
 
-  ! Allocate the arrays for the position and the mass of the SN                                                                                              
+  ! Allocate the arrays for the position and the mass of the SN
   allocate(xSN(1:nSN,1:3),vSN(1:nSN,1:3),mSN(1:nSN),ZSN(1:nSN),NbSN(1:nSN),ceSN(1:nSN,1:nelt),iSN_myid(1:nSN))
   xSN=0d0; vSN=0d0; mSN=0d0; ZSN=0d0; NbSN=0d0; ceSN=0d0; iSN_myid=0
 
@@ -1150,10 +1484,6 @@ subroutine kinetic_feedback
 #endif
   call average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,indSN,nSN,nSN_tot,iSN_myid,mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN)
 
-
-
-
-
 #ifndef WITHOUTMPI
   tt5=MPI_WTIME()
   if(myid .eq. 1) write(*,*)'Time elapsed in averageSN: ',tt5-tt4
@@ -1167,6 +1497,8 @@ subroutine kinetic_feedback
 #endif
   deallocate(xSN,vSN,mSN,ZSN,indSN,vol_gas,dq,ekBlast,ceSN,NbSN,iSN_myid)
   deallocate(mloadSN,ZloadSN,celoadSN,vloadSN)
+
+  endif ! ordering=='ksection'
 
   ! Update hydro quantities for split cells
   do ilevel=nlevelmax,levelmin,-1
@@ -1864,7 +2196,463 @@ subroutine getSNonmyid(iSN_myid,nSN_myid,xSN,nSN)
   deallocate(iflag)
 
 end subroutine getSNonmyid
-!################################################################                       
-!################################################################                       
-!################################################################                       
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
+     mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN,ekBlast_vol)
+  use pm_commons
+  use amr_commons
+  use hydro_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  !------------------------------------------------------------------------
+  ! K-section version of average_SN: local cell contributions only.
+  ! No MPI_ALLREDUCE. Results are sent back to owner via Exchange 2.
+  !------------------------------------------------------------------------
+  integer::ilevel,ncache,nSN,iSN,ind,ix,iy,iz,ngrid,iskip,ielt
+  integer::i,nx_loc,igrid
+  integer::nbin,ibx,iby,ibz,jbx,jby,jbz
+  real(dp)::bin_size,inv_bin_size
+  integer,allocatable::bin_head(:,:,:),sn_next(:)
+  integer,dimension(1:nvector)::ind_grid,ind_cell
+  real(dp)::x,y,z,dr_SN,d,u,v,w,ek,dr_cell
+  real(dp)::scale,dx,dxx,dyy,dzz,dx_min,dx_loc,vol_loc,rmax2,rmax
+  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
+  real(dp)::eint,ekk,mload,Zload,ceload
+  real(dp),dimension(1:3)::skip_loc
+  real(dp),dimension(1:twotondim,1:3)::xc
+  integer ,dimension(1:nSN)::ind_blast
+  real(dp),dimension(1:nSN)::mSN,vol_gas,ZSN,mloadSN,ZloadSN,ekBlast_vol
+  real(dp),dimension(1:nSN,1:3)::xSN,vSN,dq,u2Blast,vloadSN
+  real(dp),dimension(1:nSN,1:nelt)::celoadSN,ceSN
+  logical ,dimension(1:nvector)::ok
+  integer mythread, nthreads
+  common /average_SN_ksec_common/ mythread
+!$omp threadprivate(/average_SN_ksec_common/)
+
+  if(verbose .and. myid .eq. 1)write(*,*)'Entering average_SN_ksec'
+!$omp parallel
+  mythread = omp_get_thread_num()
+  if(mythread.eq.0) nthreads = omp_get_num_threads()
+!$omp end parallel
+
+  ! Mesh spacing in that level
+  nx_loc=(icoarse_max-icoarse_min+1)
+  skip_loc=(/0.0d0,0.0d0,0.0d0/)
+  skip_loc(1)=dble(icoarse_min)
+  skip_loc(2)=dble(jcoarse_min)
+  skip_loc(3)=dble(kcoarse_min)
+  scale=boxlen/dble(nx_loc)
+  dx_min=scale*0.5D0**nlevelmax
+
+  ! Conversion factor from user units to cgs units
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+  ! Maximum radius of the ejecta
+  rmax=MAX(rcell*dx_min*scale_l/aexp,rbubble*3.08d18)
+  rmax=rmax/scale_l
+  rmax2=rmax*rmax
+
+  ! Build spatial bins for SN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nSN)))
+  bin_head=0; sn_next=0
+  do iSN=1,nSN
+     ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+     sn_next(iSN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iSN
+  end do
+
+  ! Initialize the averaged variables
+  vol_gas=0.0;dq=0.0;u2Blast=0.0;ind_blast=-1;ekBlast_vol=0.0
+  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0
+
+  ! Loop over levels
+  do ilevel=levelmin,nlevelmax
+     ! Computing local volume (important for averaging hydro quantities)
+     dx=0.5D0**ilevel
+     dx_loc=dx*scale
+     vol_loc=dx_loc**ndim
+     ! Cells center position relative to grid center position
+     do ind=1,twotondim
+        iz=(ind-1)/4
+        iy=(ind-1-4*iz)/2
+        ix=(ind-1-2*iy-4*iz)
+        xc(ind,1)=(dble(ix)-0.5D0)*dx
+        xc(ind,2)=(dble(iy)-0.5D0)*dx
+        xc(ind,3)=(dble(iz)-0.5D0)*dx
+     end do
+
+     ! Loop over grids
+     ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell,ok,x,y,z, &
+!$omp       ibx,iby,ibz,jbx,jby,jbz,iSN,dxx,dyy,dzz,dr_SN,dr_cell, &
+!$omp       d,u,v,w,ekk,eint,mload,Zload,ceload,ielt) schedule(dynamic,16)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+        ! Loop over cells
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell(i)=iskip+ind_grid(i)
+           end do
+           ! Flag leaf cells
+           do i=1,ngrid
+              ok(i)=son(ind_cell(i))==0
+           end do
+
+           do i=1,ngrid
+              if(ok(i))then
+                 ! Get gas cell position
+                 x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+                 y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+                 z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+                 ! Find cell's bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                    iSN=bin_head(jbx,jby,jbz)
+                    do while(iSN > 0)
+                       ! Check if the cell lies within the SN radius
+                       dxx=x-xSN(iSN,1)
+                       dyy=y-xSN(iSN,2)
+                       dzz=z-xSN(iSN,3)
+                       dr_SN=dxx**2+dyy**2+dzz**2
+                       dr_cell=MAX(ABS(dxx),ABS(dyy),ABS(dzz))
+                       if(dr_SN.lt.rmax2)then
+                          u=dxx/rmax
+                          v=dyy/rmax
+                          w=dzz/rmax
+                          !$omp atomic
+                          vol_gas(iSN)=vol_gas(iSN)+vol_loc
+                          !$omp atomic
+                          dq(iSN,1)=dq(iSN,1)+u*vol_loc
+                          !$omp atomic
+                          dq(iSN,2)=dq(iSN,2)+v*vol_loc
+                          !$omp atomic
+                          dq(iSN,3)=dq(iSN,3)+w*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,1)=u2Blast(iSN,1)+u*u*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,2)=u2Blast(iSN,2)+v*v*vol_loc
+                          !$omp atomic
+                          u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
+                       endif
+                       if(dr_cell.le.dx_loc/2.0)then
+                          !$omp critical(ind_blast_ksec_lock)
+                          ind_blast(iSN)=ind_cell(i)
+                          ekBlast_vol(iSN)=vol_loc
+                          d=uold(ind_blast(iSN),1)
+                          u=uold(ind_blast(iSN),2)/d
+                          v=uold(ind_blast(iSN),3)/d
+                          w=uold(ind_blast(iSN),4)/d
+                          ekk=0.5d0*d*(u*u+v*v+w*w)
+                          eint=uold(ind_blast(iSN),5)-ekk
+                          mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)
+                          mloadSN(iSN)=mSN(iSN)+mload
+                          if(metal)then
+                             Zload=uold(ind_blast(iSN),imetal)/d
+                             ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)
+                             uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
+                          endif
+                          do ielt=1,nelt
+                             ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+                             celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)
+                             uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
+                          enddo
+                          d=uold(ind_blast(iSN),1)-mload/vol_loc
+                          uold(ind_blast(iSN),1)=d
+                          uold(ind_blast(iSN),2)=d*u
+                          uold(ind_blast(iSN),3)=d*v
+                          uold(ind_blast(iSN),4)=d*w
+                          uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+                          vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
+                          vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
+                          vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
+                          !$omp end critical(ind_blast_ksec_lock)
+                       endif
+                       iSN=sn_next(iSN)
+                    end do
+                 end do
+                 end do
+                 end do
+              endif
+           end do
+
+        end do
+        ! End loop over cells
+     end do
+     ! End loop over grids
+!$omp end parallel do
+  end do
+  ! End loop over levels
+
+  deallocate(bin_head,sn_next)
+
+  if(verbose .and. myid .eq. 1)write(*,*)'Exiting average_SN_ksec'
+
+end subroutine average_SN_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine Sedov_blast_ksec(recvbuf,nrecv,nprops, &
+     indSN_ex1,nSN_ex1,owner_cpu_ex1,owner_idx_ex1)
+  use pm_commons
+  use amr_commons
+  use hydro_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  !------------------------------------------------------------------------
+  ! K-section version of Sedov_blast: apply blast from Exchange 3 data.
+  ! recvbuf layout (per SN):
+  !  1-3: xSN(3), 4-6: dq(3), 7-9: vloadSN(3),
+  !  10: mloadSN, 11: ZloadSN, 12: uSedov, 13: p_gas,
+  !  14: vol_gas, 15: ekBlast, 16: blast_center_cpu,
+  !  17: owner_cpu, 18: owner_idx, 19..18+nelt: celoadSN(nelt)
+  !------------------------------------------------------------------------
+  integer,intent(in)::nrecv,nprops,nSN_ex1
+  real(dp),intent(in)::recvbuf(1:nprops,1:max(1,nrecv))
+  integer,intent(in)::indSN_ex1(1:max(1,nSN_ex1))
+  integer,intent(in)::owner_cpu_ex1(1:max(1,nSN_ex1))
+  integer,intent(in)::owner_idx_ex1(1:max(1,nSN_ex1))
+
+  integer::ilevel,iSN,ind,ix,iy,iz,ngrid,iskip,ielt
+  integer::i,nx_loc,igrid,ncache
+  integer::nbin,ibx,iby,ibz,jbx,jby,jbz,j
+  integer::blast_cpu,owner_cpu_val,owner_idx_val,ind_blast_cell
+  real(dp)::bin_size,inv_bin_size
+  integer,allocatable::bin_head(:,:,:),sn_next(:)
+  integer,dimension(1:nvector)::ind_grid,ind_cell
+  real(dp)::x,y,z,dx,dxx,dyy,dzz,dr_SN,d_gas,u,v,w,ESN
+  real(dp)::scale,dx_min,dx_loc,vol_loc,rmax2,rmax
+  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
+  real(dp),dimension(1:3)::skip_loc
+  real(dp),dimension(1:twotondim,1:3)::xc
+  logical,dimension(1:nvector)::ok
+  ! Unpacked per-SN arrays
+  real(dp),allocatable::xSN(:,:),dq_loc(:,:),vloadSN_loc(:,:)
+  real(dp),allocatable::mloadSN_loc(:),ZloadSN_loc(:),uSedov_loc(:),p_gas_loc(:)
+  real(dp),allocatable::vol_gas_loc(:),ekBlast_loc(:),celoadSN_loc(:,:)
+  integer,allocatable::blast_cpu_arr(:),own_cpu_arr(:),own_idx_arr(:)
+
+  if(nrecv==0) return
+  if(verbose .and. myid .eq. 1)write(*,*)'Entering Sedov_blast_ksec'
+
+  ! Unpack Exchange 3 data
+  allocate(xSN(1:nrecv,1:3), dq_loc(1:nrecv,1:3), vloadSN_loc(1:nrecv,1:3))
+  allocate(mloadSN_loc(1:nrecv), ZloadSN_loc(1:nrecv))
+  allocate(uSedov_loc(1:nrecv), p_gas_loc(1:nrecv))
+  allocate(vol_gas_loc(1:nrecv), ekBlast_loc(1:nrecv))
+  allocate(celoadSN_loc(1:nrecv,1:nelt))
+  allocate(blast_cpu_arr(1:nrecv), own_cpu_arr(1:nrecv), own_idx_arr(1:nrecv))
+
+  do iSN=1,nrecv
+     xSN(iSN,1)=recvbuf(1,iSN); xSN(iSN,2)=recvbuf(2,iSN); xSN(iSN,3)=recvbuf(3,iSN)
+     dq_loc(iSN,1)=recvbuf(4,iSN); dq_loc(iSN,2)=recvbuf(5,iSN); dq_loc(iSN,3)=recvbuf(6,iSN)
+     vloadSN_loc(iSN,1)=recvbuf(7,iSN); vloadSN_loc(iSN,2)=recvbuf(8,iSN); vloadSN_loc(iSN,3)=recvbuf(9,iSN)
+     mloadSN_loc(iSN)=recvbuf(10,iSN)
+     ZloadSN_loc(iSN)=recvbuf(11,iSN)
+     uSedov_loc(iSN)=recvbuf(12,iSN)
+     p_gas_loc(iSN)=recvbuf(13,iSN)
+     vol_gas_loc(iSN)=recvbuf(14,iSN)
+     ekBlast_loc(iSN)=recvbuf(15,iSN)
+     blast_cpu_arr(iSN)=nint(recvbuf(16,iSN))
+     own_cpu_arr(iSN)=nint(recvbuf(17,iSN))
+     own_idx_arr(iSN)=nint(recvbuf(18,iSN))
+     do ielt=1,nelt
+        celoadSN_loc(iSN,ielt)=recvbuf(18+ielt,iSN)
+     enddo
+  enddo
+
+  ! Mesh spacing in that level
+  nx_loc=(icoarse_max-icoarse_min+1)
+  skip_loc=(/0.0d0,0.0d0,0.0d0/)
+  skip_loc(1)=dble(icoarse_min)
+  skip_loc(2)=dble(jcoarse_min)
+  skip_loc(3)=dble(kcoarse_min)
+  scale=boxlen/dble(nx_loc)
+  dx_min=scale*0.5D0**nlevelmax
+
+  ! Conversion factor from user units to cgs units
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+  ! Maximum radius of the ejecta
+  rmax=MAX(rcell*dx_min*scale_l/aexp,rbubble*3.08d18)
+  rmax=rmax/scale_l
+  rmax2=rmax*rmax
+
+  ! Build spatial bins for SN (only those with vol_gas > 0)
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nrecv)))
+  bin_head=0; sn_next=0
+  do iSN=1,nrecv
+     if(vol_gas_loc(iSN) > 0d0) then
+        ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
+        iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
+        ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+        sn_next(iSN)=bin_head(ibx,iby,ibz)
+        bin_head(ibx,iby,ibz)=iSN
+     endif
+  end do
+
+  ! Loop over levels — apply Sedov blast to cells within rmax
+  do ilevel=levelmin,nlevelmax
+     ! Computing local volume
+     dx=0.5D0**ilevel
+     dx_loc=dx*scale
+     vol_loc=dx_loc**ndim
+     ! Cells center position relative to grid center position
+     do ind=1,twotondim
+        iz=(ind-1)/4
+        iy=(ind-1-4*iz)/2
+        ix=(ind-1-2*iy-4*iz)
+        xc(ind,1)=(dble(ix)-0.5D0)*dx
+        xc(ind,2)=(dble(iy)-0.5D0)*dx
+        xc(ind,3)=(dble(iz)-0.5D0)*dx
+     end do
+
+     ! Loop over grids
+     ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell, &
+!$omp       ok,x,y,z,ibx,iby,ibz,jbx,jby,jbz,iSN,dxx,dyy,dzz,dr_SN, &
+!$omp       d_gas,ielt,u,v,w) schedule(dynamic,16)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        ! Loop over cells
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell(i)=iskip+ind_grid(i)
+           end do
+
+           ! Flag leaf cells
+           do i=1,ngrid
+              ok(i)=son(ind_cell(i))==0
+           end do
+
+           do i=1,ngrid
+              if(ok(i))then
+                 ! Get gas cell position
+                 x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
+                 y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
+                 z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
+                 ! Find cell's bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                    iSN=bin_head(jbx,jby,jbz)
+                    do while(iSN > 0)
+                       ! Check if the cell lies within the SN radius
+                       dxx=x-xSN(iSN,1)
+                       dyy=y-xSN(iSN,2)
+                       dzz=z-xSN(iSN,3)
+                       dr_SN=dxx**2+dyy**2+dzz**2
+                       if(dr_SN.lt.rmax2)then
+                          d_gas=mloadSN_loc(iSN)/vol_gas_loc(iSN)
+                          ! Compute the mass density in the cell
+                          uold(ind_cell(i),1)=uold(ind_cell(i),1)+d_gas
+                          ! Compute the metal density in the cell
+                          if(metal)uold(ind_cell(i),imetal)=uold(ind_cell(i),imetal)+d_gas*ZloadSN_loc(iSN)
+                          do ielt=1,nelt
+                             if(d_gas*celoadSN_loc(iSN,ielt)>0d0) &
+                                  uold(ind_cell(i),ichem+ielt-1)=uold(ind_cell(i),ichem+ielt-1)+d_gas*celoadSN_loc(iSN,ielt)
+                          enddo
+                          ! Velocity at a given dr_SN linearly interpolated between zero and uSedov
+                          u=uSedov_loc(iSN)*(dxx/rmax-dq_loc(iSN,1))+vloadSN_loc(iSN,1)
+                          v=uSedov_loc(iSN)*(dyy/rmax-dq_loc(iSN,2))+vloadSN_loc(iSN,2)
+                          w=uSedov_loc(iSN)*(dzz/rmax-dq_loc(iSN,3))+vloadSN_loc(iSN,3)
+                          ! Add each momentum component of the blast wave to the gas
+                          uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u
+                          uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v
+                          uold(ind_cell(i),4)=uold(ind_cell(i),4)+d_gas*w
+                          ! Finally update the total energy of the gas
+                          uold(ind_cell(i),5)=uold(ind_cell(i),5)+0.5*d_gas*(u*u+v*v+w*w)+p_gas_loc(iSN)
+                       endif
+                       iSN=sn_next(iSN)
+                    end do
+                 end do
+                 end do
+                 end do
+              endif
+           end do
+
+        end do
+        ! End loop over cells
+     end do
+     ! End loop over grids
+  end do
+  ! End loop over levels
+
+  deallocate(bin_head,sn_next)
+
+  ! Handle vol_gas=0 fallback: only blast_center_cpu applies single-cell blast
+  do iSN=1,nrecv
+     if(vol_gas_loc(iSN)==0d0 .and. blast_cpu_arr(iSN)==myid)then
+        ! Find ind_blast from Exchange 1 saved data
+        owner_cpu_val=own_cpu_arr(iSN)
+        owner_idx_val=own_idx_arr(iSN)
+        ind_blast_cell=-1
+        do j=1,nSN_ex1
+           if(owner_cpu_ex1(j)==owner_cpu_val .and. owner_idx_ex1(j)==owner_idx_val)then
+              ind_blast_cell=indSN_ex1(j)
+              exit
+           endif
+        enddo
+        if(ind_blast_cell > 0 .and. ekBlast_loc(iSN) > 0d0)then
+           d_gas=mloadSN_loc(iSN)/ekBlast_loc(iSN)
+           u=vloadSN_loc(iSN,1)
+           v=vloadSN_loc(iSN,2)
+           w=vloadSN_loc(iSN,3)
+           uold(ind_blast_cell,1)=uold(ind_blast_cell,1)+d_gas
+           uold(ind_blast_cell,2)=uold(ind_blast_cell,2)+d_gas*u
+           uold(ind_blast_cell,3)=uold(ind_blast_cell,3)+d_gas*v
+           uold(ind_blast_cell,4)=uold(ind_blast_cell,4)+d_gas*w
+           uold(ind_blast_cell,5)=uold(ind_blast_cell,5)+d_gas*0.5*(u*u+v*v+w*w)+p_gas_loc(iSN)
+           if(metal)uold(ind_blast_cell,imetal)=uold(ind_blast_cell,imetal)+d_gas*ZloadSN_loc(iSN)
+           do ielt=1,nelt
+              if(d_gas*celoadSN_loc(iSN,ielt)>0d0) &
+                   uold(ind_blast_cell,ichem+ielt-1)=uold(ind_blast_cell,ichem+ielt-1)+d_gas*celoadSN_loc(iSN,ielt)
+           enddo
+        endif
+     endif
+  end do
+
+  deallocate(xSN, dq_loc, vloadSN_loc, mloadSN_loc, ZloadSN_loc)
+  deallocate(uSedov_loc, p_gas_loc, vol_gas_loc, ekBlast_loc)
+  deallocate(celoadSN_loc, blast_cpu_arr, own_cpu_arr, own_idx_arr)
+
+  if(verbose .and. myid .eq. 1)write(*,*)'Exiting Sedov_blast_ksec'
+
+end subroutine Sedov_blast_ksec
+!################################################################
+!################################################################
+!################################################################
 !################################################################

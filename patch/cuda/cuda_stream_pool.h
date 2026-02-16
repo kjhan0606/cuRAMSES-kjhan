@@ -19,7 +19,7 @@
 #define NVECTOR 32
 #endif
 
-#define N_STREAMS 8
+#define N_STREAMS 1
 
 // Stencil ranges (matches hydro_parameters.f90: iu1:iu2 = -1:4)
 #define IU1 (-1)
