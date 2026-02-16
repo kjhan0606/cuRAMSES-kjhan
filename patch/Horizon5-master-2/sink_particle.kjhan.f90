@@ -5381,6 +5381,8 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::vol_gas_mpi,mass_gas_mpi,mAGN_mpi,psy_norm_mpi,ZAGN_mpi
   real(dp),dimension(1:nsink)::vol_gas_all,mass_gas_all,mAGN_all,psy_norm_all,ZAGN_all
+  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
+  integer::npack,ip
 #endif
   logical ,dimension(1:nAGN)::ok_blast_agn
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy
@@ -5620,11 +5622,23 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ZAGN_mpi    (isink)=ZAGN    (iAGN)
      psy_norm_mpi(isink)=psy_norm(iAGN)
   enddo
-  call MPI_ALLREDUCE(vol_gas_mpi ,vol_gas_all ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mass_gas_mpi,mass_gas_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mAGN_mpi    ,mAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(ZAGN_mpi    ,ZAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(psy_norm_mpi,psy_norm_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  ! Pack 5 arrays into single ALLREDUCE (vol_gas,mass_gas,mAGN,ZAGN,psy_norm)
+  npack=5*nsink
+  allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
+  ip=0
+  sink_sbuf(ip+1:ip+nsink)=vol_gas_mpi(1:nsink);  ip=ip+nsink
+  sink_sbuf(ip+1:ip+nsink)=mass_gas_mpi(1:nsink); ip=ip+nsink
+  sink_sbuf(ip+1:ip+nsink)=mAGN_mpi(1:nsink);    ip=ip+nsink
+  sink_sbuf(ip+1:ip+nsink)=ZAGN_mpi(1:nsink);    ip=ip+nsink
+  sink_sbuf(ip+1:ip+nsink)=psy_norm_mpi(1:nsink); ip=ip+nsink
+  call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  ip=0
+  vol_gas_all(1:nsink) =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
+  mass_gas_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
+  mAGN_all(1:nsink)    =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
+  ZAGN_all(1:nsink)    =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
+  psy_norm_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
+  deallocate(sink_sbuf,sink_rbuf)
   vol_gas_mpi =vol_gas_all
   mass_gas_mpi=mass_gas_all
   mAGN_mpi    =mAGN_all

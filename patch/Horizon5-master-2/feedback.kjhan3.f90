@@ -925,10 +925,12 @@ subroutine kinetic_feedback
   integer,dimension(1:ncpu)::nSN_icpu_all
   real(dp),dimension(:),allocatable::mSN_all,ZSN_all,NbSN_all
   real(dp),dimension(:,:),allocatable::xSN_all,vSN_all,ceSN_all
+  real(dp),dimension(:),allocatable::sn_sbuf,sn_rbuf
+  integer::npack_sn,ip_sn
 #endif
   !----------------------------------------------------------------------
   ! This subroutine compute the kinetic feedback due to SNII and
-  ! imolement this using exploding GMC particles. 
+  ! imolement this using exploding GMC particles.
   ! This routine is called only at coarse time step.
   ! Yohan Dubois
   !----------------------------------------------------------------------
@@ -1422,26 +1424,42 @@ subroutine kinetic_feedback
   deallocate(mynewSN)
 
 #ifndef WITHOUTMPI
-  allocate(xSN_all(1:nSN_tot,1:3),vSN_all(1:nSN_tot,1:3),mSN_all(1:nSN_tot),ZSN_all(1:nSN_tot))
-  allocate(ceSN_all(1:nSN_tot,1:nelt),NbSN_all(1:nSN_tot))
-  call MPI_ALLREDUCE(xSN_tot,xSN_all,nSN_tot*3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(vSN_tot,vSN_all,nSN_tot*3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mSN_tot,mSN_all,nSN_tot  ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(ZSN_tot,ZSN_all,nSN_tot  ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(NbSN_tot,NbSN_all,nSN_tot,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(ceSN_tot,ceSN_all,nSN_tot*nelt,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  xSN_tot=xSN_all
-  vSN_tot=vSN_all
-  mSN_tot=mSN_all
-  ZSN_tot=ZSN_all
-  NbSN_tot=NbSN_all
-  ceSN_tot=ceSN_all
-  deallocate(xSN_all,vSN_all,mSN_all,ZSN_all,NbSN_all,ceSN_all)
+  ! Pack 6 arrays into single ALLREDUCE (xSN,vSN,mSN,ZSN,NbSN,ceSN)
+  npack_sn = nSN_tot*(3+3+1+1+1+nelt)
+  allocate(sn_sbuf(1:npack_sn),sn_rbuf(1:npack_sn))
+  ip_sn=0
+  do idim=1,3
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=xSN_tot(1:nSN_tot,idim); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=vSN_tot(1:nSN_tot,idim); ip_sn=ip_sn+nSN_tot
+  end do
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=mSN_tot(1:nSN_tot);  ip_sn=ip_sn+nSN_tot
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=ZSN_tot(1:nSN_tot);  ip_sn=ip_sn+nSN_tot
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=NbSN_tot(1:nSN_tot); ip_sn=ip_sn+nSN_tot
+  do ielt=1,nelt
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=ceSN_tot(1:nSN_tot,ielt); ip_sn=ip_sn+nSN_tot
+  end do
+  call MPI_ALLREDUCE(sn_sbuf,sn_rbuf,npack_sn,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  ip_sn=0
+  do idim=1,3
+     xSN_tot(1:nSN_tot,idim)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     vSN_tot(1:nSN_tot,idim)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  mSN_tot(1:nSN_tot) =sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  ZSN_tot(1:nSN_tot) =sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  NbSN_tot(1:nSN_tot)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  do ielt=1,nelt
+     ceSN_tot(1:nSN_tot,ielt)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  deallocate(sn_sbuf,sn_rbuf)
 #endif
 
 #ifndef WITHOUTMPI
   tt3=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in 6  MPI_ALLREDUCE: ',tt3-tt2
+  if(myid .eq. 1) write(*,*)'Time elapsed in packed MPI_ALLREDUCE (6->1): ',tt3-tt2
 #endif
   call getSNonmyid(itemp,nSN,xSN_tot,nSN_tot)
 
@@ -1556,6 +1574,8 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   real(dp),dimension(:,:), allocatable::dq_mpi,u2Blast_mpi,vloadSN_mpi
   real(dp),dimension(:), allocatable::mloadSN_mpi,mloadSN_all,ZloadSN_mpi,ZloadSN_all
   real(dp),dimension(:,:), allocatable::celoadSN_mpi,celoadSN_all
+  real(dp),dimension(:),allocatable::sn_sbuf,sn_rbuf
+  integer::npack_sn,ip_sn,idim
 #endif
   logical ,dimension(1:nvector)::ok
   integer ,dimension(1:nSN)::iSN_myid
@@ -1768,20 +1788,43 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
      u2Blast_mpi(ind_SN,2)=u2Blast(iSN,2)
      u2Blast_mpi(ind_SN,3)=u2Blast(iSN,3)
   enddo
-  call MPI_ALLREDUCE(vol_gas_mpi,vol_gas_all,nSN_tot  ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mloadSN_mpi,mloadSN_all,nSN_tot  ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(ZloadSN_mpi,ZloadSN_all,nSN_tot  ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(vloadSN_mpi,vloadSN_all,nSN_tot*3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(dq_mpi     ,dq_all     ,nSN_tot*3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(u2Blast_mpi,u2Blast_all,nSN_tot*3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(celoadSN_mpi,celoadSN_all,nSN_tot*nelt,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  vol_gas_mpi=vol_gas_all
-  mloadSN_mpi=mloadSN_all
-  ZloadSN_mpi=ZloadSN_all
-  vloadSN_mpi=vloadSN_all
-  dq_mpi     =dq_all
-  u2Blast_mpi=u2Blast_all
-  celoadSN_mpi=celoadSN_all
+  ! Pack 7 arrays into single ALLREDUCE (vol_gas,mloadSN,ZloadSN,vloadSN,dq,u2Blast,celoadSN)
+  npack_sn = nSN_tot*(1+1+1+3+3+3+nelt)
+  allocate(sn_sbuf(1:npack_sn),sn_rbuf(1:npack_sn))
+  ip_sn=0
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=vol_gas_mpi(1:nSN_tot);  ip_sn=ip_sn+nSN_tot
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=mloadSN_mpi(1:nSN_tot); ip_sn=ip_sn+nSN_tot
+  sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=ZloadSN_mpi(1:nSN_tot); ip_sn=ip_sn+nSN_tot
+  do idim=1,3
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=vloadSN_mpi(1:nSN_tot,idim); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=dq_mpi(1:nSN_tot,idim); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=u2Blast_mpi(1:nSN_tot,idim); ip_sn=ip_sn+nSN_tot
+  end do
+  do ielt=1,nelt
+     sn_sbuf(ip_sn+1:ip_sn+nSN_tot)=celoadSN_mpi(1:nSN_tot,ielt); ip_sn=ip_sn+nSN_tot
+  end do
+  call MPI_ALLREDUCE(sn_sbuf,sn_rbuf,npack_sn,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  ip_sn=0
+  vol_gas_mpi(1:nSN_tot) =sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  mloadSN_mpi(1:nSN_tot)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  ZloadSN_mpi(1:nSN_tot)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  do idim=1,3
+     vloadSN_mpi(1:nSN_tot,idim)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     dq_mpi(1:nSN_tot,idim)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  do idim=1,3
+     u2Blast_mpi(1:nSN_tot,idim)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  do ielt=1,nelt
+     celoadSN_mpi(1:nSN_tot,ielt)=sn_rbuf(ip_sn+1:ip_sn+nSN_tot); ip_sn=ip_sn+nSN_tot
+  end do
+  deallocate(sn_sbuf,sn_rbuf)
   ! Put the nSN_tot size arrays into nSN size arrays                                                          
 !$omp parallel do private(iSN,ind_SN,ielt)
   do iSN=1,nSN

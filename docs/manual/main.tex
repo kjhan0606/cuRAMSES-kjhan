@@ -625,9 +625,14 @@ Several large arrays were eliminated or converted to on-demand allocation to red
 \texttt{bisec\_ind\_cell} + \texttt{cell\_level} & On-demand alloc/dealloc & ${\sim}320$\,MB \\
 \texttt{defrag\_map} & Local scratch during defrag & minor \\
 \texttt{nbor} & \texttt{allocate(1:1,1:1)} (Morton) & ${\sim}240$\,MB \\
+\texttt{sink arrays} & \texttt{nsinkmax} 4M$\to$2000 & ${\sim}15$\,GB/rank \\
 \bottomrule
 \end{tabular}
 \end{center}
+
+\section{Sink Particle Array Reduction}
+
+The original \texttt{nsinkmax} was hardcoded to 4,000,000, allocating ${\sim}15$\,GB per rank for sink-related arrays. Since typical simulations use $O(10)$--$O(100)$ sink particles, the default was reduced to 2000 (overridable via \texttt{nsinkmax} in \texttt{\&AMR\_PARAMS}). The \texttt{MPI\_ALLREDUCE} calls in \texttt{synchro\_fine} and \texttt{move\_fine} were also changed to use \texttt{nsink} instead of \texttt{nsinkmax}, reducing message size by up to 333,000$\times$.
 
 
 %======================================================
@@ -1290,6 +1295,49 @@ Convergence & verified (econs = 3.79E-03 at step~10) \\
 \begin{infobox}[Chaotic Relaxation]
 The merged red-black exchange introduces a minor change in the energy conservation value (3.77E-03 $\to$ 3.79E-03) due to the slightly different relaxation path. This is well within the multigrid tolerance and does not affect physical results. The membal and nomembal tests produce identical values.
 \end{infobox}
+
+
+%======================================================
+\chapter{MPI\_ALLREDUCE Packing}
+\label{ch:allreduce-packing}
+%======================================================
+
+Multiple individual \texttt{MPI\_ALLREDUCE} calls operating on arrays of the same size and reduction operation can be packed into a single call, reducing MPI latency overhead proportionally.
+
+\section{AGN Feedback (average\_AGN)}
+
+In \texttt{sink\_particle.kjhan.f90}, the \texttt{average\_AGN} subroutine synchronizes five per-sink arrays (\texttt{vol\_gas}, \texttt{mass\_gas}, \texttt{mAGN}, \texttt{ZAGN}, \texttt{psy\_norm}) across all ranks. The five individual \texttt{MPI\_ALLREDUCE} calls were packed into a single call with buffer size $5 \times \texttt{nsink}$.
+
+\begin{remark}[dMsmbh + Esave]
+The \texttt{dMsmbh\_new} (\texttt{MPI\_MIN}) and \texttt{Esave\_new} (\texttt{MPI\_SUM}) reductions use different operations and therefore cannot be packed together.
+\end{remark}
+
+\section{SNII Feedback --- Hilbert Fallback Path}
+
+When \texttt{ordering} $\ne$ \texttt{'ksection'}, the SNII feedback in \texttt{feedback.kjhan3.f90} uses \texttt{MPI\_ALLREDUCE} instead of the k-section overlap exchange. Two packing optimizations were applied:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{SN property exchange} (6$\to$1): \texttt{xSN}, \texttt{vSN}, \texttt{mSN}, \texttt{ZSN}, \texttt{NbSN}, \texttt{ceSN} packed into a single buffer of size $n_\mathrm{SN,tot} \times (9 + n_\mathrm{elt})$.
+  \item \textbf{Sedov blast exchange} (7$\to$1): \texttt{vol\_gas}, \texttt{mloadSN}, \texttt{ZloadSN}, \texttt{vloadSN}, \texttt{dq}, \texttt{u2Blast}, \texttt{celoadSN} packed into a single buffer of size $n_\mathrm{SN,tot} \times (12 + n_\mathrm{elt})$.
+\end{enumerate}
+
+\section{Summary}
+
+\begin{center}
+\begin{tabular}{llcc}
+\toprule
+\textbf{Location} & \textbf{Subroutine} & \textbf{Before} & \textbf{After} \\
+\midrule
+\texttt{sink\_particle.kjhan.f90} & \texttt{average\_AGN} & 5 calls & 1 call \\
+\texttt{feedback.kjhan3.f90} & \texttt{kinetic\_feedback} & 6 calls & 1 call \\
+\texttt{feedback.kjhan3.f90} & \texttt{average\_SN} & 7 calls & 1 call \\
+\midrule
+\multicolumn{2}{l}{Total ALLREDUCE removed} & 18 & 3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Verification: econs = 7.65E-04 (ksection, 12~CPU) and 7.47E-04 (Hilbert, 4~CPU), identical to pre-packing results. The Hilbert path SNII ALLREDUCE time decreased from 4.25\,ms to 1.16\,ms (3.7$\times$ speedup).
 
 
 %======================================================
@@ -2231,7 +2279,8 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{init\_part.f90} & Stream access particle IC \\
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
 \texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
-\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning \\
+\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning + ALLREDUCE packing \\
+\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN ALLREDUCE packing \\
 \midrule
 \multicolumn{2}{l}{\textit{patch/cuda/ (HDF5 I/O --- new files)}} \\
 \midrule
