@@ -972,7 +972,11 @@ subroutine kjhan_make_sink(ilevel)
         sink_sbuf(ip+1:ip+nsink)=bhspin_new(1:nsink,idim); ip=ip+nsink
      end do
      sink_sbuf(ip+1:ip+nsink)=spinmag_new(1:nsink); ip=ip+nsink
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 15, nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      ip=0
      oksink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);  ip=ip+nsink
      msink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);   ip=ip+nsink
@@ -2258,7 +2262,11 @@ subroutine bondi_hoyle(ilevel)
      sink_sbuf(       1:  nsink)=oksink_new(1:nsink)
      sink_sbuf(  nsink+1:2*nsink)=c2sink_new(1:nsink)
      sink_sbuf(2*nsink+1:3*nsink)=v2sink_new(1:nsink)
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 3, nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      oksink_all(1:nsink)=sink_rbuf(       1:  nsink)
      c2sink_all(1:nsink)=sink_rbuf(  nsink+1:2*nsink)
      v2sink_all(1:nsink)=sink_rbuf(2*nsink+1:3*nsink)
@@ -2397,7 +2405,11 @@ subroutine bondi_hoyle(ilevel)
      do idim=1,ndim
         sink_sbuf(ip+1:ip+nsink)=jsink_new(1:nsink,idim); ip=ip+nsink
      end do
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 9, nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      ip=0
      wdens_new(1:nsink)=sink_rbuf(ip+1:ip+nsink);     ip=ip+nsink
      wvol_new(1:nsink)=sink_rbuf(ip+1:ip+nsink);      ip=ip+nsink
@@ -3171,7 +3183,11 @@ subroutine grow_bondi(ilevel)
      sink_sbuf(ip+1:ip+nsink)=dMBH_coarse_new(1:nsink); ip=ip+nsink
      sink_sbuf(ip+1:ip+nsink)=dMEd_coarse_new(1:nsink); ip=ip+nsink
      sink_sbuf(ip+1:ip+nsink)=dMsmbh_new(1:nsink);      ip=ip+nsink
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 7, nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      ip=0
      msink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
      do idim=1,ndim
@@ -3747,7 +3763,11 @@ subroutine grow_jeans(ilevel)
      do idim=1,ndim
         sink_sbuf(nsink*idim+1:nsink*(idim+1))=vsink_new(1:nsink,idim)
      end do
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 4, nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      msink_all(1:nsink)=sink_rbuf(1:nsink)
      do idim=1,ndim
         vsink_all(1:nsink,idim)=sink_rbuf(nsink*idim+1:nsink*(idim+1))
@@ -5297,7 +5317,11 @@ subroutine AGN_feedback
      isink=iAGN_myid(iAGN)
      Esave_new(isink)=EsaveAGN(iAGN)
   enddo
-  call MPI_ALLREDUCE(Esave_new,Esave_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  if(TRIM(ordering)=='ksection') then
+     call sink_ksec_reduce_sum(Esave_new, Esave_all, 1, nsink)
+  else
+     call MPI_ALLREDUCE(Esave_new,Esave_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  end if
   Esave= Esave_all
 #else
   Esave=EsaveAGN
@@ -5631,7 +5655,11 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   sink_sbuf(ip+1:ip+nsink)=mAGN_mpi(1:nsink);    ip=ip+nsink
   sink_sbuf(ip+1:ip+nsink)=ZAGN_mpi(1:nsink);    ip=ip+nsink
   sink_sbuf(ip+1:ip+nsink)=psy_norm_mpi(1:nsink); ip=ip+nsink
-  call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  if(TRIM(ordering)=='ksection') then
+     call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 5, nsink)
+  else
+     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  end if
   ip=0
   vol_gas_all(1:nsink) =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
   mass_gas_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
@@ -6499,7 +6527,11 @@ subroutine kjhan_update_sink_position_velocity
            sink_sbuf(ip+1:ip+nsink)=sink_stat(1:nsink,ilevel2,idim); ip=ip+nsink
         end do
      end do
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,size_mpi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     if(TRIM(ordering)=='ksection') then
+        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, (nlevelmax-levelmin+1)*(ndim*2+1), nsink)
+     else
+        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,size_mpi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     end if
      ip=0
      do idim=1,ndim*2+1
         do ilevel2=levelmin,nlevelmax
@@ -6664,3 +6696,168 @@ subroutine true_max(x,y,z,ilevel)
 
 #endif
 end subroutine true_max
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine sink_ksec_reduce_sum(sbuf, rbuf, nfields, nsink_arg)
+  !----------------------------------------------------------------------
+  ! Replace MPI_ALLREDUCE(MPI_SUM) for sink particles using 2-stage
+  ! ksection exchange:
+  !   Stage 1: exclusive exchange → each sink's partial sums go to owner CPU
+  !   Stage 2: overlap broadcast  → owner broadcasts results to all CPUs
+  !
+  ! sbuf(1:nfields*nsink_arg) = local partial sums [field-major packing]
+  ! rbuf(1:nfields*nsink_arg) = global sums (same layout)
+  !----------------------------------------------------------------------
+  use amr_commons, only: myid, ncpu, ndim, boxlen, ordering, dp
+  use pm_commons, only: xsink
+  use ksection, only: ksection_exchange_dp, ksection_exchange_dp_overlap, &
+       cmp_ksection_cpumap
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer, intent(in) :: nfields, nsink_arg
+  real(dp), intent(in)  :: sbuf(1:nfields*nsink_arg)
+  real(dp), intent(out) :: rbuf(1:nfields*nsink_arg)
+
+  ! Local variables
+  integer :: isink, ifld, nitem_send, nown, ip, i, nrecv1, nrecv2
+  integer :: sink_owner(1:nsink_arg)
+  integer :: dest_cpu(1:nsink_arg)  ! max possible send items
+  real(dp) :: val
+  logical :: has_contrib
+
+  ! Stage 1: exclusive exchange buffers
+  ! sendbuf1(1:nfields+1, 1:nitem_send): (sink_index, field1, field2, ...)
+  real(dp), allocatable :: sendbuf1(:,:)
+  real(dp), allocatable :: recvbuf1(:,:)
+
+  ! Stage 2: overlap broadcast buffers
+  ! sendbuf2(1:nfields+1, 1:nown): (sink_index, field1, field2, ...)
+  real(dp), allocatable :: sendbuf2(:,:)
+  real(dp), allocatable :: recvbuf2(:,:)
+  real(dp), allocatable :: xmin_br(:,:), xmax_br(:,:)
+
+  ! Accumulated result on owner
+  real(dp) :: acc(1:nfields)
+
+#ifdef WITHOUTMPI
+  rbuf = sbuf
+  return
+#endif
+
+#ifndef WITHOUTMPI
+  if(nsink_arg == 0) then
+     rbuf = 0d0
+     return
+  end if
+
+  ! Initialize output
+  rbuf = 0d0
+
+  ! Determine owner CPU for each sink
+  call cmp_ksection_cpumap(xsink, sink_owner, nsink_arg)
+
+  !----------------------------------------------------------------------
+  ! Stage 1: Sparse exclusive exchange → owner CPU
+  !----------------------------------------------------------------------
+  ! Count items to send (sinks with non-zero contribution)
+  nitem_send = 0
+  do isink = 1, nsink_arg
+     has_contrib = .false.
+     do ifld = 1, nfields
+        if(sbuf((ifld-1)*nsink_arg + isink) /= 0d0) then
+           has_contrib = .true.
+           exit
+        end if
+     end do
+     if(has_contrib) nitem_send = nitem_send + 1
+  end do
+
+  ! Build send buffer
+  allocate(sendbuf1(1:nfields+1, 1:max(nitem_send,1)))
+  ip = 0
+  do isink = 1, nsink_arg
+     has_contrib = .false.
+     do ifld = 1, nfields
+        if(sbuf((ifld-1)*nsink_arg + isink) /= 0d0) then
+           has_contrib = .true.
+           exit
+        end if
+     end do
+     if(has_contrib) then
+        ip = ip + 1
+        sendbuf1(1, ip) = dble(isink)  ! sink index
+        do ifld = 1, nfields
+           sendbuf1(ifld+1, ip) = sbuf((ifld-1)*nsink_arg + isink)
+        end do
+        dest_cpu(ip) = sink_owner(isink)
+     end if
+  end do
+
+  ! Exchange to owners
+  call ksection_exchange_dp(sendbuf1, nitem_send, dest_cpu, nfields+1, &
+       recvbuf1, nrecv1)
+  deallocate(sendbuf1)
+
+  ! Accumulate received data on owner
+  ! rbuf is used as accumulator for owned sinks
+  do i = 1, nrecv1
+     isink = nint(recvbuf1(1, i))
+     do ifld = 1, nfields
+        rbuf((ifld-1)*nsink_arg + isink) = &
+             rbuf((ifld-1)*nsink_arg + isink) + recvbuf1(ifld+1, i)
+     end do
+  end do
+  if(allocated(recvbuf1)) deallocate(recvbuf1)
+
+  ! Also add local contribution for sinks owned by this CPU
+  ! (ksection_exchange_dp delivers self-sends too, so already included)
+
+  !----------------------------------------------------------------------
+  ! Stage 2: Overlap broadcast → all CPUs
+  !----------------------------------------------------------------------
+  ! Count sinks owned by this CPU
+  nown = 0
+  do isink = 1, nsink_arg
+     if(sink_owner(isink) == myid) nown = nown + 1
+  end do
+
+  ! Build broadcast buffer: owned sinks with accumulated results
+  allocate(sendbuf2(1:nfields+1, 1:max(nown,1)))
+  allocate(xmin_br(1:ndim, 1:max(nown,1)))
+  allocate(xmax_br(1:ndim, 1:max(nown,1)))
+
+  ip = 0
+  do isink = 1, nsink_arg
+     if(sink_owner(isink) == myid) then
+        ip = ip + 1
+        sendbuf2(1, ip) = dble(isink)
+        do ifld = 1, nfields
+           sendbuf2(ifld+1, ip) = rbuf((ifld-1)*nsink_arg + isink)
+        end do
+        ! Full-domain bbox → all CPUs receive
+        xmin_br(1:ndim, ip) = 0d0
+        xmax_br(1:ndim, ip) = boxlen
+     end if
+  end do
+
+  ! Broadcast via overlap exchange
+  call ksection_exchange_dp_overlap(sendbuf2, nown, xmin_br, xmax_br, &
+       nfields+1, recvbuf2, nrecv2, periodic=.true.)
+  deallocate(sendbuf2, xmin_br, xmax_br)
+
+  ! Write results to rbuf from broadcast
+  rbuf = 0d0  ! Reset before filling from broadcast
+  do i = 1, nrecv2
+     isink = nint(recvbuf2(1, i))
+     do ifld = 1, nfields
+        rbuf((ifld-1)*nsink_arg + isink) = recvbuf2(ifld+1, i)
+     end do
+  end do
+  if(allocated(recvbuf2)) deallocate(recvbuf2)
+#endif
+
+end subroutine sink_ksec_reduce_sum
