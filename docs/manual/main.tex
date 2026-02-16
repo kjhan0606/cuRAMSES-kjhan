@@ -1298,6 +1298,98 @@ The merged red-black exchange introduces a minor change in the energy conservati
 
 
 %======================================================
+\chapter{SNII Feedback K-Section Exchange}
+\label{ch:snii-ksection}
+%======================================================
+
+When \texttt{ordering='ksection'}, the SNII kinetic feedback routine (\texttt{kinetic\_feedback} in \texttt{feedback.kjhan3.f90}) replaces all \texttt{MPI\_ALLREDUCE} calls with a 3-stage k-section overlap exchange, eliminating global synchronization.
+
+\section{3-Stage Exchange}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Exchange~1 (Overlap Broadcast)}: Each CPU broadcasts its local SN events to all CPUs whose domain overlaps the SN blast radius. Uses \texttt{ksection\_exchange\_dp\_overlap} with bounding box $[\mathbf{x}_\mathrm{SN} - r_\mathrm{SN},\; \mathbf{x}_\mathrm{SN} + r_\mathrm{SN}]$ and \texttt{periodic=.true.}. Carries $9 + n_\mathrm{elt}$ fields per SN event (\texttt{x}, \texttt{v}, \texttt{m}, \texttt{Z}, \texttt{NbSN}, \texttt{ce}).
+  \item \textbf{Exchange~2 (Exclusive $\to$ Owner)}: Each CPU computes its local contribution to the Sedov blast integrals (\texttt{vol\_gas}, \texttt{mloadSN}, \texttt{ZloadSN}, \texttt{vloadSN}, \texttt{dq}, \texttt{u2Blast}, \texttt{celoadSN}) and sends them to the SN owner CPU via \texttt{ksection\_exchange\_dp}. The owner aggregates all contributions.
+  \item \textbf{Exchange~3 (Overlap Broadcast)}: The owner broadcasts the aggregated blast parameters back to all CPUs in the blast region. Uses \texttt{ksection\_exchange\_dp\_overlap} with the same bounding box.
+\end{enumerate}
+
+\section{Dispatch}
+
+\begin{lstlisting}[language=Fortran,basicstyle=\ttfamily\small]
+if(TRIM(ordering)=='ksection') then
+   call kinetic_feedback_ksec(...)  ! 3-stage exchange
+else
+   call kinetic_feedback_allreduce(...)  ! packed ALLREDUCE
+end if
+\end{lstlisting}
+
+\section{Verification}
+
+The k-section and Hilbert paths produce identical physical results: \texttt{epot}, \texttt{ekin}, and \texttt{eint} match to full precision.
+
+
+%======================================================
+\chapter{Sink Particle K-Section Exchange}
+\label{ch:sink-ksection}
+%======================================================
+
+When \texttt{ordering='ksection'}, the 8 packed \texttt{MPI\_ALLREDUCE(MPI\_SUM)} calls in \texttt{sink\_particle.kjhan.f90} are replaced with a 2-stage k-section exchange via the utility subroutine \texttt{sink\_ksec\_reduce\_sum}.
+
+\section{Algorithm: 2-Stage K-Section Reduce-Sum}
+
+Since \texttt{MPI\_ALLREDUCE} = reduce + broadcast, the replacement decomposes this into:
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Stage~1 (Exclusive $\to$ Owner)}: Each CPU sends its non-zero partial sums to the sink's owner CPU. The owner is determined by \texttt{cmp\_ksection\_cpumap(xsink)}. A sparsity optimization skips sinks with zero contribution. Uses \texttt{ksection\_exchange\_dp} with $n_\mathrm{fields}+1$ properties per item (sink index + field values).
+  \item \textbf{Stage~2 (Overlap Broadcast $\to$ All)}: Each owner broadcasts its accumulated result to all CPUs using \texttt{ksection\_exchange\_dp\_overlap} with a full-domain bounding box $[0, \texttt{boxlen}]^3$ and \texttt{periodic=.true.}, ensuring all CPUs receive the global sum.
+\end{enumerate}
+
+\section{Replaced Call Sites}
+
+\begin{center}
+\begin{tabular}{clcl}
+\toprule
+\textbf{\#} & \textbf{Subroutine} & \textbf{nfields} & \textbf{Arrays} \\
+\midrule
+1 & \texttt{kjhan\_make\_sink} & 15 & oksink, msink, xsink(3), vsink(3), tsink, dMsmbh, Esave, bhspin(3), spinmag \\
+2 & \texttt{bondi\_hoyle} (1st) & 3 & oksink, c2sink, v2sink \\
+3 & \texttt{bondi\_hoyle} (2nd) & 9 & wdens, wvol, wc2, wmom(3), jsink(3) \\
+4 & \texttt{grow\_bondi} & 7 & msink, vsink(3), dMBH\_coarse, dMEd\_coarse, dMsmbh \\
+5 & \texttt{grow\_jeans} & 4 & msink, vsink(3) \\
+6 & \texttt{AGN\_feedback} & 1 & Esave \\
+7 & \texttt{AGN\_blast} & 5 & vol\_gas, mass\_gas, mAGN, ZAGN, psy\_norm \\
+8 & \texttt{update\_sink} & dynamic & sink\_stat: $(n_\mathrm{levelmax} - n_\mathrm{levelmin} + 1) \times 7$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Preserved ALLREDUCE Calls}
+
+The following calls are \emph{not} replaced because they use different operations, data types, or dynamic sizes:
+
+\begin{itemize}[leftmargin=2em]
+  \item Scalar/integer reductions (\texttt{ntot}, \texttt{ntot\_sink\_cpu}, \texttt{numbp\_free})
+  \item \texttt{MPI\_INTEGER} reduction (\texttt{idsink\_new})
+  \item \texttt{MPI\_MIN} reduction (\texttt{dMsmbh\_new})
+  \item Dynamic-size mixed-type reductions (\texttt{x\_tmp}, \texttt{dens\_tmp}, \texttt{flag\_tmp})
+\end{itemize}
+
+\section{Verification}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Test} & \textbf{CPUs} & \textbf{econs} \\
+\midrule
+K-section & 12 & 7.65E-04 \\
+Hilbert fallback & 4 & 7.47E-04 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Both match pre-replacement values exactly.
+
+
+%======================================================
 \chapter{MPI\_ALLREDUCE Packing}
 \label{ch:allreduce-packing}
 %======================================================
@@ -2279,8 +2371,8 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{init\_part.f90} & Stream access particle IC \\
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
 \texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
-\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning + ALLREDUCE packing \\
-\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN ALLREDUCE packing \\
+\texttt{feedback.kjhan3.f90} & SNII feedback spatial binning, ksection exchange, ALLREDUCE packing \\
+\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN ALLREDUCE packing, ksection reduce-sum \\
 \midrule
 \multicolumn{2}{l}{\textit{patch/cuda/ (HDF5 I/O --- new files)}} \\
 \midrule
