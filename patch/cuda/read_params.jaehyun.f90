@@ -34,7 +34,7 @@ subroutine read_params
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
        & ,informat,outformat
   namelist/amr_params/levelmin,levelmax,ngridmax,ngridtot &
-       & ,npartmax,nparttot,nexpand,boxlen
+       & ,npartmax,nparttot,nexpand,boxlen,nsinkmax
   namelist/poisson_params/epsilon,gravity_type,gravity_params &
        & ,cg_levelmin,cic_levelmax
   namelist/lightcone_params/zmax_cone  &

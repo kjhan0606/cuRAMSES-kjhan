@@ -480,10 +480,12 @@ end subroutine getmem
 
 subroutine cmpmem(outmem)
   use amr_commons
+  use pm_commons, only: nsinkmax, npartmax, sink
   use hydro_commons
   implicit none
 
   real::outmem,outmem_int,outmem_dp,outmem_qdp
+  integer::nlevels
   outmem_int=0.0
   outmem_dp=0.0
   outmem_qdp=0.0
@@ -493,7 +495,7 @@ subroutine cmpmem(outmem)
   outmem_int=outmem_int+ngridmax           ! father
   outmem_int=outmem_int+ngridmax           ! next
   outmem_int=outmem_int+ngridmax           ! prev
-  outmem_int=outmem_int+ngridmax*twotondim ! son 
+  outmem_int=outmem_int+ngridmax*twotondim ! son
   outmem_int=outmem_int+ngridmax*twotondim ! flag1
   outmem_int=outmem_int+ngridmax*twotondim ! flag2
   outmem_int=outmem_int+ngridmax*twotondim ! cpu_map1
@@ -511,7 +513,7 @@ subroutine cmpmem(outmem)
   ! Add communicator variable here
 
   if(hydro)then
-     
+
   outmem_dp =outmem_dp +ngridmax*twotondim*nvar ! uold
   outmem_dp =outmem_dp +ngridmax*twotondim*nvar ! unew
 
@@ -523,6 +525,28 @@ subroutine cmpmem(outmem)
   endif
 
   endif
+
+  ! Sink particle arrays (if sink=.true.)
+  if(sink) then
+     nlevels = nlevelmax - levelmin + 1
+     ! 1D real(dp): 32 arrays x nsinkmax
+     outmem_dp = outmem_dp + 32 * nsinkmax
+     ! 2D real(dp): 15 arrays x nsinkmax x ndim
+     outmem_dp = outmem_dp + 15 * nsinkmax * ndim
+     ! 3D real(dp): 4 arrays x nsinkmax x ndim x nlevels
+     outmem_dp = outmem_dp + 4 * nsinkmax * ndim * nlevels
+     ! 2D real(dp): 4 arrays x nsinkmax x nlevelmax
+     outmem_dp = outmem_dp + 4 * nsinkmax * nlevelmax
+     ! 3D real(dp): 1 array x nsinkmax x nlevelmax x ndim
+     outmem_dp = outmem_dp + 1 * nsinkmax * nlevelmax * ndim
+     ! weightp: npartmax x twotondim
+     outmem_dp = outmem_dp + npartmax * twotondim
+     ! Integer: 5 arrays x nsinkmax
+     outmem_int = outmem_int + 5 * nsinkmax
+     ! Logical arrays (~1 byte each, counted approx as int/4)
+     outmem_int = outmem_int + 8 * nsinkmax / 4
+     outmem_int = outmem_int + 2 * nsinkmax * nlevels / 4
+  end if
 
   write(*,*)'Estimated memory=',(outmem_dp*8.+outmem_int*4.+outmem_qdp*8.)/1024./1024.
 

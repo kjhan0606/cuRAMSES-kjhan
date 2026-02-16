@@ -47,8 +47,8 @@ subroutine synchro_fine(ilevel)
   if(sink)then
      if(nsink>0)then
 #ifndef WITHOUTMPI
-        call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-        call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+        call MPI_ALLREDUCE(oksink_new,oksink_all,nsink     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+        call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsink*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
         oksink_all=oksink_new
         vsink_all=vsink_new
