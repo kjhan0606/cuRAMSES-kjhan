@@ -29,6 +29,7 @@ subroutine read_params
        & ,bisec_tol,static,geom,overload,cost_weighting,aton &
        & ,memory_balance,mem_weight_grid,mem_weight_part &
        & ,jobcontrolfile
+  namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
        & ,informat,outformat
@@ -168,6 +169,9 @@ subroutine read_params
   rewind(1)
   read(1,NML=poisson_params,END=81)
 81 continue
+  rewind(1)
+  read(1,NML=cosmo_params,END=80)
+80 continue
 
   !-------------------------------------------------
   ! Read optional nrestart command-line argument

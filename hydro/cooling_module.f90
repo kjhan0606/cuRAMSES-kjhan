@@ -1619,9 +1619,12 @@ end function heat_rad_courty
 !=======================================================================
 function HsurH0(z,omega0,omegaL,OmegaR)
 !=======================================================================
+  use amr_parameters, only: w0, wa
   implicit none
   real(kind=8) :: HsurH0,z,omega0,omegaL,omegaR
-  HsurH0=sqrt(Omega0*(1.d0+z)**3+OmegaR*(1.d0+z)**2+OmegaL)
+  real(kind=8) :: a, f_de
+  a = 1.0D0/(1.0D0+z)
+  HsurH0=sqrt(Omega0*(1.d0+z)**3+OmegaR*(1.d0+z)**2+OmegaL*f_de(a,w0,wa))
 end function HsurH0
 
 end module cooling_module

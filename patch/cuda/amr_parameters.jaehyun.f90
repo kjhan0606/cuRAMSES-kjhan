@@ -150,6 +150,9 @@ module amr_parameters
   real(dp)::omega_m=1.0D0     ! Omega Matter
   real(dp)::omega_l=0.0D0     ! Omega Lambda
   real(dp)::omega_k=0.0D0     ! Omega Curvature
+  real(dp)::w0    =-1.0D0     ! DE equation of state w0 (CPL: w=w0+wa*(1-a))
+  real(dp)::wa    = 0.0D0     ! DE equation of state wa (CPL)
+  real(dp)::cs2_de= 0.0D0     ! DE sound speed squared (c_s^2)
   real(dp)::h0     =1.0D0     ! Hubble constant in km/s/Mpc
   real(dp)::aexp   =1.0D0     ! Current expansion factor
   real(dp)::hexp   =0.0D0     ! Current Hubble parameter

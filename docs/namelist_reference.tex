@@ -1534,6 +1534,106 @@ centre and radius of the sphere.
 
 
 %======================================================================
+\section{\texttt{\&COSMO\_PARAMS} -- Cosmological Parameters}
+\label{sec:cosmo_params}
+%======================================================================
+
+Optional block for overriding cosmological parameters read from the
+IC file header and for specifying CPL dark energy equation-of-state
+parameters.  When this block is absent, default values are used
+($w_0=-1$, $w_a=0$, which recovers the standard $\Lambda$CDM model).
+
+% ------------------------------------------------------------------
+\paramheader{omega\_b}{real(dp)}{0.0}
+\label{param:cosmo_omega_b}
+
+\begin{quote}
+Baryon density parameter $\Omega_b$.  Overrides the value set by
+\texttt{\&PHYSICS\_PARAMS} or the IC header.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{omega\_m}{real(dp)}{1.0}
+\label{param:cosmo_omega_m}
+
+\begin{quote}
+Total matter density parameter $\Omega_m$.  Read from the IC header
+by default; this namelist entry overrides it.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{omega\_l}{real(dp)}{0.0}
+\label{param:cosmo_omega_l}
+
+\begin{quote}
+Dark energy density parameter $\Omega_{\mathrm{de}}$ (equivalent to
+$\Omega_\Lambda$ for $\Lambda$CDM).  Read from the IC header by
+default; this namelist entry overrides it.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{h0}{real(dp)}{1.0}
+\label{param:cosmo_h0}
+
+\begin{quote}
+Hubble constant $H_0$ in km\,s$^{-1}$\,Mpc$^{-1}$.  Read from the
+IC header by default; this namelist entry overrides it.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{w0}{real(dp)}{$-1$}
+\label{param:w0}
+
+\begin{quote}
+Present-day dark energy equation-of-state parameter $w_0$ in the CPL
+(Chevallier--Polarski--Linder) parametrization:
+\[
+  w(a) = w_0 + w_a\,(1 - a)
+\]
+where $a$ is the scale factor.
+
+Setting $w_0 = -1$ and $w_a = 0$ (the defaults) exactly recovers the
+cosmological constant $\Lambda$ (i.e.\ $\Lambda$CDM), producing
+\textbf{bit-identical} results to the code before the CPL extension.
+
+The dark energy density evolves as
+\[
+  \rho_{\mathrm{de}}(a) = \rho_{\mathrm{de},0}\;
+  a^{-3(1+w_0+w_a)}\;\exp\!\bigl[-3\,w_a\,(1-a)\bigr]
+\]
+This modifies the Friedmann equation, Hubble rate $H(a)$, linear
+growth factor $D_1(a)$, and growth rate $f(a)$.
+
+\apinote{$w_0$ and $w_a$ are \emph{not} stored in the GRAFIC2 IC
+header (which has a fixed 44-byte layout).  They must be specified
+in this namelist block.  MUSIC generates CPL transfer functions
+internally but does not write $w_0$, $w_a$ to its GRAFIC2 output.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{wa}{real(dp)}{0}
+\label{param:wa}
+
+\begin{quote}
+Time-variation parameter $w_a$ of the CPL dark energy equation of
+state.  See \paramref{w0} for the full parametrization.  Typical
+observational constraints give $w_a \in [-1, 1]$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{cs2\_de}{real(dp)}{0}
+\label{param:cs2_de}
+
+\begin{quote}
+Dark energy sound speed squared $c_s^2$ (in units of $c^2$).  This
+parameter is declared for future use in dark energy perturbation
+theory (clustering dark energy) but is \textbf{not yet used} in the
+current code.  Set to~0 for the standard smooth dark energy
+assumption.
+\end{quote}
+
+
+%======================================================================
 \section{Complete Example: Cosmological Zoom-In}
 \label{sec:example}
 %======================================================================

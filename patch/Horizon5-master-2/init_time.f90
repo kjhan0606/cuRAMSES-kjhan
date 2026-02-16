@@ -41,7 +41,7 @@ subroutine init_time
      if(myid==1)write(*,*)'Computing Friedman model'
      call friedman(dble(omega_m),dble(omega_l),dble(omega_k), &
           & 1.d-6,dble(aexp_ini), &
-          & aexp_frw,hexp_frw,tau_frw,t_frw,n_frw)
+          & aexp_frw,hexp_frw,tau_frw,t_frw,n_frw,dble(w0),dble(wa))
 
      ! Compute initial conformal time                                    
      ! Find neighboring expansion factors                                  
@@ -298,10 +298,11 @@ subroutine init_cosmo
   character(LEN=80)::filename
   character(LEN=5)::nchar
   logical::ok
-  TYPE(gadgetheadertype) :: gadgetheader 
+  TYPE(gadgetheadertype) :: gadgetheader
   integer::i
   integer,parameter::tag=1117
   integer::dummy_io,info2
+  real(kind=8)::f_de  ! CPL dark energy density ratio (external function)
 
   if(verbose)write(*,*)'Entering init_cosmo'
 
@@ -451,6 +452,9 @@ subroutine init_cosmo
      write(*,'(" aexp=",1pe10.3," H0=",1pe10.3," km s-1 Mpc-1")')aexp,h0
      write(*,'(" omega_m=",F7.3," omega_l=",F7.3)')omega_m,omega_l
      write(*,'(" box size=",1pe10.3," h-1 Mpc")')boxlen_ini
+     if(w0 /= -1.0D0 .or. wa /= 0.0D0) then
+        write(*,'(" CPL Dark Energy: w0=",F7.3," wa=",F7.3," cs2_de=",1pe10.3)')w0,wa,cs2_de
+     end if
   end if
   omega_k=1.d0-omega_l-omega_m
            
@@ -458,7 +462,7 @@ subroutine init_cosmo
   do ilevel=levelmin,nlevelmax_part
      dfact(ilevel)=d1a(aexp)/d1a(astart(ilevel))
      vfact(ilevel)=astart(ilevel)*fpeebl(astart(ilevel)) & ! Same scale factor as in grafic1
-          & *sqrt(omega_m/astart(ilevel)+omega_l*astart(ilevel)*astart(ilevel)+omega_k) &
+          & *sqrt(omega_m/astart(ilevel)+omega_l*f_de(astart(ilevel),w0,wa)*astart(ilevel)*astart(ilevel)+omega_k) &
           & /astart(ilevel)*h0
   end do
 
@@ -493,7 +497,7 @@ subroutine init_cosmo
 
   ! Scale displacement in Mpc to code velocity (v=dx/dtau)
   ! in coarse cell units per conformal time
-  vfact(1)=aexp*fpeebl(aexp)*sqrt(omega_m/aexp+omega_l*aexp*aexp+omega_k)
+  vfact(1)=aexp*fpeebl(aexp)*sqrt(omega_m/aexp+omega_l*f_de(aexp,w0,wa)*aexp*aexp+omega_k)
   ! This scale factor is different from vfact in grafic by h0/aexp
 
 contains
@@ -504,10 +508,11 @@ contains
     !      Computes the integrand
     real(dp)::fy
     real(dp)::y,a
-    
-    y=omega_m*(1.d0/a-1.d0) + omega_l*(a*a-1.d0) + 1.d0
+    real(dp)::f_de
+
+    y=omega_m/a + omega_k + omega_l*f_de(a,w0,wa)*a*a
     fy=1.d0/y**1.5d0
-    
+
     return
   end function fy
   !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -517,20 +522,21 @@ contains
     !     Computes the linear growing mode D1 in a Friedmann-Robertson-Walker
     !     universe. See Peebles LSSU sections 11 and 14.
     real(dp)::a,y12,y,eps
-    
+    real(dp)::f_de
+
     eps=1.0d-6
     if(a .le. 0.0d0)then
        write(*,*)'a=',a
        call clean_stop
     end if
-    y=omega_m*(1.d0/a-1.d0) + omega_l*(a*a-1.d0) + 1.d0
+    y=omega_m/a + omega_k + omega_l*f_de(a,w0,wa)*a*a
     if(y .lt. 0.0D0)then
        write(*,*)'y=',y
        call clean_stop
     end if
     y12=y**0.5d0
     d1a=y12/a*rombint(eps,a,eps)
-    
+
     return
   end function d1a
   !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -558,11 +564,15 @@ contains
     real(dp) :: fpeebl,a
     !     Computes the growth factor f=d\log D1/d\log a.
     real(dp) :: fact,y,eps
-    
+    real(dp) :: f_de
+    real(dp) :: wa_eff, dyda
+
     eps=1.0d-6
-    y=omega_m*(1.d0/a-1.d0) + omega_l*(a*a-1.d0) + 1.d0
+    y=omega_m/a + omega_k + omega_l*f_de(a,w0,wa)*a*a
     fact=rombint(eps,a,eps)
-    fpeebl=(omega_l*a*a-0.5d0*omega_m/a)/y - 1.d0 + a*fy(a)/fact
+    wa_eff = w0 + wa*(1.d0-a)
+    dyda = -omega_m/a + omega_l*a*a*f_de(a,w0,wa)*(-1.d0-3.d0*wa_eff)
+    fpeebl = 0.5d0*dyda/y - 1.d0 + a*fy(a)/fact
     return
   end function fpeebl
   !cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
@@ -628,12 +638,13 @@ contains
 end subroutine init_cosmo
 
 subroutine friedman(O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
-     & axp_out,hexp_out,tau_out,t_out,ntable)
+     & axp_out,hexp_out,tau_out,t_out,ntable,w0_in,wa_in)
   use amr_parameters
   implicit none
   integer::ntable
   real(kind=8)::O_mat_0, O_vac_0, O_k_0
   real(kind=8)::alpha,axp_min
+  real(kind=8)::w0_in, wa_in
   real(dp),dimension(0:ntable)::axp_out,hexp_out,tau_out,t_out
   ! ######################################################!
   ! This subroutine assumes that axp = 1 at z = 0 (today) !
@@ -669,14 +680,14 @@ subroutine friedman(O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
   do while ( (axp_tau .ge. axp_min) .or. (axp_t .ge. axp_min) ) 
      
      nstep = nstep + 1
-     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)
-     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)*dtau/2.d0
-     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0)*dtau
+     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dtau/2.d0
+     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dtau
      tau = tau - dtau
      
-     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
-     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0)*dt/2.d0
-     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0)*dt
+     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dt/2.d0
+     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dt
      t = t - dt
      
   end do
@@ -695,19 +706,19 @@ subroutine friedman(O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
   t_out(nout)=t
   tau_out(nout)=tau
   axp_out(nout)=axp_tau
-  hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+  hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)/axp_tau
 
   do while ( (axp_tau .ge. axp_min) .or. (axp_t .ge. axp_min) ) 
      
      nstep = nstep + 1
-     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)
-     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)*dtau/2.d0
-     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0)*dtau
+     dtau = alpha * axp_tau / dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+     axp_tau_pre = axp_tau - dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dtau/2.d0
+     axp_tau = axp_tau - dadtau(axp_tau_pre,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dtau
      tau = tau - dtau
 
-     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
-     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0)*dt/2.d0
-     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0)*dt
+     dt = alpha * axp_t / dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+     axp_t_pre = axp_t - dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dt/2.d0
+     axp_t = axp_t - dadt(axp_t_pre,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)*dt
      t = t - dt
      
      if(mod(nstep,nskip)==0)then
@@ -715,38 +726,55 @@ subroutine friedman(O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
         t_out(nout)=t
         tau_out(nout)=tau
         axp_out(nout)=axp_tau
-        hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+        hexp_out(nout)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)/axp_tau
      end if
 
   end do
   t_out(ntable)=t
   tau_out(ntable)=tau
   axp_out(ntable)=axp_tau
-  hexp_out(ntable)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0)/axp_tau
+  hexp_out(ntable)=dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)/axp_tau
 
 end subroutine friedman
 
-function dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0) 
-  use amr_parameters
-  real(kind=8)::dadtau,axp_tau,O_mat_0,O_vac_0,O_k_0
+function dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+  use amr_parameters, only: dp
+  real(kind=8)::dadtau,axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in
+  real(kind=8)::f_de
   dadtau = axp_tau*axp_tau*axp_tau *  &
        &   ( O_mat_0 + &
-       &     O_vac_0 * axp_tau*axp_tau*axp_tau + &
+       &     O_vac_0 * axp_tau*axp_tau*axp_tau * f_de(axp_tau,w0_in,wa_in) + &
        &     O_k_0   * axp_tau )
   dadtau = sqrt(dadtau)
   return
 end function dadtau
 
-function dadt(axp_t,O_mat_0,O_vac_0,O_k_0)
-  use amr_parameters
-  real(kind=8)::dadt,axp_t,O_mat_0,O_vac_0,O_k_0
+function dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
+  use amr_parameters, only: dp
+  real(kind=8)::dadt,axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in
+  real(kind=8)::f_de
   dadt   = (1.0D0/axp_t)* &
        &   ( O_mat_0 + &
-       &     O_vac_0 * axp_t*axp_t*axp_t + &
+       &     O_vac_0 * axp_t*axp_t*axp_t * f_de(axp_t,w0_in,wa_in) + &
        &     O_k_0   * axp_t )
   dadt = sqrt(dadt)
   return
 end function dadt
+
+function f_de(a, w0_in, wa_in)
+  ! CPL dark energy density ratio: rho_de(a)/rho_de(1)
+  ! f_de = a^{-3(1+w0+wa)} * exp(-3*wa*(1-a))
+  ! LCDM: w0=-1, wa=0 => f_de=1
+  use amr_parameters, only: dp
+  real(kind=8) :: f_de, a, w0_in, wa_in
+  if (wa_in == 0.0D0 .and. w0_in == -1.0D0) then
+     f_de = 1.0D0
+  else if (wa_in == 0.0D0) then
+     f_de = a**(-3.0D0*(1.0D0+w0_in))
+  else
+     f_de = a**(-3.0D0*(1.0D0+w0_in+wa_in)) * exp(-3.0D0*wa_in*(1.0D0-a))
+  end if
+end function f_de
 
 
 

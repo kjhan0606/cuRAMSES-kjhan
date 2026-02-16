@@ -331,12 +331,12 @@ Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the 
   \item \textbf{Level~2 ($k_2=2$)}: Each slab is bisected along the $y$-axis, producing 6 subdomains.
   \item \textbf{Level~3 ($k_3=2$)}: Each subdomain is bisected along the $z$-axis, yielding the final 12 subdomains.
 \end{enumerate}
-The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain.  The color hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions, respectively.
+The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain, resulting in non-uniform subdomain volumes that reflect the local workload.  The color hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions, respectively.
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{ksection_progressive.png}
-\caption{Progressive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs.  \textbf{Left}: first split into 3 slabs along $x$.  \textbf{Center}: each slab bisected along $y$ ($3 \times 2 = 6$ subdomains).  \textbf{Right}: final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains).  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
+\caption{Progressive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs with non-uniform split positions.  \textbf{Left}: first split into 3 slabs along $x$ with unequal widths.  \textbf{Center}: each slab bisected along $y$ at load-dependent positions ($3 \times 2 = 6$ subdomains).  \textbf{Right}: final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains).  Subdomain volumes vary by ${\sim}10$--$30\%$, reflecting load-balanced wall placement.  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
 \label{fig:ksection_progressive}
 \end{figure}
 
@@ -1641,6 +1641,118 @@ Total               & 10.09 & 100.0 \\
 H2D transfer dominates at 50\% of GPU time, indicating that further optimization via GPU-side gather (uploading mesh arrays once and using stencil indices instead of full $6^3$ stencils) would yield significant additional speedup.
 
 
+%======================================================
+\chapter{CPL Dark Energy}
+\label{ch:cpl}
+%======================================================
+
+cuRAMSES supports the CPL (Chevallier--Polarski--Linder) parametrization of dark energy \cite{Chevallier2001,Linder2003}, generalizing the cosmological constant $\Lambda$ to a time-varying equation of state:
+\begin{equation}\label{eq:cpl_w}
+  w(a) = w_0 + w_a\,(1 - a),
+\end{equation}
+where $a$ is the scale factor, $w_0$ is the present-day value, and $w_a$ governs the time variation.  The standard $\Lambda$CDM model corresponds to $w_0 = -1$, $w_a = 0$.
+
+\section{Background Cosmology}
+
+The dark energy density evolves as
+\begin{equation}\label{eq:f_de}
+  \frac{\rho_{\mathrm{de}}(a)}{\rho_{\mathrm{de},0}}
+  \equiv f_{\mathrm{de}}(a)
+  = a^{-3(1+w_0+w_a)}\;\exp\!\bigl[-3\,w_a\,(1-a)\bigr].
+\end{equation}
+For $\Lambda$CDM ($w_0=-1$, $w_a=0$), $f_{\mathrm{de}}(a) = 1$ identically, recovering the constant dark energy density.
+
+The Friedmann equation becomes
+\begin{equation}\label{eq:friedmann_cpl}
+  \frac{H^2(a)}{H_0^2}
+  = \frac{\Omega_m}{a^3} + \frac{\Omega_k}{a^2}
+    + \Omega_{\mathrm{de}}\;f_{\mathrm{de}}(a),
+\end{equation}
+where $\Omega_k = 1 - \Omega_m - \Omega_{\mathrm{de}}$.
+
+\section{Modified Functions}
+
+The following functions in \texttt{init\_time.f90} are modified:
+
+\begin{itemize}[nosep]
+  \item \textbf{\texttt{f\_de(a, w0\_in, wa\_in)}}: New standalone function implementing Eq.~\eqref{eq:f_de}.  Uses exact $f_{\mathrm{de}}=1$ branch for $\Lambda$CDM to guarantee bit-identical results.
+
+  \item \textbf{\texttt{dadtau(axp\_tau, ..., w0\_in, wa\_in)}}: Conformal time derivative $da/d\tau$.  The dark energy term $\Omega_{\mathrm{de}}\,a^6$ is replaced by $\Omega_{\mathrm{de}}\,a^6\,f_{\mathrm{de}}(a)$:
+  \begin{equation}
+    \left(\frac{da}{d\tau}\right)^2 = a^3\!\left[\Omega_m + \Omega_{\mathrm{de}}\,a^3\,f_{\mathrm{de}}(a) + \Omega_k\,a\right].
+  \end{equation}
+
+  \item \textbf{\texttt{dadt(axp\_t, ..., w0\_in, wa\_in)}}: Proper time derivative $da/dt$, with the same CPL modification.
+
+  \item \textbf{\texttt{friedman(..., w0\_in, wa\_in)}}: Friedmann integrator that builds the look-up tables $a(\tau)$, $H(\tau)$, $t(\tau)$.  The extra $w_0$, $w_a$ parameters are passed through to \texttt{dadtau}/\texttt{dadt}.
+\end{itemize}
+
+\section{Linear Growth Factor}
+
+The linear growing mode $D_1(a)$ and the growth rate $f = d\ln D_1/d\ln a$ (Peebles~\cite{Peebles1980}) are generalized using
+\begin{equation}\label{eq:y_cpl}
+  y(a) \equiv (aH/H_0)^2 = \frac{\Omega_m}{a} + \Omega_k + \Omega_{\mathrm{de}}\,f_{\mathrm{de}}(a)\,a^2.
+\end{equation}
+The growth factor is computed via Romberg integration:
+\[
+  D_1(a) = \frac{\sqrt{y(a)}}{a}\int_0^a \frac{da'}{y(a')^{3/2}},
+\]
+and the growth rate requires the logarithmic derivative:
+\begin{equation}\label{eq:dyda}
+  \frac{dy}{d\ln a} = -\frac{\Omega_m}{a}
+    + \Omega_{\mathrm{de}}\,a^2\,f_{\mathrm{de}}(a)\,\bigl[-1 - 3\,w(a)\bigr],
+\end{equation}
+so that
+\[
+  f(a) = \frac{1}{2}\frac{dy/d\!\ln a}{y} - 1
+    + \frac{a}{y^{3/2}\!\int_0^a da'/y^{3/2}}.
+\]
+These are implemented in the \texttt{contains} functions of \texttt{init\_cosmo}: \texttt{fy(a)}, \texttt{d1a(a)}, and \texttt{fpeebl(a)}.
+
+\paragraph{$\Lambda$CDM verification.}
+For $w_0=-1$, $w_a=0$: $f_{\mathrm{de}}=1$, $w(a)=-1$, and $-1-3w=-1-3(-1)=2$, giving
+\[
+  \frac{dy}{d\ln a}\Big|_{\Lambda\mathrm{CDM}} = -\frac{\Omega_m}{a} + 2\,\Omega_\Lambda\,a^2,
+\]
+which recovers the original RAMSES expression $(\Omega_\Lambda a^2 - \tfrac{1}{2}\Omega_m/a)/y$.
+
+\section{Hubble Rate in Cooling Module}
+
+The function \texttt{HsurH0(z)} in \texttt{cooling\_module.f90} is modified to include $f_{\mathrm{de}}$:
+\begin{equation}
+  H(z)/H_0 = \sqrt{\Omega_m\,(1+z)^3 + \Omega_R\,(1+z)^2 + \Omega_{\mathrm{de}}\,f_{\mathrm{de}}(a)},
+  \qquad a = \frac{1}{1+z}.
+\end{equation}
+This ensures that cooling rates computed from the UV background evolve consistently with the CPL cosmology.
+
+\section{Namelist Configuration}
+
+CPL parameters are specified in the \texttt{\&COSMO\_PARAMS} namelist block:
+\begin{codebox}[CPL dark energy example]
+\begin{lstlisting}[style=fortran,numbers=none]
+&COSMO_PARAMS
+w0    = -0.9
+wa    =  0.1
+/
+\end{lstlisting}
+\end{codebox}
+When this block is absent (or when $w_0 = -1$, $w_a = 0$), the code produces results that are bit-identical to the original $\Lambda$CDM implementation.
+
+\section{Modified Files}
+
+\begin{longtable}{L{6.5cm} L{7cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\endhead
+\texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{w0}, \texttt{wa}, \texttt{cs2\_de} \\
+\texttt{read\_params.jaehyun.f90} & Define and read \texttt{\&COSMO\_PARAMS} namelist \\
+\texttt{init\_time.f90} & Add \texttt{f\_de}; modify \texttt{dadtau}, \texttt{dadt}, \texttt{friedman}, \texttt{fy}, \texttt{d1a}, \texttt{fpeebl}, \texttt{vfact} \\
+\texttt{cooling\_module.f90} & Modify \texttt{HsurH0} to use \texttt{f\_de} \\
+\bottomrule
+\end{longtable}
+
+
 %------------------------------------------------------
 % PART II: Namelist Reference
 %------------------------------------------------------
@@ -1868,6 +1980,9 @@ Subgrid physics parameters (star formation, feedback, cooling).
 \texttt{omega\_m} & real(dp) & 1.0 & Matter density $\Omega_m$ \\
 \texttt{omega\_l} & real(dp) & 0.0 & Dark energy $\Omega_\Lambda$ \\
 \texttt{h0} & real(dp) & 1.0 & Hubble constant $H_0$ (km/s/Mpc) \\
+\texttt{w0} & real(dp) & $-1$ & CPL DE equation of state $w_0$ (see Ch.~\ref{ch:cpl}) \\
+\texttt{wa} & real(dp) & 0 & CPL DE time variation $w_a$ \\
+\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared (reserved) \\
 \midrule
 \multicolumn{4}{l}{\textit{Feedback}} \\
 \midrule
@@ -1876,6 +1991,43 @@ Subgrid physics parameters (star formation, feedback, cooling).
 \texttt{yield\-table\-filename} & char & --- & Yield table file path \\
 \bottomrule
 \end{longtable}
+
+
+%======================================================
+\chapter{COSMO\_PARAMS}
+\label{ch:cosmo_params_nml}
+%======================================================
+
+Optional block for CPL dark energy equation-of-state parameters and
+cosmological parameter overrides.  When absent, defaults recover
+$\Lambda$CDM.  See Chapter~\ref{ch:cpl} for the full mathematical
+description.
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{omega\_b} & real(dp) & 0.0 & Baryon density $\Omega_b$ \\
+\texttt{omega\_m} & real(dp) & 1.0 & Matter density $\Omega_m$ \\
+\texttt{omega\_l} & real(dp) & 0.0 & Dark energy density $\Omega_{\mathrm{de}}$ \\
+\texttt{h0} & real(dp) & 1.0 & Hubble constant $H_0$ (km/s/Mpc) \\
+\midrule
+\multicolumn{4}{l}{\textit{CPL dark energy (new)}} \\
+\midrule
+\texttt{w0} & real(dp) & $-1$ & Present-day DE EoS: $w(a) = w_0 + w_a(1-a)$ \\
+\texttt{wa} & real(dp) & 0 & Time variation of DE EoS \\
+\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (reserved for future use) \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item $w_0$, $w_a$ are not stored in the GRAFIC2 IC header (fixed 44-byte layout).  They must be specified here when using CPL dark energy.
+  \item Setting $w_0=-1$, $w_a=0$ (or omitting the block) produces results \textbf{bit-identical} to the original $\Lambda$CDM code.
+  \item The cosmological parameters (\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, \texttt{h0}) in this block override values read from the IC header.
+\end{itemize}
 
 
 %======================================================
