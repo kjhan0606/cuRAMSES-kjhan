@@ -1016,7 +1016,7 @@ subroutine load_gadget
      allparticles=int(gadgetheader%nparttotal(2),kind=8)
 #else
      allparticles=int(gadgetheader%nparttotal(2),kind=8) &
-          & +int(gadgetheader%totalhighword(2),kind=8)*4294967296 !2^32
+          & +int(gadgetheader%totalhighword(2),kind=8)*4294967296_8 !2^32
 #endif
      massparticles=1d0/dble(allparticles)
      do ifile=0,numfiles-1

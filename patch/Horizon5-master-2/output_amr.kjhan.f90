@@ -606,7 +606,7 @@ subroutine savegadget(filename)
 #ifndef LONGINT
   header%nparttotal(2) = npart_tot
 #else
-  header%nparttotal(2) = MOD(npart_tot,4294967296)
+  header%nparttotal(2) = MOD(npart_tot,4294967296_8)
 #endif
   header%flag_cooling = 0
   header%numfiles = ncpu
@@ -620,7 +620,7 @@ subroutine savegadget(filename)
 #ifndef LONGINT
   header%totalhighword(2) = 0
 #else
-  header%totalhighword(2) = npart_tot/4294967296
+  header%totalhighword(2) = npart_tot/4294967296_8
 #endif
   header%flag_entropy_instead_u = 0
   header%flag_doubleprecision = 0

@@ -22,8 +22,10 @@ subroutine create_sink
   integer::ilevel,ivar,info,icpu,igrid,npartbound,isink,nelvelmax_loc
   real(dp)::dx_min,vol_min,dx,dx_temp
   integer::nx_loc
+  real(dp)::cs_t0,cs_t1,cs_t2,cs_t3,cs_t4,cs_t5,cs_t6,cs_t7,cs_t8
 
   if(verbose)write(*,*)' Entering create_sink'
+  if(myid==1) cs_t0 = MPI_WTIME(info)
   ! Remove particles to finer levels
   do ilevel=levelmin,nlevelmax
      call kill_tree_fine(ilevel)
@@ -46,6 +48,7 @@ subroutine create_sink
 !############################# CONFIRMED ####################
   ! Create new sink particles
   ! and gather particle from the grid
+  if(myid==1) cs_t1 = MPI_WTIME(info)
   call kjhan_make_sink(nlevelmax)
 !  call org_make_sink(nlevelmax)
   do ilevel=nlevelmax-1,1,-1
@@ -56,6 +59,7 @@ subroutine create_sink
 
 !#########################################
 !############################# CONFIRMED ####################
+  if(myid==1) cs_t2 = MPI_WTIME(info)
   ! Remove particle clouds around old sinks
   call kjhan_kill_cloud(1)
 ! call org_kill_cloud(1)
@@ -63,6 +67,7 @@ subroutine create_sink
 
 !#########################################
 !############################# CONFIRMED ####################
+  if(myid==1) cs_t3 = MPI_WTIME(info)
   ! update sink position before merging sinks and creating clouds
   call kjhan_update_sink_position_velocity
 ! call org_update_sink_position_velocity
@@ -71,12 +76,14 @@ subroutine create_sink
 !#########################################
 !############################# FAILED ####################
   ! Merge sink using FOF
+  if(myid==1) cs_t4 = MPI_WTIME(info)
    call merge_sink(1)
 !  call org_merge_sink(1)
 !#########################################
 
 !#########################################
 !############################# CONFIRMED ####################
+  if(myid==1) cs_t5 = MPI_WTIME(info)
   ! Create new particle clouds
   call kjhan_create_cloud(1)
 ! call org_create_cloud(1)
@@ -105,6 +112,7 @@ subroutine create_sink
      end do
   end if
 
+  if(myid==1) cs_t6 = MPI_WTIME(info)
   jsink=0d0
   ! Compute Bondi parameters and gather particle
   do ilevel=nlevelmax,levelmin,-1
@@ -115,6 +123,19 @@ subroutine create_sink
 !#########################################
      call merge_tree_fine(ilevel)
   end do
+
+  if(myid==1) then
+     cs_t7 = MPI_WTIME(info)
+     write(*,'(A)') ' ---- create_sink timing breakdown ----'
+     write(*,'(A,F10.3,A)') '  get_rho_star  :', cs_t1-cs_t0, ' s'
+     write(*,'(A,F10.3,A)') '  make_sink     :', cs_t2-cs_t1, ' s'
+     write(*,'(A,F10.3,A)') '  kill+upd_pos  :', cs_t4-cs_t2, ' s'
+     write(*,'(A,F10.3,A)') '  merge_sink    :', cs_t5-cs_t4, ' s'
+     write(*,'(A,F10.3,A)') '  create_cloud  :', cs_t6-cs_t5, ' s'
+     write(*,'(A,F10.3,A)') '  bondi_hoyle   :', cs_t7-cs_t6, ' s'
+     write(*,'(A,F10.3,A)') '  TOTAL         :', cs_t7-cs_t0, ' s'
+     write(*,'(A)') ' --------------------------------------'
+  endif
 
 end subroutine create_sink
 !################################################################
@@ -5216,6 +5237,10 @@ subroutine AGN_feedback
      endif
   endif
 
+  if(TRIM(ordering)=='ksection') then
+     call AGN_feedback_ksec()
+  else
+
   ! Get only AGN that are in my CPU or close to the border of my cpu (huge speed-up!)
   call kjhan_getAGNonmyid(itemp,nAGN)
 
@@ -5269,7 +5294,7 @@ subroutine AGN_feedback
 
   ! Compute some averaged quantities before doing the AGN energy input
   call average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-       & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN)
+       & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN)
 
   ! Check if AGN goes into thermal blast wave mode
 !!$omp parallel do private(iAGN, temp_blast)
@@ -5317,11 +5342,7 @@ subroutine AGN_feedback
      isink=iAGN_myid(iAGN)
      Esave_new(isink)=EsaveAGN(iAGN)
   enddo
-  if(TRIM(ordering)=='ksection') then
-     call sink_ksec_reduce_sum(Esave_new, Esave_all, 1, nsink)
-  else
-     call MPI_ALLREDUCE(Esave_new,Esave_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  end if
+  call MPI_ALLREDUCE(Esave_new,Esave_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   Esave= Esave_all
 #else
   Esave=EsaveAGN
@@ -5333,6 +5354,8 @@ subroutine AGN_feedback
   deallocate(xAGN,vAGN,mAGN,ZAGN,jAGN)
   deallocate(iAGN_myid,ok_blast_agn,dMBH_AGN,dMEd_AGN,dMsmbh_AGN,Msmbh,EsaveAGN)
   deallocate(spinmagAGN,eps_AGN)
+
+  endif ! ordering=='ksection'
 
   ! Update hydro quantities for split cells
   do ilevel=nlevelmax,levelmin,-1
@@ -5357,8 +5380,499 @@ end subroutine AGN_feedback
 !################################################################
 !################################################################
 !################################################################
+subroutine AGN_feedback_ksec()
+  !----------------------------------------------------------------------
+  ! 3-stage ksection exchange for AGN feedback (replaces ALLREDUCE path)
+  ! Exchange 1: Owner → neighbors (sink properties via overlap)
+  ! Exchange 2: Neighbors → owner (cell contributions via exclusive)
+  ! Exchange 3: Owner → neighbors (blast parameters via overlap)
+  !----------------------------------------------------------------------
+  use amr_commons
+  use pm_commons
+  use hydro_commons
+  use ksection, only: ksection_exchange_dp, ksection_exchange_dp_overlap, cmp_ksection_cpumap
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer :: isink, iAGN, nAGN, nown, j, k, info, idx
+  integer :: nprops_ex1, nprops_ex2, nprops_ex3
+  integer :: nrecv_ex1, nrecv_ex2, nrecv_ex3
+  integer :: ncontrib, owner_cpu_val, owner_idx_val
+  real(dp) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
+  real(dp) :: dx_min, scale, rmax, Mfrac, temp_blast
+  integer :: nx_loc
+  logical :: ok_jet, ok_blast_val
+  real(dp) :: tt0, tt1, tt2, tt3, tt4, tt5, tt6, tt7
+
+  ! Exchange buffers
+  real(dp), allocatable :: sendbuf_ex1(:,:), recvbuf_ex1(:,:)
+  real(dp), allocatable :: xmin_ex1(:,:), xmax_ex1(:,:)
+  real(dp), allocatable :: sendbuf_ex2(:,:), recvbuf_ex2(:,:)
+  integer, allocatable :: dest_cpu_ex2(:)
+  real(dp), allocatable :: sendbuf_ex3(:,:), recvbuf_ex3(:,:)
+  real(dp), allocatable :: xmin_ex3(:,:), xmax_ex3(:,:)
+
+  ! Local AGN arrays (from Exchange 1)
+  real(dp), allocatable :: xAGN(:,:), vAGN(:,:), jAGN(:,:)
+  real(dp), allocatable :: dMBH_AGN(:), dMEd_AGN(:), dMsmbh_AGN(:)
+  real(dp), allocatable :: Msmbh_loc(:), EsaveAGN(:), spinmagAGN(:), eps_AGN(:)
+  real(dp), allocatable :: mAGN(:), ZAGN(:), vol_gas(:), mass_gas(:)
+  real(dp), allocatable :: psy_norm(:), vol_blast(:), mass_blast(:)
+  integer, allocatable :: ind_blast(:), iAGN_myid(:)
+  logical, allocatable :: ok_blast_agn(:)
+  integer, allocatable :: owner_cpu_arr(:), owner_idx_arr(:), isink_arr(:)
+
+  ! Saved from Exchange 1 processing (for ind_blast lookup)
+  integer, allocatable :: ind_blast_ex1(:), owner_cpu_ex1(:), owner_idx_ex1(:)
+  integer :: nSN_ex1
+
+  ! Owner aggregation arrays
+  real(dp), allocatable :: vol_gas_agg(:), mass_gas_agg(:), psy_norm_agg(:)
+  real(dp), allocatable :: mAGN_agg(:), ZAGN_agg(:)
+  real(dp), allocatable :: vol_blast_agg(:), mass_blast_agg(:)
+  integer, allocatable :: blast_center_cpu_agg(:), isink_own(:)
+  integer, allocatable :: sink_owner(:)
+  integer, allocatable :: blast_center_cpu_arr(:)
+
+  ! -----------------------------------------------
+  ! Conversion factors and mesh parameters
+  ! -----------------------------------------------
+  if(myid==1) tt0 = MPI_WTIME(info)
+  call units(scale_l, scale_t, scale_d, scale_v, scale_nH, scale_T2)
+  nx_loc = (icoarse_max - icoarse_min + 1)
+  scale = boxlen / dble(nx_loc)
+  dx_min = scale * 0.5D0**nlevelmax
+  rmax = MAX(1d0*dx_min*scale_l/aexp, rAGN*3.08d21) / scale_l
+
+  ! -----------------------------------------------
+  ! EXCHANGE 1: Owner → neighbors (overlap)
+  ! -----------------------------------------------
+  allocate(sink_owner(1:nsink))
+  call cmp_ksection_cpumap(xsink, sink_owner, nsink)
+
+  ! Count owned sinks
+  nown = 0
+  do isink = 1, nsink
+     if(sink_owner(isink) == myid) nown = nown + 1
+  enddo
+
+  ! Pack owned sinks (nprops_ex1 = 20)
+  nprops_ex1 = 20
+  allocate(sendbuf_ex1(1:nprops_ex1, 1:max(1,nown)))
+  allocate(xmin_ex1(1:ndim, 1:max(1,nown)))
+  allocate(xmax_ex1(1:ndim, 1:max(1,nown)))
+  allocate(isink_own(1:max(1,nown)))
+
+  j = 0
+  do isink = 1, nsink
+     if(sink_owner(isink) == myid) then
+        j = j + 1
+        isink_own(j) = isink
+
+        ! Check jet condition (owner determines this)
+        ok_jet = .false.
+        if(dMEd_coarse(isink) > 0d0) then
+           if(dMBH_coarse(isink)/dMEd_coarse(isink) < X_floor &
+                & .and. Esave(isink) == 0d0) then
+              Mfrac = dMsmbh(isink) / (msink(isink) - dMsmbh(isink))
+              if(Mfrac >= jetfrac) ok_jet = .true.
+           endif
+        endif
+
+        sendbuf_ex1(1,j)  = xsink(isink,1)
+        sendbuf_ex1(2,j)  = xsink(isink,2)
+        sendbuf_ex1(3,j)  = xsink(isink,3)
+        sendbuf_ex1(4,j)  = vsink(isink,1)
+        sendbuf_ex1(5,j)  = vsink(isink,2)
+        sendbuf_ex1(6,j)  = vsink(isink,3)
+        if(spin_bh) then
+           sendbuf_ex1(7,j)  = bhspin(isink,1)
+           sendbuf_ex1(8,j)  = bhspin(isink,2)
+           sendbuf_ex1(9,j)  = bhspin(isink,3)
+        else
+           sendbuf_ex1(7,j)  = jsink(isink,1)
+           sendbuf_ex1(8,j)  = jsink(isink,2)
+           sendbuf_ex1(9,j)  = jsink(isink,3)
+        endif
+        sendbuf_ex1(10,j) = dMBH_coarse(isink)
+        sendbuf_ex1(11,j) = dMEd_coarse(isink)
+        sendbuf_ex1(12,j) = dMsmbh(isink)
+        sendbuf_ex1(13,j) = msink(isink)
+        sendbuf_ex1(14,j) = Esave(isink)
+        sendbuf_ex1(15,j) = spinmag(isink)
+        sendbuf_ex1(16,j) = eps_sink(isink)
+        if(ok_jet) then
+           sendbuf_ex1(17,j) = 1d0
+        else
+           sendbuf_ex1(17,j) = 0d0
+        endif
+        sendbuf_ex1(18,j) = dble(myid)
+        sendbuf_ex1(19,j) = dble(j)      ! owner_local_idx
+        sendbuf_ex1(20,j) = dble(isink)   ! global sink index
+
+        xmin_ex1(1,j) = xsink(isink,1) - rmax
+        xmin_ex1(2,j) = xsink(isink,2) - rmax
+        xmin_ex1(3,j) = xsink(isink,3) - rmax
+        xmax_ex1(1,j) = xsink(isink,1) + rmax
+        xmax_ex1(2,j) = xsink(isink,2) + rmax
+        xmax_ex1(3,j) = xsink(isink,3) + rmax
+     endif
+  enddo
+
+  if(myid==1) tt1 = MPI_WTIME(info)
+  call ksection_exchange_dp_overlap(sendbuf_ex1, nown, xmin_ex1, xmax_ex1, &
+       nprops_ex1, recvbuf_ex1, nrecv_ex1, periodic=.true.)
+  deallocate(xmin_ex1, xmax_ex1)
+  if(myid==1) tt2 = MPI_WTIME(info)
+
+  ! -----------------------------------------------
+  ! Unpack Exchange 1 → local AGN arrays
+  ! -----------------------------------------------
+  nAGN = nrecv_ex1
+  allocate(xAGN(1:max(1,nAGN),1:3), vAGN(1:max(1,nAGN),1:3), jAGN(1:max(1,nAGN),1:3))
+  allocate(dMBH_AGN(1:max(1,nAGN)), dMEd_AGN(1:max(1,nAGN)), dMsmbh_AGN(1:max(1,nAGN)))
+  allocate(Msmbh_loc(1:max(1,nAGN)), EsaveAGN(1:max(1,nAGN)))
+  allocate(spinmagAGN(1:max(1,nAGN)), eps_AGN(1:max(1,nAGN)))
+  allocate(ok_blast_agn(1:max(1,nAGN)), iAGN_myid(1:max(1,nAGN)))
+  allocate(owner_cpu_arr(1:max(1,nAGN)), owner_idx_arr(1:max(1,nAGN)))
+  allocate(isink_arr(1:max(1,nAGN)))
+  allocate(mAGN(1:max(1,nAGN)), ZAGN(1:max(1,nAGN)))
+  allocate(vol_gas(1:max(1,nAGN)), mass_gas(1:max(1,nAGN)), psy_norm(1:max(1,nAGN)))
+  allocate(vol_blast(1:max(1,nAGN)), mass_blast(1:max(1,nAGN)), ind_blast(1:max(1,nAGN)))
+
+  do iAGN = 1, nAGN
+     xAGN(iAGN,1)      = recvbuf_ex1(1,iAGN)
+     xAGN(iAGN,2)      = recvbuf_ex1(2,iAGN)
+     xAGN(iAGN,3)      = recvbuf_ex1(3,iAGN)
+     vAGN(iAGN,1)      = recvbuf_ex1(4,iAGN)
+     vAGN(iAGN,2)      = recvbuf_ex1(5,iAGN)
+     vAGN(iAGN,3)      = recvbuf_ex1(6,iAGN)
+     jAGN(iAGN,1)      = recvbuf_ex1(7,iAGN)
+     jAGN(iAGN,2)      = recvbuf_ex1(8,iAGN)
+     jAGN(iAGN,3)      = recvbuf_ex1(9,iAGN)
+     dMBH_AGN(iAGN)    = recvbuf_ex1(10,iAGN)
+     dMEd_AGN(iAGN)    = recvbuf_ex1(11,iAGN)
+     dMsmbh_AGN(iAGN)  = recvbuf_ex1(12,iAGN)
+     Msmbh_loc(iAGN)   = recvbuf_ex1(13,iAGN)
+     EsaveAGN(iAGN)    = recvbuf_ex1(14,iAGN)
+     spinmagAGN(iAGN)   = recvbuf_ex1(15,iAGN)
+     eps_AGN(iAGN)      = recvbuf_ex1(16,iAGN)
+     ok_blast_agn(iAGN) = (nint(recvbuf_ex1(17,iAGN)) == 1)
+     owner_cpu_arr(iAGN) = nint(recvbuf_ex1(18,iAGN))
+     owner_idx_arr(iAGN) = nint(recvbuf_ex1(19,iAGN))
+     isink_arr(iAGN)     = nint(recvbuf_ex1(20,iAGN))
+     iAGN_myid(iAGN)    = 0  ! Not used in ksection path
+  enddo
+  if(allocated(recvbuf_ex1)) deallocate(recvbuf_ex1)
+
+  ! -----------------------------------------------
+  ! Local cell loop (average_AGN without MPI)
+  ! -----------------------------------------------
+  if(myid==1) tt3 = MPI_WTIME(info)
+  call average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm, &
+       & vol_blast,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN, &
+       & dMsmbh_AGN,.true.)
+  if(myid==1) tt4 = MPI_WTIME(info)
+
+  ! Save ind_blast data for later fallback lookup
+  nSN_ex1 = nAGN
+  allocate(ind_blast_ex1(1:max(1,nSN_ex1)))
+  allocate(owner_cpu_ex1(1:max(1,nSN_ex1)))
+  allocate(owner_idx_ex1(1:max(1,nSN_ex1)))
+  do iAGN = 1, nSN_ex1
+     ind_blast_ex1(iAGN) = ind_blast(iAGN)
+     owner_cpu_ex1(iAGN) = owner_cpu_arr(iAGN)
+     owner_idx_ex1(iAGN) = owner_idx_arr(iAGN)
+  enddo
+
+  ! -----------------------------------------------
+  ! EXCHANGE 2: Neighbors → Owner (exclusive)
+  ! -----------------------------------------------
+  ncontrib = 0
+  do iAGN = 1, nAGN
+     if(vol_gas(iAGN) > 0d0 .or. ind_blast(iAGN) > 0) ncontrib = ncontrib + 1
+  enddo
+
+  nprops_ex2 = 10
+  allocate(sendbuf_ex2(1:nprops_ex2, 1:max(1,ncontrib)))
+  allocate(dest_cpu_ex2(1:max(1,ncontrib)))
+
+  j = 0
+  do iAGN = 1, nAGN
+     if(vol_gas(iAGN) > 0d0 .or. ind_blast(iAGN) > 0) then
+        j = j + 1
+        sendbuf_ex2(1,j)  = vol_gas(iAGN)
+        sendbuf_ex2(2,j)  = mass_gas(iAGN)
+        sendbuf_ex2(3,j)  = psy_norm(iAGN)
+        sendbuf_ex2(4,j)  = mAGN(iAGN)
+        sendbuf_ex2(5,j)  = ZAGN(iAGN)
+        if(ind_blast(iAGN) > 0) then
+           sendbuf_ex2(6,j) = 1d0   ! has_blast_center
+        else
+           sendbuf_ex2(6,j) = 0d0
+        endif
+        sendbuf_ex2(7,j)  = vol_blast(iAGN)
+        sendbuf_ex2(8,j)  = mass_blast(iAGN)
+        sendbuf_ex2(9,j)  = dble(myid)                    ! blast_src_cpu
+        sendbuf_ex2(10,j) = dble(owner_idx_arr(iAGN))     ! owner_local_idx
+        dest_cpu_ex2(j) = owner_cpu_arr(iAGN)
+     endif
+  enddo
+
+  if(myid==1) tt5 = MPI_WTIME(info)
+  call ksection_exchange_dp(sendbuf_ex2, ncontrib, dest_cpu_ex2, nprops_ex2, &
+       recvbuf_ex2, nrecv_ex2)
+  deallocate(sendbuf_ex2, dest_cpu_ex2)
+
+  ! Free Exchange 1 local arrays (will reallocate for Exchange 3)
+  deallocate(xAGN, vAGN, jAGN, dMBH_AGN, dMEd_AGN, dMsmbh_AGN)
+  deallocate(Msmbh_loc, EsaveAGN, spinmagAGN, eps_AGN)
+  deallocate(ok_blast_agn, iAGN_myid, owner_cpu_arr, owner_idx_arr, isink_arr)
+  deallocate(mAGN, ZAGN, vol_gas, mass_gas, psy_norm, vol_blast, mass_blast, ind_blast)
+
+  ! -----------------------------------------------
+  ! Owner Aggregation
+  ! -----------------------------------------------
+  allocate(vol_gas_agg(1:max(1,nown)), mass_gas_agg(1:max(1,nown)))
+  allocate(psy_norm_agg(1:max(1,nown)))
+  allocate(mAGN_agg(1:max(1,nown)), ZAGN_agg(1:max(1,nown)))
+  allocate(vol_blast_agg(1:max(1,nown)), mass_blast_agg(1:max(1,nown)))
+  allocate(blast_center_cpu_agg(1:max(1,nown)))
+
+  vol_gas_agg = 0d0; mass_gas_agg = 0d0; psy_norm_agg = 0d0
+  mAGN_agg = 0d0; ZAGN_agg = 0d0
+  vol_blast_agg = 0d0; mass_blast_agg = 0d0
+  blast_center_cpu_agg = 0
+
+  do j = 1, nrecv_ex2
+     idx = nint(recvbuf_ex2(10,j))  ! owner_local_idx
+     vol_gas_agg(idx)  = vol_gas_agg(idx)  + recvbuf_ex2(1,j)
+     mass_gas_agg(idx) = mass_gas_agg(idx) + recvbuf_ex2(2,j)
+     psy_norm_agg(idx) = psy_norm_agg(idx) + recvbuf_ex2(3,j)
+     if(nint(recvbuf_ex2(6,j)) == 1) then  ! has_blast_center
+        mAGN_agg(idx)    = recvbuf_ex2(4,j)
+        ZAGN_agg(idx)    = recvbuf_ex2(5,j)
+        vol_blast_agg(idx)  = recvbuf_ex2(7,j)
+        mass_blast_agg(idx) = recvbuf_ex2(8,j)
+        blast_center_cpu_agg(idx) = nint(recvbuf_ex2(9,j))
+     endif
+  enddo
+  if(allocated(recvbuf_ex2)) deallocate(recvbuf_ex2)
+
+  ! -----------------------------------------------
+  ! Owner: determine blast mode and pack Exchange 3
+  ! -----------------------------------------------
+  nprops_ex3 = 25
+  allocate(sendbuf_ex3(1:nprops_ex3, 1:max(1,nown)))
+  allocate(xmin_ex3(1:ndim, 1:max(1,nown)))
+  allocate(xmax_ex3(1:ndim, 1:max(1,nown)))
+
+  do j = 1, nown
+     ! ok_blast_agn: starts with jet condition from Exchange 1
+     ok_blast_val = (nint(sendbuf_ex1(17,j)) == 1)
+
+     ! Check thermal condition at owner (needs aggregated vol_gas/mass_gas)
+     if(sendbuf_ex1(11,j) > 0d0) then  ! dMEd > 0
+        if(sendbuf_ex1(10,j)/sendbuf_ex1(11,j) >= X_floor &
+             & .and. sendbuf_ex1(14,j) == 0d0) then
+           temp_blast = 0.0
+           if(vol_gas_agg(j) > 0.0) then
+              temp_blast = eAGN_T * 1d12 * sendbuf_ex1(12,j) / mass_gas_agg(j)
+           else
+              if(blast_center_cpu_agg(j) > 0) then
+                 temp_blast = eAGN_T * 1d12 * sendbuf_ex1(12,j) / mass_blast_agg(j)
+              endif
+           endif
+           if(temp_blast > TAGN) ok_blast_val = .true.
+        endif
+     endif
+
+     ! Pack Exchange 3 data
+     sendbuf_ex3(1,j)  = sendbuf_ex1(1,j)    ! xAGN(1)
+     sendbuf_ex3(2,j)  = sendbuf_ex1(2,j)    ! xAGN(2)
+     sendbuf_ex3(3,j)  = sendbuf_ex1(3,j)    ! xAGN(3)
+     sendbuf_ex3(4,j)  = sendbuf_ex1(4,j)    ! vAGN(1)
+     sendbuf_ex3(5,j)  = sendbuf_ex1(5,j)    ! vAGN(2)
+     sendbuf_ex3(6,j)  = sendbuf_ex1(6,j)    ! vAGN(3)
+     sendbuf_ex3(7,j)  = sendbuf_ex1(7,j)    ! jAGN(1)
+     sendbuf_ex3(8,j)  = sendbuf_ex1(8,j)    ! jAGN(2)
+     sendbuf_ex3(9,j)  = sendbuf_ex1(9,j)    ! jAGN(3)
+     sendbuf_ex3(10,j) = sendbuf_ex1(12,j)   ! dMsmbh_AGN
+     sendbuf_ex3(11,j) = sendbuf_ex1(10,j)   ! dMBH_AGN
+     sendbuf_ex3(12,j) = sendbuf_ex1(11,j)   ! dMEd_AGN
+     sendbuf_ex3(13,j) = sendbuf_ex1(14,j)   ! EsaveAGN (initial)
+     sendbuf_ex3(14,j) = sendbuf_ex1(15,j)   ! spinmagAGN
+     sendbuf_ex3(15,j) = sendbuf_ex1(16,j)   ! eps_AGN
+     if(ok_blast_val) then
+        sendbuf_ex3(16,j) = 1d0
+     else
+        sendbuf_ex3(16,j) = 0d0
+     endif
+     sendbuf_ex3(17,j) = vol_gas_agg(j)      ! vol_gas (aggregated)
+     sendbuf_ex3(18,j) = mAGN_agg(j)         ! mAGN (from blast center)
+     sendbuf_ex3(19,j) = ZAGN_agg(j)         ! ZAGN (from blast center)
+     sendbuf_ex3(20,j) = psy_norm_agg(j)     ! psy_norm (aggregated)
+     sendbuf_ex3(21,j) = vol_blast_agg(j)    ! vol_blast (from blast center)
+     sendbuf_ex3(22,j) = dble(blast_center_cpu_agg(j))
+     sendbuf_ex3(23,j) = dble(myid)          ! owner_cpu
+     sendbuf_ex3(24,j) = dble(j)             ! owner_idx
+     sendbuf_ex3(25,j) = dble(isink_own(j))  ! global isink
+
+     xmin_ex3(1,j) = sendbuf_ex1(1,j) - rmax
+     xmin_ex3(2,j) = sendbuf_ex1(2,j) - rmax
+     xmin_ex3(3,j) = sendbuf_ex1(3,j) - rmax
+     xmax_ex3(1,j) = sendbuf_ex1(1,j) + rmax
+     xmax_ex3(2,j) = sendbuf_ex1(2,j) + rmax
+     xmax_ex3(3,j) = sendbuf_ex1(3,j) + rmax
+  enddo
+
+  deallocate(sendbuf_ex1)
+  deallocate(vol_gas_agg, mass_gas_agg, psy_norm_agg)
+  deallocate(mAGN_agg, ZAGN_agg, vol_blast_agg, mass_blast_agg)
+  deallocate(blast_center_cpu_agg)
+
+  ! -----------------------------------------------
+  ! EXCHANGE 3: Owner → neighbors (overlap)
+  ! -----------------------------------------------
+  if(myid==1) tt6 = MPI_WTIME(info)
+  call ksection_exchange_dp_overlap(sendbuf_ex3, nown, xmin_ex3, xmax_ex3, &
+       nprops_ex3, recvbuf_ex3, nrecv_ex3, periodic=.true.)
+  deallocate(sendbuf_ex3, xmin_ex3, xmax_ex3)
+
+  ! -----------------------------------------------
+  ! Unpack Exchange 3 → blast arrays + call AGN_blast
+  ! -----------------------------------------------
+  nAGN = nrecv_ex3
+  allocate(xAGN(1:max(1,nAGN),1:3), vAGN(1:max(1,nAGN),1:3), jAGN(1:max(1,nAGN),1:3))
+  allocate(dMsmbh_AGN(1:max(1,nAGN)), dMBH_AGN(1:max(1,nAGN)), dMEd_AGN(1:max(1,nAGN)))
+  allocate(EsaveAGN(1:max(1,nAGN)), spinmagAGN(1:max(1,nAGN)), eps_AGN(1:max(1,nAGN)))
+  allocate(ok_blast_agn(1:max(1,nAGN)), iAGN_myid(1:max(1,nAGN)))
+  allocate(mAGN(1:max(1,nAGN)), ZAGN(1:max(1,nAGN)))
+  allocate(vol_gas(1:max(1,nAGN)), psy_norm(1:max(1,nAGN)))
+  allocate(vol_blast(1:max(1,nAGN)), ind_blast(1:max(1,nAGN)))
+  allocate(isink_arr(1:max(1,nAGN)))
+  allocate(blast_center_cpu_arr(1:max(1,nAGN)))
+
+  do iAGN = 1, nAGN
+     xAGN(iAGN,1)      = recvbuf_ex3(1,iAGN)
+     xAGN(iAGN,2)      = recvbuf_ex3(2,iAGN)
+     xAGN(iAGN,3)      = recvbuf_ex3(3,iAGN)
+     vAGN(iAGN,1)      = recvbuf_ex3(4,iAGN)
+     vAGN(iAGN,2)      = recvbuf_ex3(5,iAGN)
+     vAGN(iAGN,3)      = recvbuf_ex3(6,iAGN)
+     jAGN(iAGN,1)      = recvbuf_ex3(7,iAGN)
+     jAGN(iAGN,2)      = recvbuf_ex3(8,iAGN)
+     jAGN(iAGN,3)      = recvbuf_ex3(9,iAGN)
+     dMsmbh_AGN(iAGN)  = recvbuf_ex3(10,iAGN)
+     dMBH_AGN(iAGN)    = recvbuf_ex3(11,iAGN)
+     dMEd_AGN(iAGN)    = recvbuf_ex3(12,iAGN)
+     EsaveAGN(iAGN)    = recvbuf_ex3(13,iAGN)
+     spinmagAGN(iAGN)   = recvbuf_ex3(14,iAGN)
+     eps_AGN(iAGN)      = recvbuf_ex3(15,iAGN)
+     ok_blast_agn(iAGN) = (nint(recvbuf_ex3(16,iAGN)) == 1)
+     vol_gas(iAGN)      = recvbuf_ex3(17,iAGN)
+     mAGN(iAGN)        = recvbuf_ex3(18,iAGN)
+     ZAGN(iAGN)        = recvbuf_ex3(19,iAGN)
+     psy_norm(iAGN)    = recvbuf_ex3(20,iAGN)
+     vol_blast(iAGN)    = recvbuf_ex3(21,iAGN)
+     blast_center_cpu_arr(iAGN) = nint(recvbuf_ex3(22,iAGN))
+     owner_cpu_val = nint(recvbuf_ex3(23,iAGN))
+     owner_idx_val = nint(recvbuf_ex3(24,iAGN))
+     isink_arr(iAGN)    = nint(recvbuf_ex3(25,iAGN))
+     iAGN_myid(iAGN)   = 0  ! not used
+
+     ! Set ind_blast: only valid on the CPU that has the blast center
+     ind_blast(iAGN) = -1
+     if(blast_center_cpu_arr(iAGN) == myid) then
+        do k = 1, nSN_ex1
+           if(owner_cpu_ex1(k) == owner_cpu_val .and. &
+                & owner_idx_ex1(k) == owner_idx_val) then
+              ind_blast(iAGN) = ind_blast_ex1(k)
+              exit
+           endif
+        enddo
+     endif
+  enddo
+  if(allocated(recvbuf_ex3)) deallocate(recvbuf_ex3)
+  deallocate(ind_blast_ex1, owner_cpu_ex1, owner_idx_ex1)
+
+  ! -----------------------------------------------
+  ! Call AGN_blast with Exchange 3 data
+  ! -----------------------------------------------
+  if(myid==1) tt7 = MPI_WTIME(info)
+  call AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_blast,vol_gas &
+       & ,psy_norm,vol_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,spinmagAGN,eps_AGN)
+
+  ! -----------------------------------------------
+  ! Reset dMsmbh for blasted sinks
+  ! -----------------------------------------------
+  do iAGN = 1, nAGN
+     if(ok_blast_agn(iAGN)) then
+        dMsmbh(isink_arr(iAGN)) = 0d0
+     endif
+  enddo
+
+#ifndef WITHOUTMPI
+  ! MPI_MIN on dMsmbh (global — keeps as-is)
+  dMsmbh_new = dMsmbh
+  call MPI_ALLREDUCE(dMsmbh_new, dMsmbh_all, nsink, MPI_DOUBLE_PRECISION, &
+       MPI_MIN, MPI_COMM_WORLD, info)
+  dMsmbh = dMsmbh_all
+#endif
+  dMBH_coarse = 0d0; dMEd_coarse = 0d0
+
+  ! -----------------------------------------------
+  ! Collect EsaveAGN via sink_ksec_reduce_sum
+  ! -----------------------------------------------
+#ifndef WITHOUTMPI
+  Esave_new = 0d0
+  do iAGN = 1, nAGN
+     Esave_new(isink_arr(iAGN)) = EsaveAGN(iAGN)
+  enddo
+  call sink_ksec_reduce_sum(Esave_new, Esave_all, 1, nsink)
+  Esave = Esave_all
+#endif
+
+  ! -----------------------------------------------
+  ! Cleanup
+  ! -----------------------------------------------
+  deallocate(xAGN, vAGN, jAGN, dMBH_AGN, dMEd_AGN, dMsmbh_AGN)
+  deallocate(EsaveAGN, spinmagAGN, eps_AGN)
+  deallocate(ok_blast_agn, iAGN_myid, mAGN, ZAGN)
+  deallocate(vol_gas, psy_norm, vol_blast, ind_blast)
+  deallocate(isink_arr, blast_center_cpu_arr)
+  deallocate(sink_owner, isink_own)
+
+  ! -----------------------------------------------
+  ! Timing report
+  ! -----------------------------------------------
+  if(myid==1) then
+     tt1 = tt1 - tt0  ! Pack owned sinks
+     tt2 = tt2 - tt0  ! Exchange 1 done (cumulative)
+     tt3 = tt3 - tt0  ! Unpack done (cumulative)
+     tt4 = tt4 - tt0  ! average_AGN done (cumulative)
+     tt5 = tt5 - tt0  ! Pack Exchange 2 done (cumulative)
+     tt6 = tt6 - tt0  ! Exchange 2 + aggregation done (cumulative)
+     tt7 = tt7 - tt0  ! Exchange 3 done (cumulative)
+     write(*,'(A,I8,A,I6)') ' AGN_ksec: nsink=', nsink, ' nown=', nown
+     write(*,'(A,ES12.3)') ' AGN_ksec: Pack owned sinks      ', tt1
+     write(*,'(A,ES12.3)') ' AGN_ksec: Exchange 1 (overlap)  ', tt2-tt1
+     write(*,'(A,ES12.3)') ' AGN_ksec: Unpack Exchange 1     ', tt3-tt2
+     write(*,'(A,ES12.3)') ' AGN_ksec: average_AGN (local)   ', tt4-tt3
+     write(*,'(A,ES12.3)') ' AGN_ksec: Pack+Exchange 2 (excl)', tt6-tt4
+     write(*,'(A,ES12.3)') ' AGN_ksec: Exchange 3 (overlap)  ', tt7-tt6
+     write(*,'(A,ES12.3)') ' AGN_ksec: AGN_blast             ', MPI_WTIME(info)-tt0-tt7
+     write(*,'(A,ES12.3)') ' AGN_ksec: TOTAL                 ', MPI_WTIME(info)-tt0
+  endif
+
+end subroutine AGN_feedback_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
 subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-     & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN)
+     & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
   use pm_commons
   use amr_commons
   use hydro_commons
@@ -5409,8 +5923,13 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   integer::npack,ip
 #endif
   logical ,dimension(1:nAGN)::ok_blast_agn
+  real(dp),dimension(1:nAGN)::dMsmbh_AGN
+  logical, intent(in), optional :: local_only
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy
   real(dp)::eint,ekk
+  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: bin_size, inv_bin_size
+  integer, allocatable :: bin_head(:,:,:), agn_next(:)
 
   if(verbose)write(*,*)'  +Entering average_AGN'
 !$omp parallel shared(nthreads)
@@ -5458,6 +5977,20 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
+  ! Build spatial bins for AGN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+  bin_head=0; agn_next=0
+  do iAGN=1,nAGN
+     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+     agn_next(iAGN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iAGN
+  end do
+
   ! Initialize the averaged variables
   vol_gas=0d0;mass_gas=0d0;vol_blast=0d0;mass_blast=0d0;ind_blast=-1;psy_norm=0d0;ZAGN=0d0
 !######################################################################################################### 
@@ -5491,7 +6024,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(iAGN,igrid,ngrid,i,ind, iskip,x,y,z,dxx,dyy,dzz,&
 !$omp                  dr_AGN,dr_cell,jtot,j_x,j_y,j_z,dzjet,drjet,psy,d,u,v,w,&
-!$omp                  ekk,eint) schedule(dynamic)
+!$omp                  ekk,eint,ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
      do igrid=1,ncache,nvector
        ngrid=MIN(nvector,ncache-igrid+1)
        do i=1,ngrid
@@ -5513,7 +6046,16 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-               do iAGN=1,nAGN
+               ! Find cell's bin
+               ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+               iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+               ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+               ! Loop over 27 neighbor bins
+               do jbz=max(1,ibz-1),min(nbin,ibz+1)
+               do jby=max(1,iby-1),min(nbin,iby+1)
+               do jbx=max(1,ibx-1),min(nbin,ibx+1)
+               iAGN=bin_head(jbx,jby,jbz)
+               do while(iAGN > 0)
                   dxx=x-xAGN(iAGN,1)
                   dyy=y-xAGN(iAGN,2)
                   dzz=z-xAGN(iAGN,3)
@@ -5568,7 +6110,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                                ekk=0.5d0*d*(u*u+v*v+w*w)
                                eint=uold(ind_blast(iAGN),5)-ekk
                                vol_blast  (iAGN)=vol_loc
-                               mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN_myid(iAGN)),0.25d0*d*vol_loc)
+                               mAGN(iAGN)=min(mloadAGN*dMsmbh_AGN(iAGN),0.25d0*d*vol_loc)
                                if(metal)then
                                   ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
                                   uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
@@ -5607,7 +6149,9 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                          endif
                       endif
                    endif
-         end do
+                  iAGN=agn_next(iAGN)
+               end do ! while
+               end do; end do; end do ! jbx, jby, jbz
               endif
       end do
 
@@ -5626,6 +6170,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   enddo
 
 
+  deallocate(bin_head, agn_next)
   deallocate(Pind_cell)
   deallocate(Pind_grid)
   deallocate(Pok)
@@ -5634,6 +6179,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   deallocate(Ppsy_norm)
 
   !################################################################
+  if(.not.(present(local_only).and.local_only)) then
 #ifndef WITHOUTMPI
   vol_gas_mpi=0d0; mass_gas_mpi=0d0; mAGN_mpi=0d0; ZAGN_mpi=0d0; psy_norm_mpi=0d0
   ! Put the nAGN size arrays into nsink size arrays to synchronize processors
@@ -5683,6 +6229,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      psy_norm(iAGN)=psy_norm_mpi(isink)
   enddo
 #endif
+  endif ! local_only
   !################################################################
 
   if(verbose)write(*,*)'  +Exiting average_AGN', nAGN
@@ -5744,6 +6291,9 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy,nCOM,T2_1,T2_2,ekk,eint,vm_,dr_cell,T2,etot
   real(dp)::eint1,ekkold,T2maxAGNz,epsilon_r,ZZ1,ZZ2,onethird,r_lso,eff_mad
   integer::idim,isink
+  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: bin_size, inv_bin_size
+  integer, allocatable :: bin_head(:,:,:), agn_next(:)
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::EsaveAGN_mpi,EsaveAGN_all
 #endif
@@ -5791,6 +6341,20 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   rmax=MAX(1d0*dx_min*scale_l/aexp,rAGN*3.08d21)
   rmax=rmax/scale_l
   rmax2=rmax*rmax
+
+  ! Build spatial bins for AGN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  bin_size=boxlen/dble(nbin)
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+  bin_head=0; agn_next=0
+  do iAGN=1,nAGN
+     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+     agn_next(iAGN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iAGN
+  end do
 
 !!$omp parallel do private(iAGN)
   do iAGN=1,nAGN
@@ -5857,7 +6421,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(igrid,ngrid,i,ind,iskip,x,y,z,iAGN,dxx,dyy,dzz,&
 !$omp               dr_AGN,ekk,d,idim,etot,eint,T2_1,T2_2,jtot,j_x,j_y,j_z,&
-!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas) schedule(dynamic)
+!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas,ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
@@ -5883,7 +6447,16 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
 
-                 do iAGN=1,nAGN
+                 ! Find cell's bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                 iAGN=bin_head(jbx,jby,jbz)
+                 do while(iAGN > 0)
 
                     ! ------------------------------------------
                     ! case 0: Some energy has not been released
@@ -6057,7 +6630,9 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                     endif
                     !End of ok_blast_agn
 
-                 end do
+                    iAGN=agn_next(iAGN)
+                 end do ! while
+                 end do; end do; end do ! jbx, jby, jbz
               endif
            end do
         end do
@@ -6175,6 +6750,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      endif
     endif
   end do
+  deallocate(bin_head, agn_next)
 #ifdef _OPENMP
   deallocate(Pind_grid, Pind_cell, Pok, PEsaveAGN)
 #endif

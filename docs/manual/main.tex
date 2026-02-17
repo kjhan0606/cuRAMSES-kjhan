@@ -1433,6 +1433,101 @@ Verification: econs = 7.65E-04 (ksection, 12~CPU) and 7.47E-04 (Hilbert, 4~CPU),
 
 
 %======================================================
+\chapter{AGN Feedback Spatial Binning}
+\label{ch:agn-binning}
+%======================================================
+
+The AGN feedback routines \texttt{average\_AGN} and \texttt{AGN\_blast} in \texttt{sink\_particle.kjhan.f90} iterate over all AGN sinks for every leaf cell, resulting in $O(n_\mathrm{cells} \times n_\mathrm{AGN})$ complexity. With 32K sinks, profiling showed \texttt{average\_AGN} consuming 177\,s (68.5\%) and \texttt{AGN\_blast} consuming 73\,s (27.3\%) of the AGN feedback time.
+
+The same spatial binning technique proven in the SNII feedback optimization (Chapter~\ref{ch:snii-ksec}) was applied: the simulation domain is divided into $n_\mathrm{bin}^3$ cells, each AGN sink is inserted into a linked list indexed by its bin, and the cell loop checks only the 27 neighboring bins.
+
+\section{Algorithm}
+
+\begin{enumerate}[leftmargin=2em]
+  \item \textbf{Bin size}: $n_\mathrm{bin} = \max\bigl(1,\,\min(128,\,\lfloor\texttt{boxlen}/r_\mathrm{max}\rfloor)\bigr)$, where $r_\mathrm{max} = \max(dx_\mathrm{min}\,l_\mathrm{scale}/a,\; r_\mathrm{AGN}\times 3.08\times10^{21})/l_\mathrm{scale}$. The upper bound of 128 keeps the bin array ($128^3 \times 4$\,bytes = 8\,MB) within L3 cache.
+  \item \textbf{Linked list construction} ($O(n_\mathrm{AGN})$): For each AGN, compute its bin index and prepend it to that bin's list via \texttt{agn\_next(iAGN) = bin\_head(ibx,iby,ibz)}.
+  \item \textbf{Cell loop} ($O(n_\mathrm{cells} \times n_\mathrm{nearby})$): For each leaf cell, compute its bin and iterate over the $3\times3\times3=27$ neighboring bins, traversing each linked list and applying the existing distance checks.
+\end{enumerate}
+
+Since $r_\mathrm{max} \ll \texttt{bin\_size}$ (typically by a factor of 50), the 27-bin search radius far exceeds $r_\mathrm{max}$, guaranteeing that all AGN within range are found.
+
+\section{Implementation}
+
+Both \texttt{average\_AGN} and \texttt{AGN\_blast} follow the identical pattern:
+
+\begin{codebox}[Bin construction (after rmax computation)]
+\begin{lstlisting}[style=fortran]
+nbin=max(1,min(128,int(boxlen/rmax)))
+bin_size=boxlen/dble(nbin)
+inv_bin_size=dble(nbin)/boxlen
+allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+bin_head=0; agn_next=0
+do iAGN=1,nAGN
+   ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+   iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+   ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+   agn_next(iAGN)=bin_head(ibx,iby,ibz)
+   bin_head(ibx,iby,ibz)=iAGN
+end do
+\end{lstlisting}
+\end{codebox}
+
+\begin{codebox}[Cell inner loop (replaces \texttt{do iAGN=1,nAGN})]
+\begin{lstlisting}[style=fortran]
+ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+do jbz=max(1,ibz-1),min(nbin,ibz+1)
+do jby=max(1,iby-1),min(nbin,iby+1)
+do jbx=max(1,ibx-1),min(nbin,ibx+1)
+   iAGN=bin_head(jbx,jby,jbz)
+   do while(iAGN > 0)
+      ! existing distance check + 3-case handling
+      iAGN=agn_next(iAGN)
+   end do
+end do; end do; end do
+\end{lstlisting}
+\end{codebox}
+
+All three AGN feedback cases (saved energy, jet, thermal) and the OpenMP thread-local accumulation arrays are preserved unchanged. The bin variables \texttt{ibx,iby,ibz,jbx,jby,jbz} are added to the \texttt{!\$omp~parallel~do~private} clause; \texttt{bin\_head} and \texttt{agn\_next} are shared (read-only).
+
+\section{Performance}
+
+Benchmark: output\_00005 (step~241, $a \approx 0.164$, 32K sinks), 4~MPI ranks, OMP\_NUM\_THREADS=1.
+
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+\textbf{Subroutine} & \textbf{Before (s)} & \textbf{After (s)} & \textbf{Speedup} \\
+\midrule
+\texttt{average\_AGN} & 177.2 & 5.9 & 30$\times$ \\
+\texttt{AGN\_blast}   &  72.6 & 5.0 & 14.4$\times$ \\
+\midrule
+\textbf{AGN TOTAL}    & 264.6 & 11.0 & 24$\times$ \\
+\textbf{sinks TOTAL}  & 633.8 & 165.1 & 3.8$\times$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Verification}
+
+econs = 6.51E-04, bit-identical to the pre-optimization result. All three AGN feedback cases (saved energy / jet / thermal) produce identical physics output.
+
+\section{Modified File}
+
+\begin{center}
+\begin{tabular}{lp{8cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\texttt{sink\_particle.kjhan.f90} & \texttt{average\_AGN}: spatial binning of AGN inner loop \\
+                                   & \texttt{AGN\_blast}: spatial binning of AGN inner loop \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+
+%======================================================
 \chapter{Scaling Performance}
 \label{ch:scaling}
 %======================================================
@@ -2372,7 +2467,7 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{particle\_tree.kjhan.f90} & MPI\_ALLTOALL $\to$ ksection \\
 \texttt{amr\_step.jaehyun.f90} & Bulk virtual exchange \\
 \texttt{feedback.kjhan3.f90} & SNII feedback spatial binning, ksection exchange, ALLREDUCE packing \\
-\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN ALLREDUCE packing, ksection reduce-sum \\
+\texttt{sink\_particle.kjhan.f90} & Sink particle ops, AGN spatial binning, ALLREDUCE packing, ksection reduce-sum \\
 \midrule
 \multicolumn{2}{l}{\textit{patch/cuda/ (HDF5 I/O --- new files)}} \\
 \midrule
