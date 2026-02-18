@@ -94,14 +94,23 @@ software: development
 Cosmological hydrodynamic simulations play a central role in modern
 astrophysics, connecting the predictions of the $\Lambda$CDM paradigm
 to the observable properties of galaxies, the intergalactic medium,
-and the large-scale structure of the Universe
-\citep{Vogelsberger2014,Schaye2015,Dubois2014}. Adaptive mesh
-refinement (AMR) codes widely adopted by, for example, \ramses\
-\citep{Teyssier2002} and Enzo \citep{Bryan2014} provide
-an attractive framework for these simulations: the computational mesh
-is refined only where the physics demands it, concentrating resources
-on collapsing haloes and star-forming regions while keeping the cost
-of smooth, low-density regions manageable.
+and the large-scale structure of the Universe. Over the past decade,
+a series of landmark galaxy formation simulations have advanced our
+understanding of cosmic structure: the Illustris and IllustrisTNG
+projects \citep{Vogelsberger2014,Pillepich2018} using the
+moving-mesh code \textsc{arepo}, the EAGLE simulation
+\citep{Schaye2015} with the smoothed-particle hydrodynamics code
+\textsc{gadget}, the Horizon-AGN simulation \citep{Dubois2014} and
+its high-resolution successor NewHorizon \citep{Dubois2021} using the
+adaptive mesh refinement (AMR) code \ramses, and the FIRE project
+\citep{Hopkins2018} with the meshless finite-mass code \textsc{gizmo}.
+
+Among the numerical approaches employed by these simulations, AMR
+codes such as \ramses\ \citep{Teyssier2002} and Enzo
+\citep{Bryan2014} provide a particularly attractive framework: the
+computational mesh is refined only where the physics demands it,
+concentrating resources on collapsing haloes and star-forming regions
+while keeping the cost of smooth, low-density regions manageable.
 
 A key design choice in parallel AMR codes is the domain decomposition
 strategy. Space-filling curves (SFCs), particularly the Hilbert
@@ -1647,6 +1656,9 @@ Dubois Y., et al., 2021, A\&A, 651, A109
 \bibitem[\protect\citeauthoryear{Hahn \& Abel}{Hahn \& Abel}{2011}]{Hahn2011}
 Hahn O., Abel T., 2011, MNRAS, 415, 2101
 
+\bibitem[\protect\citeauthoryear{Hopkins et al.}{Hopkins et al.}{2018}]{Hopkins2018}
+Hopkins P.~F., et al., 2018, MNRAS, 480, 800
+
 \bibitem[\protect\citeauthoryear{Han et al.}{Han et al.}{2026}]{Han2026}
 Han S., et al., 2026, A\&A, 705, A169
 
@@ -1656,6 +1668,9 @@ Sorting and Searching, 2nd edn. Addison-Wesley, Reading, MA
 
 \bibitem[\protect\citeauthoryear{Lee et al.}{Lee et al.}{2021}]{Lee2021}
 Lee J., et al., 2021, ApJ, 908, 11
+
+\bibitem[\protect\citeauthoryear{Pillepich et al.}{Pillepich et al.}{2018}]{Pillepich2018}
+Pillepich A., et al., 2018, MNRAS, 473, 4077
 
 \bibitem[\protect\citeauthoryear{Morton}{Morton}{1966}]{Morton1966}
 Morton G.~M., 1966, A Computer Oriented Geodetic Data Base and a
