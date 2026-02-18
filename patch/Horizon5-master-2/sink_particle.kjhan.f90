@@ -22,10 +22,8 @@ subroutine create_sink
   integer::ilevel,ivar,info,icpu,igrid,npartbound,isink,nelvelmax_loc
   real(dp)::dx_min,vol_min,dx,dx_temp
   integer::nx_loc
-  real(dp)::cs_t0,cs_t1,cs_t2,cs_t3,cs_t4,cs_t5,cs_t6,cs_t7,cs_t8
-
   if(verbose)write(*,*)' Entering create_sink'
-  if(myid==1) cs_t0 = MPI_WTIME(info)
+
   ! Remove particles to finer levels
   do ilevel=levelmin,nlevelmax
      call kill_tree_fine(ilevel)
@@ -48,7 +46,7 @@ subroutine create_sink
 !############################# CONFIRMED ####################
   ! Create new sink particles
   ! and gather particle from the grid
-  if(myid==1) cs_t1 = MPI_WTIME(info)
+
   call kjhan_make_sink(nlevelmax)
 !  call org_make_sink(nlevelmax)
   do ilevel=nlevelmax-1,1,-1
@@ -59,7 +57,7 @@ subroutine create_sink
 
 !#########################################
 !############################# CONFIRMED ####################
-  if(myid==1) cs_t2 = MPI_WTIME(info)
+
   ! Remove particle clouds around old sinks
   call kjhan_kill_cloud(1)
 ! call org_kill_cloud(1)
@@ -67,7 +65,7 @@ subroutine create_sink
 
 !#########################################
 !############################# CONFIRMED ####################
-  if(myid==1) cs_t3 = MPI_WTIME(info)
+
   ! update sink position before merging sinks and creating clouds
   call kjhan_update_sink_position_velocity
 ! call org_update_sink_position_velocity
@@ -76,14 +74,14 @@ subroutine create_sink
 !#########################################
 !############################# FAILED ####################
   ! Merge sink using FOF
-  if(myid==1) cs_t4 = MPI_WTIME(info)
+
    call merge_sink(1)
 !  call org_merge_sink(1)
 !#########################################
 
 !#########################################
 !############################# CONFIRMED ####################
-  if(myid==1) cs_t5 = MPI_WTIME(info)
+
   ! Create new particle clouds
   call kjhan_create_cloud(1)
 ! call org_create_cloud(1)
@@ -112,7 +110,7 @@ subroutine create_sink
      end do
   end if
 
-  if(myid==1) cs_t6 = MPI_WTIME(info)
+
   jsink=0d0
   ! Compute Bondi parameters and gather particle
   do ilevel=nlevelmax,levelmin,-1
@@ -123,19 +121,6 @@ subroutine create_sink
 !#########################################
      call merge_tree_fine(ilevel)
   end do
-
-  if(myid==1) then
-     cs_t7 = MPI_WTIME(info)
-     write(*,'(A)') ' ---- create_sink timing breakdown ----'
-     write(*,'(A,F10.3,A)') '  get_rho_star  :', cs_t1-cs_t0, ' s'
-     write(*,'(A,F10.3,A)') '  make_sink     :', cs_t2-cs_t1, ' s'
-     write(*,'(A,F10.3,A)') '  kill+upd_pos  :', cs_t4-cs_t2, ' s'
-     write(*,'(A,F10.3,A)') '  merge_sink    :', cs_t5-cs_t4, ' s'
-     write(*,'(A,F10.3,A)') '  create_cloud  :', cs_t6-cs_t5, ' s'
-     write(*,'(A,F10.3,A)') '  bondi_hoyle   :', cs_t7-cs_t6, ' s'
-     write(*,'(A,F10.3,A)') '  TOTAL         :', cs_t7-cs_t0, ' s'
-     write(*,'(A)') ' --------------------------------------'
-  endif
 
 end subroutine create_sink
 !################################################################
@@ -5403,8 +5388,6 @@ subroutine AGN_feedback_ksec()
   real(dp) :: dx_min, scale, rmax, Mfrac, temp_blast
   integer :: nx_loc
   logical :: ok_jet, ok_blast_val
-  real(dp) :: tt0, tt1, tt2, tt3, tt4, tt5, tt6, tt7
-
   ! Exchange buffers
   real(dp), allocatable :: sendbuf_ex1(:,:), recvbuf_ex1(:,:)
   real(dp), allocatable :: xmin_ex1(:,:), xmax_ex1(:,:)
@@ -5438,7 +5421,7 @@ subroutine AGN_feedback_ksec()
   ! -----------------------------------------------
   ! Conversion factors and mesh parameters
   ! -----------------------------------------------
-  if(myid==1) tt0 = MPI_WTIME(info)
+
   call units(scale_l, scale_t, scale_d, scale_v, scale_nH, scale_T2)
   nx_loc = (icoarse_max - icoarse_min + 1)
   scale = boxlen / dble(nx_loc)
@@ -5520,11 +5503,11 @@ subroutine AGN_feedback_ksec()
      endif
   enddo
 
-  if(myid==1) tt1 = MPI_WTIME(info)
+
   call ksection_exchange_dp_overlap(sendbuf_ex1, nown, xmin_ex1, xmax_ex1, &
        nprops_ex1, recvbuf_ex1, nrecv_ex1, periodic=.true.)
   deallocate(xmin_ex1, xmax_ex1)
-  if(myid==1) tt2 = MPI_WTIME(info)
+
 
   ! -----------------------------------------------
   ! Unpack Exchange 1 → local AGN arrays
@@ -5569,11 +5552,11 @@ subroutine AGN_feedback_ksec()
   ! -----------------------------------------------
   ! Local cell loop (average_AGN without MPI)
   ! -----------------------------------------------
-  if(myid==1) tt3 = MPI_WTIME(info)
+
   call average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm, &
        & vol_blast,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN, &
        & dMsmbh_AGN,.true.)
-  if(myid==1) tt4 = MPI_WTIME(info)
+
 
   ! Save ind_blast data for later fallback lookup
   nSN_ex1 = nAGN
@@ -5620,7 +5603,7 @@ subroutine AGN_feedback_ksec()
      endif
   enddo
 
-  if(myid==1) tt5 = MPI_WTIME(info)
+
   call ksection_exchange_dp(sendbuf_ex2, ncontrib, dest_cpu_ex2, nprops_ex2, &
        recvbuf_ex2, nrecv_ex2)
   deallocate(sendbuf_ex2, dest_cpu_ex2)
@@ -5735,7 +5718,7 @@ subroutine AGN_feedback_ksec()
   ! -----------------------------------------------
   ! EXCHANGE 3: Owner → neighbors (overlap)
   ! -----------------------------------------------
-  if(myid==1) tt6 = MPI_WTIME(info)
+
   call ksection_exchange_dp_overlap(sendbuf_ex3, nown, xmin_ex3, xmax_ex3, &
        nprops_ex3, recvbuf_ex3, nrecv_ex3, periodic=.true.)
   deallocate(sendbuf_ex3, xmin_ex3, xmax_ex3)
@@ -5800,7 +5783,7 @@ subroutine AGN_feedback_ksec()
   ! -----------------------------------------------
   ! Call AGN_blast with Exchange 3 data
   ! -----------------------------------------------
-  if(myid==1) tt7 = MPI_WTIME(info)
+
   call AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_blast,vol_gas &
        & ,psy_norm,vol_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,spinmagAGN,eps_AGN)
 
@@ -5844,27 +5827,6 @@ subroutine AGN_feedback_ksec()
   deallocate(isink_arr, blast_center_cpu_arr)
   deallocate(sink_owner, isink_own)
 
-  ! -----------------------------------------------
-  ! Timing report
-  ! -----------------------------------------------
-  if(myid==1) then
-     tt1 = tt1 - tt0  ! Pack owned sinks
-     tt2 = tt2 - tt0  ! Exchange 1 done (cumulative)
-     tt3 = tt3 - tt0  ! Unpack done (cumulative)
-     tt4 = tt4 - tt0  ! average_AGN done (cumulative)
-     tt5 = tt5 - tt0  ! Pack Exchange 2 done (cumulative)
-     tt6 = tt6 - tt0  ! Exchange 2 + aggregation done (cumulative)
-     tt7 = tt7 - tt0  ! Exchange 3 done (cumulative)
-     write(*,'(A,I8,A,I6)') ' AGN_ksec: nsink=', nsink, ' nown=', nown
-     write(*,'(A,ES12.3)') ' AGN_ksec: Pack owned sinks      ', tt1
-     write(*,'(A,ES12.3)') ' AGN_ksec: Exchange 1 (overlap)  ', tt2-tt1
-     write(*,'(A,ES12.3)') ' AGN_ksec: Unpack Exchange 1     ', tt3-tt2
-     write(*,'(A,ES12.3)') ' AGN_ksec: average_AGN (local)   ', tt4-tt3
-     write(*,'(A,ES12.3)') ' AGN_ksec: Pack+Exchange 2 (excl)', tt6-tt4
-     write(*,'(A,ES12.3)') ' AGN_ksec: Exchange 3 (overlap)  ', tt7-tt6
-     write(*,'(A,ES12.3)') ' AGN_ksec: AGN_blast             ', MPI_WTIME(info)-tt0-tt7
-     write(*,'(A,ES12.3)') ' AGN_ksec: TOTAL                 ', MPI_WTIME(info)-tt0
-  endif
 
 end subroutine AGN_feedback_ksec
 !################################################################

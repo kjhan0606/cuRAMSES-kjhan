@@ -58,29 +58,26 @@ $^{1}$Center for Advanced Computation, Korea Institute for Advanced Study,
 \begin{abstract}
 We present \curamses, a suite of algorithmic and implementation
 improvements to the \ramses\ adaptive mesh refinement (AMR)
-cosmological simulation code that significantly reduce both memory
-consumption and communication overhead. The central innovation is a
-\ksec\ domain decomposition that replaces the traditional Hilbert
-curve ordering with a recursive $k$-ary spatial partitioning, enabling
-hierarchical MPI communication with $\Olog{\sum_l k_l}$ messages per
-exchange instead of the $\Olog{\ncpu^2}$ scaling of the original
-\code{MPI\_ALLTOALL} pattern. We further eliminate the large
-neighbour-pointer array by introducing a Morton key hash table for
-$\Olog{1}$ neighbour lookup, saving $48 \times \ngridmax$ bytes per
-rank. Combined with on-demand allocation strategies for auxiliary
-arrays, the total steady-state memory reduction exceeds 1\,GB per
-rank for typical production configurations. Additional optimizations
-to the multigrid Poisson solver --- including precomputed neighbour
-caches, merged red-black exchanges, and fused residual-norm
-computation --- reduce the Poisson fraction of total runtime from
-55\,per\,cent to 39\,per\,cent. A spatial hash binning scheme for
-Type~II supernova feedback achieves two orders of magnitude speedup
-over the original brute-force algorithm. We also implement
-variable-$\ncpu$ restart via HDF5 parallel I/O, removing the
+cosmological simulation code that address the principal bottlenecks
+encountered in large-scale simulations: communication overhead, memory
+consumption, and solver efficiency. The central innovation is a
+recursive \ksec\ domain decomposition that replaces the traditional
+Hilbert curve ordering with a hierarchical spatial partitioning,
+dramatically reducing the number of MPI messages per ghost-zone
+exchange and eliminating all \code{MPI\_ALLTOALL} calls. A Morton key
+hash table for octree neighbour lookup removes one of the largest
+per-rank arrays in the original code, while on-demand allocation
+strategies for auxiliary arrays further reduce the memory footprint.
+Optimizations to the multigrid Poisson solver --- including precomputed
+neighbour caches, merged communication steps, and fused computation
+kernels --- substantially lower its share of total runtime. A spatial
+hash binning scheme accelerates Type~II supernova and AGN feedback by
+orders of magnitude over the original brute-force approach. We also
+implement variable-$\ncpu$ restart via HDF5 parallel I/O, removing the
 constraint that checkpoint files must be read with the same number of
 MPI ranks as were used to write them. All modifications preserve
-bit-level physical consistency, as verified by conservation-law
-diagnostics across extensive test suites.
+physical consistency, as verified by conservation-law diagnostics
+across extensive test suites.
 \end{abstract}
 
 \begin{keywords}
@@ -156,8 +153,8 @@ modifications to \ramses\ that addresses each of these challenges. The
 key innovations are:
 
 \begin{itemize}
-\item A \ksec\ domain decomposition (Section~\ref{sec:ksection}) that
-  replaces Hilbert ordering with a recursive multi-way spatial
+\item A recursive \ksec\ domain decomposition (Section~\ref{sec:ksection}) that
+  replaces Hilbert ordering with a hierarchical multi-way spatial
   partitioning, enabling hierarchical MPI exchange with
   $\Olog{\sum_l k_l}$ messages per operation.
 
@@ -174,9 +171,9 @@ key innovations are:
   (Section~\ref{sec:multigrid}), reducing its share of total runtime
   from 55\,per\,cent to 39\,per\,cent.
 
-\item A spatial hash binning scheme for Type~II supernova feedback
-  (Section~\ref{sec:feedback}), accelerating the SN averaging and
-  blast injection by factors of 160--260$\times$.
+\item A spatial hash binning scheme for Type~II supernova and AGN
+  feedback (Section~\ref{sec:feedback}), accelerating the feedback
+  averaging and blast injection by orders of magnitude.
 
 \item Variable-$\ncpu$ restart with HDF5 parallel I/O
   (Section~\ref{sec:varcpu}), along with miscellaneous improvements
@@ -197,7 +194,7 @@ $\ncpu$ is the total number of MPI ranks.
 % ===================================================================
 % 2. K-SECTION DOMAIN DECOMPOSITION
 % ===================================================================
-\section{K-Section Domain Decomposition}
+\section{Recursive K-Section Domain Decomposition}
 \label{sec:ksection}
 
 \subsection{Motivation}
@@ -222,7 +219,7 @@ has two significant drawbacks for large-scale runs:
   $\ngridmax = 5 \times 10^6$.
 \end{enumerate}
 
-Our \ksec\ decomposition replaces the one-dimensional Hilbert
+Our recursive \ksec\ decomposition replaces the one-dimensional Hilbert
 partitioning with a recursive spatial partitioning in the original
 three-dimensional coordinate space. This produces a $k$-ary tree whose
 structure directly encodes the communication pattern, enabling
@@ -924,7 +921,7 @@ does not degrade convergence.
 % ===================================================================
 % 6. SNII FEEDBACK SPATIAL BINNING
 % ===================================================================
-\section{SNII Feedback Spatial Binning}
+\section{Feedback Spatial Binning}
 \label{sec:feedback}
 
 \subsection{The brute-force bottleneck}
@@ -1019,6 +1016,34 @@ With approximately 2000 simultaneous SN events:
 Verification by restarting at the same snapshot confirms bit-identical
 results for all conservation quantities ($m_{\rm cons}$,
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$, $e_{\rm int}$).
+
+
+\subsection{AGN feedback spatial binning}
+\label{sec:fb_agn}
+
+The same spatial binning technique is applied to the AGN feedback
+routines (\code{average\_AGN} and \code{AGN\_blast}), which suffer
+from the same $\Olog{N_{\rm cells} \times N_{\rm AGN}}$ brute-force
+scaling. In production simulations with tens of thousands of active
+AGN sink particles, these routines dominate the sink-particle time
+step.
+
+The AGN feedback involves three distinct interaction modes (saved
+energy injection, jet feedback, and thermal feedback), each with a
+different geometric distance criterion. The spatial binning is
+agnostic to these distinctions: it reduces the candidate AGN set from
+the full population to only those in the 27 neighbouring bins, while
+preserving all distance-check logic and physical calculations
+unchanged. The linked-list construction and 27-bin traversal follow
+the same pattern as the SNII implementation
+(\S\ref{sec:fb_binning}), with \code{bin\_head} and \code{agn\_next}
+arrays replacing the SN-specific versions.
+
+With approximately 32\,000 active AGN particles, the binned
+\code{average\_AGN} achieves a $30\times$ speedup and \code{AGN\_blast}
+a $14\times$ speedup, reducing the total AGN feedback time by a factor
+of $\sim$4. Verification confirms bit-identical conservation
+diagnostics compared to the original brute-force implementation.
 
 
 % ===================================================================
@@ -1407,7 +1432,7 @@ consumption, and solver efficiency --- encountered in large-scale
 cosmological simulations. The main contributions are:
 
 \begin{enumerate}
-\item \textbf{K-section domain decomposition.} A recursive $k$-ary
+\item \textbf{Recursive \ksec\ domain decomposition.} A recursive $k$-ary
   spatial partitioning that replaces Hilbert curve ordering and enables
   hierarchical MPI communication with $\Olog{\sum_l k_l}$ messages per
   exchange, eliminating all \code{MPI\_ALLTOALL} calls. The tree
@@ -1433,11 +1458,11 @@ cosmological simulations. The main contributions are:
   and arithmetic optimizations reduce the Poisson solver's share of
   total runtime from 55\,per\,cent to 39\,per\,cent.
 
-\item \textbf{SNII feedback spatial binning.} A spatial hash binning
-  scheme reduces the feedback computation from
-  $\Olog{N_{\rm cells} \times N_{\rm SN}}$ to
-  $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm SN/bin}}$, achieving
-  160--260$\times$ speedups with $\sim$2000 simultaneous events.
+\item \textbf{Feedback spatial binning.} A spatial hash binning
+  scheme reduces both SNII and AGN feedback computations from
+  $\Olog{N_{\rm cells} \times N_{\rm event}}$ to
+  $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm event/bin}}$, achieving
+  speedups of one to two orders of magnitude.
 
 \item \textbf{Variable-ncpu restart.} HDF5 parallel I/O with
   automatic domain redistribution enables checkpoint/restart with
