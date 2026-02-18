@@ -208,20 +208,15 @@ The standard \ramses\ domain decomposition assigns cells to MPI ranks
 by sorting them along a Hilbert space-filling curve and partitioning
 the resulting one-dimensional index range into $\ncpu$ contiguous
 segments. While this preserves spatial locality reasonably well, it
-has two significant drawbacks for large-scale runs:
-
-\begin{enumerate}
-\item The ghost-zone exchange requires \code{MPI\_ALLTOALL} to
-  communicate emission/reception counts, followed by point-to-point
-  messages to all ranks with non-zero counts. In the worst case, every
-  rank communicates with every other rank, yielding $\Olog{\ncpu^2}$
-  total messages.
-
-\item The Hilbert key computation requires a large per-rank array
-  \code{hilbert\_key(1:ncell)} of 16 bytes per cell (when compiled
-  with \code{QUADHILBERT}), totalling $\sim$640\,MB at
-  $\ngridmax = 5 \times 10^6$.
-\end{enumerate}
+has two significant drawbacks for large-scale runs. First, the
+ghost-zone exchange requires \code{MPI\_ALLTOALL} to communicate
+emission/reception counts, followed by point-to-point messages to all
+ranks with non-zero counts; in the worst case, every rank communicates
+with every other rank, yielding $\Olog{\ncpu^2}$ total messages.
+Second, the Hilbert key computation requires a large per-rank array
+\code{hilbert\_key(1:ncell)} of 16 bytes per cell (when compiled with
+\code{QUADHILBERT}), totalling $\sim$640\,MB at $\ngridmax = 5 \times
+10^6$.
 
 Our recursive \ksec\ decomposition replaces the one-dimensional Hilbert
 partitioning with a recursive spatial partitioning in the original
@@ -231,7 +226,7 @@ hierarchical message routing that scales with the tree depth rather
 than the total number of ranks.
 
 
-\subsection{Tree construction}
+\subsection{Hierarchical Partitioning of Spatial and Communication Domain}
 \label{sec:ksec_tree}
 
 Given $\ncpu$ MPI ranks, we first compute the prime factorization:
