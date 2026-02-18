@@ -53,33 +53,73 @@ subroutine multigrid_fine(ilevel,icount)
 
    logical :: allmasked, allmasked_tot
 
+   ! Timing variables
+   real(kind=8) :: mg_t0, mg_t1, mg_t_setup, mg_t_commbuild
+   real(kind=8) :: mg_t_mask, mg_t_nbor, mg_t_iter_start
+   real(kind=8) :: mg_t_presmooth, mg_t_residual, mg_t_restrict
+   real(kind=8) :: mg_t_coarse, mg_t_correct, mg_t_postsmooth
+   real(kind=8) :: mg_t_finalres, mg_t_cleanup
+   real(kind=8) :: mg_sum_presmooth, mg_sum_residual, mg_sum_restrict
+   real(kind=8) :: mg_sum_coarse, mg_sum_correct, mg_sum_postsmooth
+   real(kind=8) :: mg_sum_finalres
+   real(kind=8) :: mg_ts0,mg_ts1,mg_ts2,mg_ts3,mg_ts4,mg_ts5,mg_ts6,mg_ts6b,mg_ts7
+
    if(gravity_type>0)return
    if(numbtot(1,ilevel)==0)return
 
    if(verbose) print '(A,I2)','Entering fine multigrid at level ',ilevel
 
+   mg_t0 = MPI_WTIME()
 
    ! ---------------------------------------------------------------------
    ! Prepare first guess, mask and BCs at finest level
    ! ---------------------------------------------------------------------
 
+   mg_ts0 = MPI_WTIME()
    if(ilevel>levelmin)then
       call make_initial_phi(ilevel,icount)         ! Interpolate phi down
    else
       call make_multipole_phi(ilevel)       ! Fill with simple initial guess
    endif
+   mg_ts1 = MPI_WTIME()
    call make_virtual_fine_dp(phi(1),ilevel) ! Update boundaries
+   mg_ts2 = MPI_WTIME()
    call make_boundary_phi(ilevel)           ! Update physical boundaries
+   mg_ts3 = MPI_WTIME()
 
    call make_fine_mask  (ilevel)            ! Fill the fine mask
+   mg_ts4 = MPI_WTIME()
    call make_virtual_fine_dp(f(:,3),ilevel) ! Communicate mask
+   mg_ts5 = MPI_WTIME()
    call make_boundary_mask(ilevel)          ! Set mask to -1 in phys bounds
+   mg_ts6 = MPI_WTIME()
+
+   ! Pre-compute neighbor grids BEFORE bc_rhs so it can use the array
+   call precompute_nbor_grid_fine(ilevel)
+   mg_ts6b = MPI_WTIME()
 
    call make_fine_bc_rhs(ilevel,icount)            ! Fill BC-modified RHS
+   mg_ts7 = MPI_WTIME()
 
    ! ---------------------------------------------------------------------
    ! Build communicators up
    ! ---------------------------------------------------------------------
+
+   mg_t1 = MPI_WTIME()
+   mg_t_setup = mg_t1 - mg_t0
+
+   if(myid==1) then
+      write(*,'(A,I2,A)') '  MG setup detail level=',ilevel,':'
+      write(*,'(A,F10.3,A)') '    make_initial_phi     :', mg_ts1-mg_ts0, ' s'
+      write(*,'(A,F10.3,A)') '    virtual_fine(phi)     :', mg_ts2-mg_ts1, ' s'
+      write(*,'(A,F10.3,A)') '    boundary_phi         :', mg_ts3-mg_ts2, ' s'
+      write(*,'(A,F10.3,A)') '    make_fine_mask        :', mg_ts4-mg_ts3, ' s'
+      write(*,'(A,F10.3,A)') '    virtual_fine(mask)    :', mg_ts5-mg_ts4, ' s'
+      write(*,'(A,F10.3,A)') '    boundary_mask         :', mg_ts6-mg_ts5, ' s'
+      write(*,'(A,F10.3,A)') '    precompute_nbor       :', mg_ts6b-mg_ts6, ' s'
+      write(*,'(A,F10.3,A)') '    make_fine_bc_rhs      :', mg_ts7-mg_ts6b, ' s'
+      write(*,'(A,F10.3,A)') '    SETUP TOTAL           :', mg_ts7-mg_ts0, ' s'
+   end if
 
    ! @ finer level
    call build_parent_comms_mg(active(ilevel),ilevel)
@@ -87,6 +127,9 @@ subroutine multigrid_fine(ilevel,icount)
    do ifine=(ilevel-1),2,-1
       call build_parent_comms_mg(active_mg(myid,ifine),ifine)
    end do
+
+   mg_t1 = MPI_WTIME()
+   mg_t_commbuild = mg_t1 - mg_t_setup - mg_t0
 
    ! ---------------------------------------------------------------------
    ! Restrict mask up, then set scan flag
@@ -163,8 +206,10 @@ subroutine multigrid_fine(ilevel,icount)
    end if
    if(nboundary>0)levelmin_mg=max(levelmin_mg,2)
 
-   ! Pre-compute neighbor grids for fine-level stencil operations
-   call precompute_nbor_grid_fine(ilevel)
+   mg_t1 = MPI_WTIME()
+   mg_t_mask = mg_t1 - mg_t_commbuild - mg_t_setup - mg_t0
+
+   ! nbor_grid_fine already precomputed before make_fine_bc_rhs
 
    ! Update flag with scan flag (uses nbor_grid_fine if available)
    call set_scan_flag_fine(ilevel)
@@ -172,20 +217,31 @@ subroutine multigrid_fine(ilevel,icount)
       call set_scan_flag_coarse(ifine)
    end do
 
+   mg_t1 = MPI_WTIME()
+   mg_t_nbor = mg_t1 - mg_t_mask - mg_t_commbuild - mg_t_setup - mg_t0
+
    ! ---------------------------------------------------------------------
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
+
+   mg_sum_presmooth = 0d0; mg_sum_residual = 0d0; mg_sum_restrict = 0d0
+   mg_sum_coarse = 0d0; mg_sum_correct = 0d0; mg_sum_postsmooth = 0d0
+   mg_sum_finalres = 0d0
+   mg_t_iter_start = MPI_WTIME()
 
    iter = 0
    err = 1.0d0
    main_iteration_loop: do
       iter=iter+1
+      mg_t1 = MPI_WTIME()
       ! Pre-smoothing
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
+      mg_t_presmooth = MPI_WTIME()
+      mg_sum_presmooth = mg_sum_presmooth + (mg_t_presmooth - mg_t1)
 
       ! Compute residual and restrict into upper level RHS
       ! Fuse residual + norm computation on first iteration
@@ -200,6 +256,9 @@ subroutine multigrid_fine(ilevel,icount)
          call cmp_residual_mg_fine(ilevel)
       end if
 
+      mg_t_residual = MPI_WTIME()
+      mg_sum_residual = mg_sum_residual + (mg_t_residual - mg_t_presmooth)
+
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
          if(active_mg(icpu,ilevel-1)%ngrid==0) cycle
@@ -208,6 +267,9 @@ subroutine multigrid_fine(ilevel,icount)
       ! Restrict and do reverse-comm
       call restrict_residual_fine_reverse(ilevel)
       call make_reverse_mg_dp(2,ilevel-1) ! communicate rhs
+
+      mg_t_restrict = MPI_WTIME()
+      mg_sum_restrict = mg_sum_restrict + (mg_t_restrict - mg_t_residual)
 
       if(ilevel>1) then
          ! Reset correction at upper level before solve
@@ -219,9 +281,17 @@ subroutine multigrid_fine(ilevel,icount)
          ! Multigrid-solve the upper level
          call recursive_multigrid_coarse(ilevel-1, safe_mode(ilevel))
 
+         mg_t_coarse = MPI_WTIME()
+         mg_sum_coarse = mg_sum_coarse + (mg_t_coarse - mg_t_restrict)
+
          ! Interpolate coarse solution and correct fine solution
          call interpolate_and_correct_fine(ilevel)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+
+         mg_t_correct = MPI_WTIME()
+         mg_sum_correct = mg_sum_correct + (mg_t_correct - mg_t_coarse)
+      else
+         mg_t_correct = mg_t_restrict
       end if
 
       ! Post-smoothing
@@ -231,6 +301,9 @@ subroutine multigrid_fine(ilevel,icount)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
 
+      mg_t_postsmooth = MPI_WTIME()
+      mg_sum_postsmooth = mg_sum_postsmooth + (mg_t_postsmooth - mg_t_correct)
+
       ! Update fine residual (fused with norm computation)
       call cmp_residual_mg_fine(ilevel, res_norm2)
 #ifndef WITHOUTMPI
@@ -238,6 +311,9 @@ subroutine multigrid_fine(ilevel,icount)
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
       res_norm2=res_norm2_tot
 #endif
+
+      mg_t_finalres = MPI_WTIME()
+      mg_sum_finalres = mg_sum_finalres + (mg_t_finalres - mg_t_postsmooth)
 
       last_err = err
       err = sqrt(res_norm2/(i_res_norm2+1d-20*rho_tot**2))
@@ -259,6 +335,26 @@ subroutine multigrid_fine(ilevel,icount)
 
    ! Free pre-computed neighbor grids
    if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
+
+   mg_t_cleanup = MPI_WTIME()
+
+   if(myid==1) then
+      write(*,'(A,I2,A,I3)') ' ---- MG timing level=', ilevel, ' iters=', iter
+      write(*,'(A,F10.3,A)') '   setup (init_phi+mask+bc):', mg_t_setup, ' s'
+      write(*,'(A,F10.3,A)') '   build_parent_comms      :', mg_t_commbuild, ' s'
+      write(*,'(A,F10.3,A)') '   restrict_mask+scan_flag :', mg_t_mask, ' s'
+      write(*,'(A,F10.3,A)') '   precompute_nbor+scanflag:', mg_t_nbor, ' s'
+      write(*,'(A,F10.3,A)') '   --- iteration loop total:', mg_t_cleanup - mg_t_iter_start, ' s'
+      write(*,'(A,F10.3,A)') '     pre-smooth (GS+comm)  :', mg_sum_presmooth, ' s'
+      write(*,'(A,F10.3,A)') '     residual (fine)       :', mg_sum_residual, ' s'
+      write(*,'(A,F10.3,A)') '     restrict+reverse_comm :', mg_sum_restrict, ' s'
+      write(*,'(A,F10.3,A)') '     coarse MG solve       :', mg_sum_coarse, ' s'
+      write(*,'(A,F10.3,A)') '     interpolate+correct   :', mg_sum_correct, ' s'
+      write(*,'(A,F10.3,A)') '     post-smooth (GS+comm) :', mg_sum_postsmooth, ' s'
+      write(*,'(A,F10.3,A)') '     final residual+allred :', mg_sum_finalres, ' s'
+      write(*,'(A,F10.3,A)') '   TOTAL (this level)      :', mg_t_cleanup - mg_t0, ' s'
+      write(*,'(A)') ' ----------------------------------------'
+   end if
 
    if(myid==1) print '(A,I5,A,I5,A,1pE10.3)','   ==> Level=',ilevel, ' Step=', &
             iter,' Error=',err
@@ -969,17 +1065,18 @@ subroutine make_fine_bc_rhs(ilevel,icount)
 
    integer, dimension(1:3,1:2,1:8) :: iii, jjj
 
-   real(dp) :: dx, oneoverdx2, phi_b, nb_mask, nb_phi, w
-
-   ! Arrays for vectorized interpol_phi
-   real(dp), dimension(1:nvector,1:twotondim) :: phi_int
-   integer,  dimension(1:nvector) :: ind_cell
+   real(dp) :: dx, oneoverdx2
 
    integer  :: ngrid
    integer  :: ind, igrid_mg, idim, inbor
    integer  :: igrid_amr, icell_amr, iskip_amr
    integer  :: igshift, igrid_nbor_amr, icell_nbor_amr
    integer  :: ifathercell_nbor_amr
+
+   ! Thread-private variables for OpenMP
+   real(dp) :: phi_b, nb_mask, nb_phi, w
+   real(dp), dimension(1:nvector,1:twotondim) :: phi_int
+   integer,  dimension(1:nvector) :: ind_cell
 
    integer  :: nx_loc
    real(dp) :: scale, fourpi
@@ -1006,7 +1103,12 @@ subroutine make_fine_bc_rhs(ilevel,icount)
    do ind=1,twotondim
       iskip_amr = ncoarse+(ind-1)*ngridmax
 
-      ! Loop over active grids
+      ! Loop over active grids — OpenMP parallelized
+      ! Each igrid_mg writes to unique icell_amr, so no race condition
+!$omp parallel do private(igrid_mg,igrid_amr,icell_amr,idim,inbor, &
+!$omp    igshift,igrid_nbor_amr,icell_nbor_amr,ifathercell_nbor_amr, &
+!$omp    nb_mask,nb_phi,w,phi_b,phi_int,ind_cell) &
+!$omp schedule(dynamic,1024)
       do igrid_mg=1,ngrid
          igrid_amr = active(ilevel)%igrid(igrid_mg)
          icell_amr = iskip_amr + igrid_amr
@@ -1016,27 +1118,25 @@ subroutine make_fine_bc_rhs(ilevel,icount)
 
          if(f(icell_amr,3)<=0.0) cycle ! Do not process masked cells
 
-         ! Separate directions 
+         ! Separate directions
          do idim=1,ndim
             ! Loop over the 2 neighbors
             do inbor=1,2
                ! Get neighbor grid shift
                igshift = iii(idim,inbor,ind)
 
-               ! Get neighbor grid and its parent cell
+               ! Get neighbor grid using precomputed array
                if(igshift==0) then
                   igrid_nbor_amr = igrid_amr
-                  ifathercell_nbor_amr = father(igrid_nbor_amr)
                else
-                  igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
-                  ifathercell_nbor_amr = morton_nbor_cell(igrid_amr,ilevel,igshift)
+                  igrid_nbor_amr = nbor_grid_fine(igshift, igrid_mg)
                end if
 
                if(igrid_nbor_amr==0) then
-                  ! No neighbor: set mask to -1 and interp. phi
+                  ! No neighbor (rare boundary case): interp. phi
                   nb_mask = -1.0d0
-
-                  ! Interpolate from upper level
+                  ! Only call morton_nbor_cell for this rare case
+                  ifathercell_nbor_amr = morton_nbor_cell(igrid_amr,ilevel,igshift)
                   ind_cell(1)=ifathercell_nbor_amr
                   call interpol_phi(ind_cell,phi_int,1,ilevel,icount)
                   nb_phi = phi_int(1,jjj(idim,inbor,ind))
@@ -1057,6 +1157,7 @@ subroutine make_fine_bc_rhs(ilevel,icount)
             end do
          end do
       end do
+!$omp end parallel do
    end do
 
 end subroutine make_fine_bc_rhs
