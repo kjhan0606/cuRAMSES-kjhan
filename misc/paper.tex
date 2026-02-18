@@ -30,8 +30,8 @@
 \newcommand{\Olog}[1]{\mathcal{O}(#1)}
 \newcommand{\code}[1]{\texttt{#1}}
 
-\title[cuRAMSES: Scalable AMR for Cosmological Simulations]
-{cuRAMSES: Scalable Domain Decomposition and Memory-Efficient AMR
+\title[cuRAMSES: Scalable CUDA-enabled AMR for Cosmological Simulations]
+{cuRAMSES: Scalable Domain Decomposition and CUDA-enabled AMR
 for Cosmological Simulations}
 
 \author[J.~Kim]{
@@ -68,11 +68,11 @@ exchange and eliminating all \code{MPI\_ALLTOALL} calls. A Morton key
 hash table for octree neighbour lookup removes one of the largest
 per-rank arrays in the original code, while on-demand allocation
 strategies for auxiliary arrays further reduce the memory footprint.
-Optimizations to the multigrid Poisson solver --- including precomputed
-neighbour caches, merged communication steps, and fused computation
-kernels --- substantially lower its share of total runtime. A spatial
-hash binning scheme accelerates Type~II supernova and AGN feedback by
-orders of magnitude over the original brute-force approach. We also
+A hybrid CPU/GPU dispatch model allows OMP threads to dynamically
+offload compute-intensive routines --- including the Godunov solver,
+gravity force computation, and radiative cooling --- to GPU streams at
+runtime, with automatic fallback to CPU execution when streams are
+unavailable. We also
 implement variable-$\ncpu$ restart via HDF5 parallel I/O, removing the
 constraint that checkpoint files must be read with the same number of
 MPI ranks as were used to write them. All modifications preserve
@@ -96,7 +96,8 @@ astrophysics, connecting the predictions of the $\Lambda$CDM paradigm
 to the observable properties of galaxies, the intergalactic medium,
 and the large-scale structure of the Universe
 \citep{Vogelsberger2014,Schaye2015,Dubois2014}. Adaptive mesh
-refinement (AMR) codes such as \ramses\ \citep{Teyssier2002} provide
+refinement (AMR) codes widely adopted by, for example, \ramses\
+\citep{Teyssier2002} and Enzo \citep{Bryan2014} provide
 an attractive framework for these simulations: the computational mesh
 is refined only where the physics demands it, concentrating resources
 on collapsing haloes and star-forming regions while keeping the cost
@@ -104,82 +105,43 @@ of smooth, low-density regions manageable.
 
 However, scaling AMR codes to the regime of $10^{10}$--$10^{11}$
 particles and $10^4$--$10^5$ MPI ranks poses several intertwined
-challenges:
-
-\begin{enumerate}
-\item \emph{Communication scaling.} The standard \ramses\
-  domain decomposition is based on a Hilbert space-filling curve.
-  Ghost-zone (virtual boundary) exchange requires every rank to
-  communicate its emission and reception lists to \emph{all} other
-  ranks via \code{MPI\_ALLTOALL}, leading to
-  $\Olog{\ncpu^2}$ message complexity and a corresponding memory
-  footprint of $\Olog{\ncpu}$ per-rank buffers.
-
-\item \emph{Memory overhead.} Several large arrays in \ramses\
-  scale linearly with $\ngridmax$, the maximum number of AMR grids per
-  rank. The neighbour-pointer array \code{nbor($\ngridmax$, 6)}
-  alone consumes $48\,\ngridmax$ bytes; the Hilbert key array adds
-  another $16\,\ngridmax$ bytes when compiled with
-  \code{QUADHILBERT}. For production runs with
-  $\ngridmax \sim 5 \times 10^6$, these arrays together consume
-  nearly 1\,GB per rank --- memory that could otherwise accommodate
-  more particles or finer refinement.
-
-\item \emph{Load balancing flexibility.} The Hilbert ordering
-  distributes computational load based on cell count alone. In
-  practice, the memory consumed by a grid cell depends on both the
-  grid data structures (hydro variables, gravity arrays, linked lists)
-  and the number of particles attached to the cell. A cell hosting
-  $10^4$ particles in a dense halo is far more expensive in memory
-  than a void cell with zero particles, yet the standard load balancer
-  treats them equally.
-
-\item \emph{Solver efficiency.} The multigrid Poisson solver
-  typically dominates runtime in gravity-coupled simulations. Its
-  per-iteration cost is driven not only by floating-point operations
-  but also by frequent ghost-zone exchanges (up to nine per smoothing
-  iteration) and repeated hash table lookups for neighbour grids in the
-  octree.
-
-\item \emph{Checkpoint flexibility.} \ramses\ writes one file per
-  MPI rank. Restarting with a different number of ranks requires an
-  intermediate dump-and-redistribute step, which is cumbersome for
-  production workflows where available node counts vary between
-  allocations.
-\end{enumerate}
+challenges. First, the standard \ramses\ domain decomposition based on
+a Hilbert space-filling curve requires every rank to exchange emission
+and reception lists with \emph{all} other ranks via
+\code{MPI\_ALLTOALL}, leading to $\Olog{\ncpu^2}$ message complexity
+and $\Olog{\ncpu}$ per-rank buffer memory. Second, several large
+arrays scale linearly with $\ngridmax$: the neighbour-pointer array
+\code{nbor($\ngridmax$, 6)} alone consumes $48\,\ngridmax$ bytes, and
+the Hilbert key array adds another $16\,\ngridmax$ bytes, together
+approaching 1\,GB per rank for production configurations with
+$\ngridmax \sim 5 \times 10^6$. Third, the Hilbert ordering
+distributes load based on cell count alone, ignoring the fact that a
+cell hosting $10^4$ particles in a dense halo is far more expensive in
+memory than a void cell with zero particles. Fourth, the multigrid
+Poisson solver typically dominates runtime, its per-iteration cost
+driven by frequent ghost-zone exchanges and repeated hash table
+lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
+rank, so restarting with a different rank count requires a cumbersome
+intermediate redistribution step.
 
 In this paper we describe \curamses, a comprehensive set of
-modifications to \ramses\ that addresses each of these challenges. The
-key innovations are:
-
-\begin{itemize}
-\item A recursive \ksec\ domain decomposition (Section~\ref{sec:ksection}) that
-  replaces Hilbert ordering with a hierarchical multi-way spatial
-  partitioning, enabling hierarchical MPI exchange with
-  $\Olog{\sum_l k_l}$ messages per operation.
-
-\item A Morton key hash table for octree neighbour lookup
-  (Section~\ref{sec:morton}) that eliminates the \code{nbor} array
-  entirely, saving $\sim$240\,MB per rank at $\ngridmax = 5 \times
-  10^6$.
-
-\item On-demand allocation and elimination of redundant large arrays
-  (Section~\ref{sec:memory}), yielding over 1\,GB of additional
-  savings per rank.
-
-\item Algorithmic optimizations to the multigrid Poisson solver
-  (Section~\ref{sec:multigrid}), reducing its share of total runtime
-  from 55\,per\,cent to 39\,per\,cent.
-
-\item A spatial hash binning scheme for Type~II supernova and AGN
-  feedback (Section~\ref{sec:feedback}), accelerating the feedback
-  averaging and blast injection by orders of magnitude.
-
-\item Variable-$\ncpu$ restart with HDF5 parallel I/O
-  (Section~\ref{sec:varcpu}), along with miscellaneous improvements
-  described in Section~\ref{sec:misc}.
-\end{itemize}
-
+modifications to \ramses\ that addresses each of these challenges. We
+introduce a recursive \ksec\ domain decomposition
+(Section~\ref{sec:ksection}) that replaces Hilbert ordering with a
+hierarchical multi-way spatial partitioning, enabling MPI exchange with
+$\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table
+(Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely,
+saving $\sim$240\,MB per rank, and on-demand allocation of redundant
+large arrays (Section~\ref{sec:memory}) yields over 1\,GB of
+additional savings. Algorithmic optimizations to the multigrid Poisson
+solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
+from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
+scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
+AGN feedback by orders of magnitude. A hybrid CPU/GPU dispatch model
+(Section~\ref{sec:hybrid}) dynamically offloads compute-intensive
+routines to GPU streams at runtime. We also implement variable-$\ncpu$
+restart with HDF5 parallel I/O (Section~\ref{sec:varcpu}), along with
+miscellaneous improvements described in Section~\ref{sec:misc}.
 Performance benchmarks are presented in
 Section~\ref{sec:performance}, and we conclude in
 Section~\ref{sec:conclusions}.
@@ -1617,6 +1579,9 @@ author.
 \bibliographystyle{mnras}
 
 \begin{thebibliography}{99}
+
+\bibitem[\protect\citeauthoryear{Bryan et al.}{Bryan et al.}{2014}]{Bryan2014}
+Bryan G.~L., et al., 2014, ApJS, 211, 19
 
 \bibitem[\protect\citeauthoryear{Dubois et al.}{Dubois et al.}{2014}]{Dubois2014}
 Dubois Y., et al., 2014, MNRAS, 444, 1453
