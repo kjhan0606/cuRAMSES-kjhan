@@ -1,12 +1,9 @@
-#ifdef HYDRO_CUDA
 !###########################################################
-! Module for hybrid CPU/GPU hydro dispatch data structures
+! Module for scatter buffer (always compiled, no #ifdef)
 !###########################################################
-module hydro_hybrid_commons
+module hydro_scatter_commons
   use amr_parameters, only: dp
   implicit none
-
-  integer, parameter :: HYBRID_SUPER_SIZE = 4096
   integer, parameter :: SBUF_INIT_CAP = 65536
 
   type scatter_buf_t
@@ -17,6 +14,58 @@ module hydro_hybrid_commons
      real(dp), allocatable :: ddivu(:)
      real(dp), allocatable :: denew(:)
   end type scatter_buf_t
+
+contains
+
+  subroutine scatter_buf_init(buf, cap, nv)
+    type(scatter_buf_t), intent(inout) :: buf
+    integer, intent(in) :: cap, nv
+    buf%count = 0
+    buf%capacity = cap
+    allocate(buf%icell(cap))
+    allocate(buf%dunew(cap, nv))
+    allocate(buf%ddivu(cap))
+    allocate(buf%denew(cap))
+  end subroutine scatter_buf_init
+
+  subroutine scatter_buf_grow(buf)
+    type(scatter_buf_t), intent(inout) :: buf
+    integer :: new_cap, nv
+    integer, allocatable :: tmp_icell(:)
+    real(dp), allocatable :: tmp_dunew(:,:), tmp_ddivu(:), tmp_denew(:)
+
+    new_cap = buf%capacity * 2
+    nv = size(buf%dunew, 2)
+
+    allocate(tmp_icell(new_cap))
+    allocate(tmp_dunew(new_cap, nv))
+    allocate(tmp_ddivu(new_cap))
+    allocate(tmp_denew(new_cap))
+
+    tmp_icell(1:buf%capacity) = buf%icell(1:buf%capacity)
+    tmp_dunew(1:buf%capacity,:) = buf%dunew(1:buf%capacity,:)
+    tmp_ddivu(1:buf%capacity) = buf%ddivu(1:buf%capacity)
+    tmp_denew(1:buf%capacity) = buf%denew(1:buf%capacity)
+
+    call move_alloc(tmp_icell, buf%icell)
+    call move_alloc(tmp_dunew, buf%dunew)
+    call move_alloc(tmp_ddivu, buf%ddivu)
+    call move_alloc(tmp_denew, buf%denew)
+
+    buf%capacity = new_cap
+  end subroutine scatter_buf_grow
+
+end module hydro_scatter_commons
+#ifdef HYDRO_CUDA
+!###########################################################
+! Module for hybrid CPU/GPU hydro dispatch data structures
+!###########################################################
+module hydro_hybrid_commons
+  use hydro_scatter_commons
+  use amr_parameters, only: dp
+  implicit none
+
+  integer, parameter :: HYBRID_SUPER_SIZE = 4096
 
   type gpu_state_t
      ! H2D super buffers (uloc/gloc/ok uploaded per flush)
@@ -69,44 +118,6 @@ contains
     irc = cuda_host_register_c(c_loc(arr), int(size(arr)*8, c_long_long))
   end subroutine
 
-  subroutine scatter_buf_init(buf, cap, nv)
-    type(scatter_buf_t), intent(inout) :: buf
-    integer, intent(in) :: cap, nv
-    buf%count = 0
-    buf%capacity = cap
-    allocate(buf%icell(cap))
-    allocate(buf%dunew(cap, nv))
-    allocate(buf%ddivu(cap))
-    allocate(buf%denew(cap))
-  end subroutine scatter_buf_init
-
-  subroutine scatter_buf_grow(buf)
-    type(scatter_buf_t), intent(inout) :: buf
-    integer :: new_cap, nv
-    integer, allocatable :: tmp_icell(:)
-    real(dp), allocatable :: tmp_dunew(:,:), tmp_ddivu(:), tmp_denew(:)
-
-    new_cap = buf%capacity * 2
-    nv = size(buf%dunew, 2)
-
-    allocate(tmp_icell(new_cap))
-    allocate(tmp_dunew(new_cap, nv))
-    allocate(tmp_ddivu(new_cap))
-    allocate(tmp_denew(new_cap))
-
-    tmp_icell(1:buf%capacity) = buf%icell(1:buf%capacity)
-    tmp_dunew(1:buf%capacity,:) = buf%dunew(1:buf%capacity,:)
-    tmp_ddivu(1:buf%capacity) = buf%ddivu(1:buf%capacity)
-    tmp_denew(1:buf%capacity) = buf%denew(1:buf%capacity)
-
-    call move_alloc(tmp_icell, buf%icell)
-    call move_alloc(tmp_dunew, buf%dunew)
-    call move_alloc(tmp_ddivu, buf%ddivu)
-    call move_alloc(tmp_denew, buf%denew)
-
-    buf%capacity = new_cap
-  end subroutine scatter_buf_grow
-
 end module hydro_hybrid_commons
 #endif
 !###########################################################
@@ -116,10 +127,12 @@ end module hydro_hybrid_commons
 subroutine godunov_fine(ilevel)
   use amr_commons
   use hydro_commons
+  use hydro_scatter_commons
 #ifdef HYDRO_CUDA
   use cuda_commons
   use hydro_cuda_interface
 #endif
+!$ use omp_lib
   implicit none
   integer::ilevel
   !--------------------------------------------------------------------------
@@ -127,11 +140,10 @@ subroutine godunov_fine(ilevel)
   ! Small grids (2x2x2) are gathered from level ilevel and sent to the
   ! hydro solver. On entry, hydro variables are gathered from array uold.
   ! On exit, unew has been updated.
-  !
-  ! HYDRO_CUDA: OMP threads dynamically dispatch batches to GPU streams
-  ! or CPU fallback depending on stream availability.
   !--------------------------------------------------------------------------
-  integer::i,ivar,igrid,ncache,ngrid
+  integer::i,ivar,igrid,ncache,ngrid,ic
+  integer::nthreads,tid,it
+  type(scatter_buf_t), allocatable :: cpu_scatter_bufs(:)
 #ifdef HYDRO_CUDA
   logical, save :: cuda_init_done = .false.
 #endif
@@ -166,13 +178,45 @@ subroutine godunov_fine(ilevel)
      call godunov_fine_hybrid(ilevel, ncache)
   else
 #endif
-#ifndef OMP_TEST
-!$omp parallel do private(igrid,ngrid) shared(ncache, ilevel)
-#endif
-  do igrid=1,ncache,nvector
-     ngrid=MIN(nvector,ncache-igrid+1)
-     call godfine1(ilevel, igrid,ngrid)
+
+  ! Allocate per-thread scatter buffers for Level L-1
+  nthreads = 1
+  !$ nthreads = omp_get_max_threads()
+  allocate(cpu_scatter_bufs(0:nthreads-1))
+  do it = 0, nthreads-1
+     call scatter_buf_init(cpu_scatter_bufs(it), SBUF_INIT_CAP, nvar)
   end do
+
+  ! Dynamic scheduling with per-thread scatter buffers
+  !$omp parallel do private(igrid,ngrid,tid) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     tid = 0
+     !$ tid = omp_get_thread_num()
+     ngrid=MIN(nvector,ncache-igrid+1)
+     call godfine1(ilevel, igrid, ngrid, cpu_scatter_bufs(tid))
+  end do
+
+  ! Serial merge: L-1 scatter buffers -> unew/divu/enew
+  do it = 0, nthreads-1
+     do i = 1, cpu_scatter_bufs(it)%count
+        ic = cpu_scatter_bufs(it)%icell(i)
+        do ivar = 1, nvar
+           unew(ic, ivar) = unew(ic, ivar) + cpu_scatter_bufs(it)%dunew(i, ivar)
+        end do
+        if (pressure_fix) then
+           divu(ic) = divu(ic) + cpu_scatter_bufs(it)%ddivu(i)
+           enew(ic) = enew(ic) + cpu_scatter_bufs(it)%denew(i)
+        end if
+     end do
+  end do
+
+  ! Cleanup scatter buffers
+  do it = 0, nthreads-1
+     deallocate(cpu_scatter_bufs(it)%icell, cpu_scatter_bufs(it)%dunew, &
+                cpu_scatter_bufs(it)%ddivu, cpu_scatter_bufs(it)%denew)
+  end do
+  deallocate(cpu_scatter_bufs)
+
 #ifdef HYDRO_CUDA
   end if
 #endif
@@ -550,9 +594,10 @@ end subroutine sub_add_pdv_source_terms
 !###########################################################
 !###########################################################
 !###########################################################
-subroutine godfine1(ilevel, jgrid,mgrid)
+subroutine godfine1(ilevel, jgrid, mgrid, sbuf)
   use amr_commons
   use hydro_commons
+  use hydro_scatter_commons
   use poisson_commons
   use morton_hash
 #ifdef HYDRO_CUDA
@@ -561,7 +606,8 @@ subroutine godfine1(ilevel, jgrid,mgrid)
   use hydro_cuda_interface
 #endif
   implicit none
-  integer, intent(in) ::ilevel,jgrid,mgrid
+  integer, intent(in) :: ilevel, jgrid, mgrid
+  type(scatter_buf_t), intent(inout), optional :: sbuf
   integer,dimension(1:nvector)::ind_grid
   integer:: ngrid
   !-------------------------------------------------------------------
@@ -593,6 +639,8 @@ subroutine godfine1(ilevel, jgrid,mgrid)
   integer::i,j,ivar,idim,ind_son,ind_father,iskip,nbuffer,ibuffer
   integer::i0,j0,k0,i1,j1,k1,i2,j2,k2,i3,j3,k3,nx_loc,nb_noneigh,nb_noneigh2,nexist
   integer::igridn_tmp
+  integer::icell_nbor,idx
+  real(dp)::acc_unew(1:nvar),acc_ddivu,acc_denew
   integer::i1min,i1max,j1min,j1max,k1min,k1max
   integer::i2min,i2max,j2min,j2max,k2min,k2max
   integer::i3min,i3max,j3min,j3max,k3min,k3max
@@ -793,11 +841,8 @@ subroutine godfine1(ilevel, jgrid,mgrid)
   end do
   !--------------------------------------
   ! Conservative update at level ilevel
+  ! (conflict-free: each thread writes to its own grid cells)
   !--------------------------------------
-#ifndef OMP_TEST
-!$omp flush
-!$omp critical (godunov)
-#endif
   do idim=1,ndim
      i0=0; j0=0; k0=0
      if(idim==1)i0=1
@@ -841,124 +886,175 @@ subroutine godfine1(ilevel, jgrid,mgrid)
      end do
   end do
 
-
   !--------------------------------------
   ! Conservative update at level ilevel-1
   !--------------------------------------
-  ! Loop over dimensions
-  do idim=1,ndim
-     i0=0; j0=0; k0=0
-     if(idim==1)i0=1
-     if(idim==2)j0=1
-     if(idim==3)k0=1
-
-     !----------------------
-     ! Left flux at boundary
-     !----------------------
-     ! Check if grids sits near left boundary
-     ! and gather neighbor father cells index
-     nb_noneigh=0
+  if (present(sbuf)) then
+     ! Scatter buffer path: accumulate per-grid L-1 contributions
      do i=1,ngrid
-        igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
-        if (igridn_tmp==0) then
-           nb_noneigh = nb_noneigh + 1
-           ind_buffer(nb_noneigh) = morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
-           ind_cell(nb_noneigh) = i
+        do idim=1,ndim
+           i0=0; j0=0; k0=0
+           if(idim==1)i0=1
+           if(idim==2)j0=1
+           if(idim==3)k0=1
+
+           ! Left boundary
+           igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+           if (igridn_tmp==0) then
+              icell_nbor = morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
+              acc_unew(1:nvar) = 0.0d0
+              acc_ddivu = 0.0d0; acc_denew = 0.0d0
+              do k3=k3min,k3max-k0
+              do j3=j3min,j3max-j0
+              do i3=i3min,i3max-i0
+                 do ivar=1,nvar
+                    acc_unew(ivar) = acc_unew(ivar) &
+                         & - flux(i,i3,j3,k3,ivar,idim)*oneontwotondim
+                 end do
+                 if(pressure_fix)then
+                    acc_ddivu = acc_ddivu - tmp(i,i3,j3,k3,1,idim)*oneontwotondim
+                    acc_denew = acc_denew - tmp(i,i3,j3,k3,2,idim)*oneontwotondim
+                 end if
+              end do
+              end do
+              end do
+              sbuf%count = sbuf%count + 1
+              idx = sbuf%count
+              if (idx > sbuf%capacity) call scatter_buf_grow(sbuf)
+              sbuf%icell(idx) = icell_nbor
+              sbuf%dunew(idx, 1:nvar) = acc_unew(1:nvar)
+              if(pressure_fix) then
+                 sbuf%ddivu(idx) = acc_ddivu
+                 sbuf%denew(idx) = acc_denew
+              end if
+           end if
+
+           ! Right boundary
+           igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim)
+           if (igridn_tmp==0) then
+              icell_nbor = morton_nbor_cell(ind_grid(i),ilevel,2*idim)
+              acc_unew(1:nvar) = 0.0d0
+              acc_ddivu = 0.0d0; acc_denew = 0.0d0
+              do k3=k3min+k0,k3max
+              do j3=j3min+j0,j3max
+              do i3=i3min+i0,i3max
+                 do ivar=1,nvar
+                    acc_unew(ivar) = acc_unew(ivar) &
+                         & + flux(i,i3+i0,j3+j0,k3+k0,ivar,idim)*oneontwotondim
+                 end do
+                 if(pressure_fix)then
+                    acc_ddivu = acc_ddivu + tmp(i,i3+i0,j3+j0,k3+k0,1,idim)*oneontwotondim
+                    acc_denew = acc_denew + tmp(i,i3+i0,j3+j0,k3+k0,2,idim)*oneontwotondim
+                 end if
+              end do
+              end do
+              end do
+              sbuf%count = sbuf%count + 1
+              idx = sbuf%count
+              if (idx > sbuf%capacity) call scatter_buf_grow(sbuf)
+              sbuf%icell(idx) = icell_nbor
+              sbuf%dunew(idx, 1:nvar) = acc_unew(1:nvar)
+              if(pressure_fix) then
+                 sbuf%ddivu(idx) = acc_ddivu
+                 sbuf%denew(idx) = acc_denew
+              end if
+           end if
+
+        end do
+     end do
+  else
+     ! Fallback: original critical section path
+     !$omp critical (godunov)
+     do idim=1,ndim
+        i0=0; j0=0; k0=0
+        if(idim==1)i0=1
+        if(idim==2)j0=1
+        if(idim==3)k0=1
+        nb_noneigh=0
+        do i=1,ngrid
+           igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim-1)
+           if (igridn_tmp==0) then
+              nb_noneigh = nb_noneigh + 1
+              ind_buffer(nb_noneigh) = morton_nbor_cell(ind_grid(i),ilevel,2*idim-1)
+              ind_cell(nb_noneigh) = i
+           end if
+        end do
+        nb_noneigh2=0
+        do i=1,ngrid
+           igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim)
+           if (igridn_tmp==0) then
+              nb_noneigh2 = nb_noneigh2 + 1
+              ind_buffer2(nb_noneigh2) = morton_nbor_cell(ind_grid(i),ilevel,2*idim)
+              ind_cell2(nb_noneigh2) = i
+           end if
+        end do
+        do ivar=1,nvar
+           do k3=k3min,k3max-k0
+           do j3=j3min,j3max-j0
+           do i3=i3min,i3max-i0
+              do i=1,nb_noneigh
+                 unew(ind_buffer(i),ivar)=unew(ind_buffer(i),ivar) &
+                      & -flux(ind_cell(i),i3,j3,k3,ivar,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
+           do k3=k3min+k0,k3max
+           do j3=j3min+j0,j3max
+           do i3=i3min+i0,i3max
+              do i=1,nb_noneigh2
+                 unew(ind_buffer2(i),ivar)=unew(ind_buffer2(i),ivar) &
+                      & +flux(ind_cell2(i),i3+i0,j3+j0,k3+k0,ivar,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
+        end do
+        if(pressure_fix)then
+           do k3=k3min,k3max-k0
+           do j3=j3min,j3max-j0
+           do i3=i3min,i3max-i0
+              do i=1,nb_noneigh
+                 divu(ind_buffer(i))=divu(ind_buffer(i)) &
+                      & -tmp(ind_cell(i),i3,j3,k3,1,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
+           do k3=k3min+k0,k3max
+           do j3=j3min+j0,j3max
+           do i3=i3min+i0,i3max
+              do i=1,nb_noneigh2
+                 divu(ind_buffer2(i))=divu(ind_buffer2(i)) &
+                      & +tmp(ind_cell2(i),i3+i0,j3+j0,k3+k0,1,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
+           do k3=k3min,k3max-k0
+           do j3=j3min,j3max-j0
+           do i3=i3min,i3max-i0
+              do i=1,nb_noneigh
+                 enew(ind_buffer(i))=enew(ind_buffer(i)) &
+                      & -tmp(ind_cell(i),i3,j3,k3,2,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
+           do k3=k3min+k0,k3max
+           do j3=j3min+j0,j3max
+           do i3=i3min+i0,i3max
+              do i=1,nb_noneigh2
+                 enew(ind_buffer2(i))=enew(ind_buffer2(i)) &
+                      & +tmp(ind_cell2(i),i3+i0,j3+j0,k3+k0,2,idim)*oneontwotondim
+              end do
+           end do
+           end do
+           end do
         end if
      end do
-
-     !-----------------------
-     ! Right flux at boundary
-     !-----------------------
-     ! Check if grids sits near right boundary
-     ! and gather neighbor father cells index
-     nb_noneigh2=0
-     do i=1,ngrid
-        igridn_tmp = morton_nbor_grid(ind_grid(i),ilevel,2*idim)
-        if (igridn_tmp==0) then
-           nb_noneigh2 = nb_noneigh2 + 1
-           ind_buffer2(nb_noneigh2) = morton_nbor_cell(ind_grid(i),ilevel,2*idim)
-           ind_cell2(nb_noneigh2) = i
-        end if
-     end do
-     ! Conservative update of new state variables
-     do ivar=1,nvar
-        ! Loop over boundary cells
-        do k3=k3min,k3max-k0
-        do j3=j3min,j3max-j0
-        do i3=i3min,i3max-i0
-           do i=1,nb_noneigh
-              unew(ind_buffer(i),ivar)=unew(ind_buffer(i),ivar) &
-                   & -flux(ind_cell(i),i3,j3,k3,ivar,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-        ! Loop over boundary cells
-        do k3=k3min+k0,k3max
-        do j3=j3min+j0,j3max
-        do i3=i3min+i0,i3max
-           do i=1,nb_noneigh2
-              unew(ind_buffer2(i),ivar)=unew(ind_buffer2(i),ivar) &
-                   & +flux(ind_cell2(i),i3+i0,j3+j0,k3+k0,ivar,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-     end do
-     if(pressure_fix)then
-        ! Update velocity divergence
-        do k3=k3min,k3max-k0
-        do j3=j3min,j3max-j0
-        do i3=i3min,i3max-i0
-           do i=1,nb_noneigh
-              divu(ind_buffer(i))=divu(ind_buffer(i)) &
-                   & -tmp(ind_cell(i),i3,j3,k3,1,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-        ! Update velocity divergence
-        do k3=k3min+k0,k3max
-        do j3=j3min+j0,j3max
-        do i3=i3min+i0,i3max
-           do i=1,nb_noneigh2
-              divu(ind_buffer2(i))=divu(ind_buffer2(i)) &
-                   & +tmp(ind_cell2(i),i3+i0,j3+j0,k3+k0,1,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-        ! Update internal energy
-        do k3=k3min,k3max-k0
-        do j3=j3min,j3max-j0
-        do i3=i3min,i3max-i0
-           do i=1,nb_noneigh
-              enew(ind_buffer(i))=enew(ind_buffer(i)) &
-                   & -tmp(ind_cell(i),i3,j3,k3,2,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-        ! Update internal energy
-        do k3=k3min+k0,k3max
-        do j3=j3min+j0,j3max
-        do i3=i3min+i0,i3max
-           do i=1,nb_noneigh2
-              enew(ind_buffer2(i))=enew(ind_buffer2(i)) &
-                   & +tmp(ind_cell2(i),i3+i0,j3+j0,k3+k0,2,idim)*oneontwotondim
-           end do
-        end do
-        end do
-        end do
-     end if
-
-  end do
-#ifndef OMP_TEST
-!$omp flush
-!$omp end critical (godunov)
-#endif
-  ! End loop over dimensions
+     !$omp end critical (godunov)
+  end if
 
 end subroutine godfine1
 #ifdef HYDRO_CUDA
