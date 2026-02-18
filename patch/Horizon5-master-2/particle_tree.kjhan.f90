@@ -174,7 +174,7 @@ subroutine make_tree_fine(ilevel)
   integer::ilevel
   !-----------------------------------------------------------------------
   ! This subroutine checks if particles have moved from their parent grid
-  ! to one of the 3**ndim neighboring sister grids. The particle is then 
+  ! to one of the 3**ndim neighboring sister grids. The particle is then
   ! disconnected from the parent grid linked list, and connected to the
   ! corresponding sister grid linked list. If the sister grid does
   ! not exist, the particle is left to its original parent grid.
@@ -187,13 +187,24 @@ subroutine make_tree_fine(ilevel)
   real(dp),dimension(1:3)::skip_loc
   integer::igrid,jgrid,ipart,jpart,next_part
   integer::ig,ip,npart1,icpu
+#ifndef _OPENMP
   integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
+#else
+  integer,target,allocatable::P_ig_mt(:,:),P_ip_mt(:,:),P_igp_mt(:,:)
+  integer,pointer::ind_grid(:),ind_part(:),ind_grid_part(:)
+  common /omp_mtf_ptrs/ ind_grid, ind_part, ind_grid_part
+  !$omp threadprivate(/omp_mtf_ptrs/)
+  integer::mythread,nthreads
+  common /omp_mtf_thr/ mythread, nthreads
+  !$omp threadprivate(/omp_mtf_thr/)
+  integer::ncache
+#endif
 
   if(numbtot(1,ilevel)==0)return
   if(verbose)write(*,111)ilevel
 
   ! Mesh spacing in that level
-  dx=0.5D0**ilevel    
+  dx=0.5D0**ilevel
   xbound(1:3)=(/dble(nx),dble(ny),dble(nz)/)
   nx_loc=(icoarse_max-icoarse_min+1)
   skip_loc=(/0.0d0,0.0d0,0.0d0/)
@@ -202,15 +213,67 @@ subroutine make_tree_fine(ilevel)
   if(ndim>2)skip_loc(3)=dble(kcoarse_min)
   scale=boxlen/dble(nx_loc)
 
+#ifdef _OPENMP
+  ! Setup per-thread work arrays
+  !$omp parallel
+  mythread=omp_get_thread_num()
+  nthreads=omp_get_num_threads()
+  !$omp end parallel
+  allocate(P_ig_mt(1:nvector,0:nthreads-1))
+  allocate(P_ip_mt(1:nvector,0:nthreads-1))
+  allocate(P_igp_mt(1:nvector,0:nthreads-1))
+  !$omp parallel
+  ind_grid => P_ig_mt(:,mythread)
+  ind_part => P_ip_mt(:,mythread)
+  ind_grid_part => P_igp_mt(:,mythread)
+  !$omp end parallel
+#endif
+
   ! Loop over cpus
   do icpu=1,ncpu
+#ifdef _OPENMP
+     if(icpu==myid)then
+        ncache=active(ilevel)%ngrid
+     else
+        ncache=reception(icpu,ilevel)%ngrid
+     end if
+     ! Grid-level parallel: dest grids may overlap, critical in check_tree
+!$omp parallel do private(igrid,npart1,ipart,jpart,next_part,ig,ip) &
+!$omp& schedule(dynamic,128)
+     do jgrid=1,ncache
+        if(icpu==myid)then
+           igrid=active(ilevel)%igrid(jgrid)
+        else
+           igrid=reception(icpu,ilevel)%igrid(jgrid)
+        end if
+        npart1=numbp(igrid)
+        if(npart1>0)then
+           ig=1
+           ind_grid(1)=igrid
+           ip=0
+           ipart=headp(igrid)
+           do jpart=1,npart1
+              next_part=nextp(ipart)
+              ip=ip+1
+              ind_part(ip)=ipart
+              ind_grid_part(ip)=1
+              if(ip==nvector)then
+                 call check_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+                 ip=0
+              end if
+              ipart=next_part
+           end do
+           if(ip>0)call check_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+        end if
+     end do
+#else
      igrid=headl(icpu,ilevel)
      ig=0
      ip=0
      ! Loop over grids
      do jgrid=1,numbl(icpu,ilevel)
         npart1=numbp(igrid)  ! Number of particles in the grid
-        if(npart1>0)then        
+        if(npart1>0)then
            ig=ig+1
            ind_grid(ig)=igrid
            ipart=headp(igrid)
@@ -239,8 +302,13 @@ subroutine make_tree_fine(ilevel)
      end do
      ! End loop over grids
      if(ip>0)call check_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+#endif
   end do
   ! End loop over cpus
+
+#ifdef _OPENMP
+  deallocate(P_ig_mt, P_ip_mt, P_igp_mt)
+#endif
 
   ! Periodic boundaries
   if(sink)then
@@ -277,6 +345,7 @@ subroutine check_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   real(dp)::dx,xxx,scale
   real(dp),dimension(1:3)::xbound
   ! Grid-based arrays
+#ifndef _OPENMP
   integer ,dimension(1:nvector,1:threetondim),save::nbors_father_cells
   integer ,dimension(1:nvector,1:twotondim),save::nbors_father_grids
   real(dp),dimension(1:nvector,1:ndim),save::x0
@@ -285,6 +354,15 @@ subroutine check_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   integer,dimension(1:nvector),save::ind_son,igrid_son
   integer,dimension(1:nvector),save::list1,list2
   logical,dimension(1:nvector),save::ok
+#else
+  integer ,dimension(1:nvector,1:threetondim)::nbors_father_cells
+  integer ,dimension(1:nvector,1:twotondim)::nbors_father_grids
+  real(dp),dimension(1:nvector,1:ndim)::x0
+  integer ,dimension(1:nvector)::ind_father
+  integer,dimension(1:nvector)::ind_son,igrid_son
+  integer,dimension(1:nvector)::list1,list2
+  logical,dimension(1:nvector)::ok
+#endif
   real(dp),dimension(1:3)::skip_loc
 
   ! Mesh spacing in that level
@@ -370,8 +448,13 @@ subroutine check_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         list2(j)=igrid_son(j)
      end if
   end do
-  call remove_list(ind_part,list1,ok,np)
-  call add_list(ind_part,list2,ok,np)
+  ! Critical section: dest grids may be shared between threads
+  if(any(ok(1:np))) then
+!$omp critical(check_tree_list)
+     call remove_list(ind_part,list1,ok,np)
+     call add_list(ind_part,list2,ok,np)
+!$omp end critical(check_tree_list)
+  end if
 
 end subroutine check_tree
 !################################################################
@@ -384,15 +467,26 @@ subroutine kill_tree_fine(ilevel)
   implicit none
   integer::ilevel
   !------------------------------------------------------------------------
-  ! This routine sorts particle between ilevel grids and their 
-  ! ilevel+1 children grids. Particles are disconnected from their parent 
-  ! grid linked list and connected to their corresponding child grid linked 
-  ! list. If the  child grid does not exist, the particle is left to its 
-  ! original parent grid. 
+  ! This routine sorts particle between ilevel grids and their
+  ! ilevel+1 children grids. Particles are disconnected from their parent
+  ! grid linked list and connected to their corresponding child grid linked
+  ! list. If the  child grid does not exist, the particle is left to its
+  ! original parent grid.
   !------------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part
   integer::i,ig,ip,npart1,icpu
+#ifndef _OPENMP
   integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
+#else
+  integer,target,allocatable::P_ig_kt(:,:),P_ip_kt(:,:),P_igp_kt(:,:)
+  integer,pointer::ind_grid(:),ind_part(:),ind_grid_part(:)
+  common /omp_ktf_ptrs/ ind_grid, ind_part, ind_grid_part
+  !$omp threadprivate(/omp_ktf_ptrs/)
+  integer::mythread,nthreads
+  common /omp_ktf_thr/ mythread, nthreads
+  !$omp threadprivate(/omp_ktf_thr/)
+  integer::ncache
+#endif
 
   if(numbtot(1,ilevel)==0)return
   if(ilevel==nlevelmax)return
@@ -400,12 +494,14 @@ subroutine kill_tree_fine(ilevel)
   if(verbose)write(*,111)ilevel
 
   ! Reset all linked lists at level ilevel+1
+!$omp parallel do private(i)
   do i=1,active(ilevel+1)%ngrid
      headp(active(ilevel+1)%igrid(i))=0
      tailp(active(ilevel+1)%igrid(i))=0
      numbp(active(ilevel+1)%igrid(i))=0
   end do
   do icpu=1,ncpu
+!$omp parallel do private(i)
      do i=1,reception(icpu,ilevel+1)%ngrid
         headp(reception(icpu,ilevel+1)%igrid(i))=0
         tailp(reception(icpu,ilevel+1)%igrid(i))=0
@@ -413,17 +509,69 @@ subroutine kill_tree_fine(ilevel)
      end do
   end do
 
+#ifdef _OPENMP
+  ! Setup per-thread work arrays
+  !$omp parallel
+  mythread=omp_get_thread_num()
+  nthreads=omp_get_num_threads()
+  !$omp end parallel
+  allocate(P_ig_kt(1:nvector,0:nthreads-1))
+  allocate(P_ip_kt(1:nvector,0:nthreads-1))
+  allocate(P_igp_kt(1:nvector,0:nthreads-1))
+  !$omp parallel
+  ind_grid => P_ig_kt(:,mythread)
+  ind_part => P_ip_kt(:,mythread)
+  ind_grid_part => P_igp_kt(:,mythread)
+  !$omp end parallel
+#endif
+
   ! Sort particles between ilevel and ilevel+1
 
   ! Loop over cpus
   do icpu=1,ncpu
+#ifdef _OPENMP
+     if(icpu==myid)then
+        ncache=active(ilevel)%ngrid
+     else
+        ncache=reception(icpu,ilevel)%ngrid
+     end if
+     ! Grid-level parallel: each parent's children are unique, no conflicts
+!$omp parallel do private(igrid,npart1,ipart,jpart,next_part,ig,ip) &
+!$omp& schedule(dynamic,128)
+     do jgrid=1,ncache
+        if(icpu==myid)then
+           igrid=active(ilevel)%igrid(jgrid)
+        else
+           igrid=reception(icpu,ilevel)%igrid(jgrid)
+        end if
+        npart1=numbp(igrid)
+        if(npart1>0)then
+           ig=1
+           ind_grid(1)=igrid
+           ip=0
+           ipart=headp(igrid)
+           do jpart=1,npart1
+              next_part=nextp(ipart)
+              ip=ip+1
+              ind_part(ip)=ipart
+              ind_grid_part(ip)=1
+              if(ip==nvector)then
+                 call kill_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+                 ip=0
+              end if
+              ipart=next_part
+           end do
+           if(ip>0)call kill_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+        end if
+     end do
+#else
      igrid=headl(icpu,ilevel)
      ig=0
      ip=0
      ! Loop over grids
      do jgrid=1,numbl(icpu,ilevel)
         npart1=numbp(igrid)  ! Number of particles in the grid
-        if(npart1>0)then        
+        if(npart1>0)then
            ig=ig+1
            ind_grid(ig)=igrid
            ipart=headp(igrid)
@@ -437,7 +585,7 @@ subroutine kill_tree_fine(ilevel)
               end if
               ip=ip+1
               ind_part(ip)=ipart
-              ind_grid_part(ip)=ig   
+              ind_grid_part(ip)=ig
               if(ip==nvector)then
                  call kill_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
                  ip=0
@@ -451,8 +599,13 @@ subroutine kill_tree_fine(ilevel)
      end do
      ! End loop over grids
      if(ip>0)call kill_tree(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
-  end do 
+#endif
+  end do
   ! End loop over cpus
+
+#ifdef _OPENMP
+  deallocate(P_ig_kt, P_ip_kt, P_igp_kt)
+#endif
 
 111 format('   Entering kill_tree_fine for level ',I2)
 
@@ -474,15 +627,22 @@ subroutine kill_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   integer::i,j,idim,nx_loc
   real(dp)::dx,xxx,scale
   ! Grid based arrays
+#ifndef _OPENMP
   real(dp),dimension(1:nvector,1:ndim),save::x0
   ! Particle based arrays
   integer,dimension(1:nvector),save::igrid_son,ind_son
   integer,dimension(1:nvector),save::list1,list2
   logical,dimension(1:nvector),save::ok
+#else
+  real(dp),dimension(1:nvector,1:ndim)::x0
+  integer,dimension(1:nvector)::igrid_son,ind_son
+  integer,dimension(1:nvector)::list1,list2
+  logical,dimension(1:nvector)::ok
+#endif
   real(dp),dimension(1:3)::skip_loc
 
   ! Mesh spacing in that level
-  dx=0.5D0**ilevel   
+  dx=0.5D0**ilevel
   nx_loc=(icoarse_max-icoarse_min+1)
   skip_loc=(/0.0d0,0.0d0,0.0d0/)
   if(ndim>0)skip_loc(1)=dble(icoarse_min)
@@ -505,7 +665,7 @@ subroutine kill_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         ok(j)=ok(j) .and. (xxx >= 0.d0 .and. xxx < 2.0d0)
      end do
   end do
-  
+
   ! Determines in which son particles sit
   ind_son(1:np)=0
   do idim=1,ndim
@@ -513,7 +673,7 @@ subroutine kill_tree(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         i=int((xp(ind_part(j),idim)/scale+skip_loc(idim)-x0(ind_grid_part(j),idim))/dx)
         ind_son(j)=ind_son(j)+i*2**(idim-1)
      end do
-  end do 
+  end do
   do j=1,np
      ind_son(j)=ncoarse+ind_son(j)*ngridmax+ind_grid(ind_grid_part(j))
   end do

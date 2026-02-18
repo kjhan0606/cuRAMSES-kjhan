@@ -30,62 +30,29 @@ subroutine create_sink
      call virtual_tree_fine(ilevel)
   end do
 
-!#########################################
-!############################# FAILED ####################
   ! Get the star density value in each cell
   do ilevel=levelmin,nlevelmax
-!#########################################
      call kjhan_get_rho_star(ilevel)
-!    call org_get_rho_star(ilevel)
-!#########################################
   enddo
 
-
-
-!#########################################
-!############################# CONFIRMED ####################
   ! Create new sink particles
-  ! and gather particle from the grid
-
   call kjhan_make_sink(nlevelmax)
-!  call org_make_sink(nlevelmax)
   do ilevel=nlevelmax-1,1,-1
      if(ilevel>=levelmin)call kjhan_make_sink(ilevel)
-!    if(ilevel>=levelmin)call org_make_sink(ilevel)
      call merge_tree_fine(ilevel)
   end do
 
-!#########################################
-!############################# CONFIRMED ####################
-
   ! Remove particle clouds around old sinks
   call kjhan_kill_cloud(1)
-! call org_kill_cloud(1)
-!#########################################
-
-!#########################################
-!############################# CONFIRMED ####################
 
   ! update sink position before merging sinks and creating clouds
   call kjhan_update_sink_position_velocity
-! call org_update_sink_position_velocity
-!#########################################
 
-!#########################################
-!############################# FAILED ####################
   ! Merge sink using FOF
-
-   call merge_sink(1)
-!  call org_merge_sink(1)
-!#########################################
-
-!#########################################
-!############################# CONFIRMED ####################
+  call merge_sink(1)
 
   ! Create new particle clouds
   call kjhan_create_cloud(1)
-! call org_create_cloud(1)
-!#########################################
 
   ! Scatter particle to the grid
   do ilevel=1,nlevelmax
@@ -97,28 +64,23 @@ subroutine create_sink
   ! Update hydro quantities for split cells
   if(hydro)then
      do ilevel=nlevelmax,levelmin,-1
-   call upload_fine(ilevel)
+        call upload_fine(ilevel)
 #ifdef SOLVERmhd
-   do ivar=1,nvar+3
+        do ivar=1,nvar+3
 #else
-   do ivar=1,nvar
+        do ivar=1,nvar
 #endif
-      call make_virtual_fine_dp(uold(1,ivar),ilevel)
-   end do
-   ! Update boundaries
-   if(simple_boundary)call make_boundary_hydro(ilevel)
+           call make_virtual_fine_dp(uold(1,ivar),ilevel)
+        end do
+        ! Update boundaries
+        if(simple_boundary)call make_boundary_hydro(ilevel)
      end do
   end if
-
 
   jsink=0d0
   ! Compute Bondi parameters and gather particle
   do ilevel=nlevelmax,levelmin,-1
-!#########################################
-!############################# FAILED ####################
-!    if(bondi)call org_bondi_hoyle(ilevel)
      if(bondi)call bondi_hoyle(ilevel)
-!#########################################
      call merge_tree_fine(ilevel)
   end do
 
