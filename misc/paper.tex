@@ -103,23 +103,51 @@ is refined only where the physics demands it, concentrating resources
 on collapsing haloes and star-forming regions while keeping the cost
 of smooth, low-density regions manageable.
 
-However, scaling AMR codes to the regime of $10^{10}$--$10^{11}$
-particles and $10^4$--$10^5$ MPI ranks poses several intertwined
-challenges. First, the standard \ramses\ domain decomposition based on
-a Hilbert space-filling curve requires every rank to exchange emission
-and reception lists with \emph{all} other ranks via
-\code{MPI\_ALLTOALL}, leading to $\Olog{\ncpu^2}$ message complexity
-and $\Olog{\ncpu}$ per-rank buffer memory. Second, several large
-arrays scale linearly with $\ngridmax$: the neighbour-pointer array
-\code{nbor($\ngridmax$, 6)} alone consumes $48\,\ngridmax$ bytes, and
-the Hilbert key array adds another $16\,\ngridmax$ bytes, together
-approaching 1\,GB per rank for production configurations with
-$\ngridmax \sim 5 \times 10^6$. Third, the Hilbert ordering
-distributes load based on cell count alone, ignoring the fact that a
-cell hosting $10^4$ particles in a dense halo is far more expensive in
-memory than a void cell with zero particles. Fourth, the multigrid
-Poisson solver typically dominates runtime, its per-iteration cost
-driven by frequent ghost-zone exchanges and repeated hash table
+A key design choice in parallel AMR codes is the domain decomposition
+strategy. Space-filling curves (SFCs), particularly the Hilbert
+(Peano--Hilbert) curve, have been widely adopted for this purpose
+\citep{Warren1993,Springel2005}. The Hilbert curve maps the
+three-dimensional computational domain to a one-dimensional index,
+preserving spatial locality so that cells close in physical space
+remain close along the curve. This enables a simple and effective
+partitioning: the one-dimensional index range is divided into $\ncpu$
+contiguous segments, each assigned to an MPI rank. The resulting
+decomposition naturally produces compact subdomains with relatively
+small surface-to-volume ratios, minimising the ghost-zone boundary
+between neighbouring ranks.
+
+However, scaling this approach to the regime of $10^{10}$--$10^{11}$
+particles and $10^4$--$10^5$ MPI ranks reveals fundamental
+limitations. The one-dimensional nature of the SFC means that
+\emph{every} rank may, in principle, border \emph{any other} rank,
+forcing communication patterns that scale poorly with $\ncpu$. In the
+standard \ramses\ implementation, ghost-zone exchange requires each
+rank to broadcast its emission and reception lists to all other ranks
+via \code{MPI\_ALLTOALL}, leading to $\Olog{\ncpu^2}$ message
+complexity and $\Olog{\ncpu}$ per-rank buffer memory --- a severe
+bottleneck when $\ncpu$ exceeds $\sim$$10^3$
+\citep{Teyssier2002}. Furthermore, the Hilbert ordering distributes
+load based on cell count alone, which becomes increasingly inadequate
+for cosmological simulations where the particle distribution is highly
+clustered: a cell hosting $10^4$ particles in a dense halo is far more
+expensive in memory than a void cell with zero particles, yet the
+standard load balancer treats them equally
+\citep{Springel2005}. The problem is particularly acute in
+cosmological zoom-in simulations \citep{Dubois2021}, where the
+high-resolution region occupies a small fraction of the total volume:
+the Hilbert curve concentrates nearly all refinement on a few ranks
+while the remaining ranks are left with low-resolution void cells,
+leading to severe load imbalance that worsens with increasing zoom
+factor.
+
+Beyond the communication and load-balancing challenges, several other
+bottlenecks arise. Large per-rank arrays scale linearly with
+$\ngridmax$: the neighbour-pointer array \code{nbor($\ngridmax$, 6)}
+alone consumes $48\,\ngridmax$ bytes, and the Hilbert key array adds
+another $16\,\ngridmax$ bytes, together approaching 1\,GB per rank for
+production configurations with $\ngridmax \sim 5 \times 10^6$. The
+multigrid Poisson solver typically dominates runtime, its per-iteration
+cost driven by frequent ghost-zone exchanges and repeated hash table
 lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
 rank, so restarting with a different rank count requires a cumbersome
 intermediate redistribution step.
@@ -1586,6 +1614,9 @@ Bryan G.~L., et al., 2014, ApJS, 211, 19
 \bibitem[\protect\citeauthoryear{Dubois et al.}{Dubois et al.}{2014}]{Dubois2014}
 Dubois Y., et al., 2014, MNRAS, 444, 1453
 
+\bibitem[\protect\citeauthoryear{Dubois et al.}{Dubois et al.}{2021}]{Dubois2021}
+Dubois Y., et al., 2021, A\&A, 651, A109
+
 \bibitem[\protect\citeauthoryear{Hahn \& Abel}{Hahn \& Abel}{2011}]{Hahn2011}
 Hahn O., Abel T., 2011, MNRAS, 415, 2101
 
@@ -1597,11 +1628,17 @@ Sorting and Searching, 2nd edn. Addison-Wesley, Reading, MA
 Morton G.~M., 1966, A Computer Oriented Geodetic Data Base and a
 New Technique in File Sequencing. IBM, Ottawa
 
+\bibitem[\protect\citeauthoryear{Springel}{Springel}{2005}]{Springel2005}
+Springel V., 2005, MNRAS, 364, 1105
+
 \bibitem[\protect\citeauthoryear{Schaye et al.}{Schaye et al.}{2015}]{Schaye2015}
 Schaye J., et al., 2015, MNRAS, 446, 521
 
 \bibitem[\protect\citeauthoryear{Teyssier}{Teyssier}{2002}]{Teyssier2002}
 Teyssier R., 2002, A\&A, 385, 337
+
+\bibitem[\protect\citeauthoryear{Warren \& Salmon}{Warren \& Salmon}{1993}]{Warren1993}
+Warren M.~S., Salmon J.~K., 1993, in Proc.\ Supercomputing '93. ACM, New York, p.~12
 
 \bibitem[\protect\citeauthoryear{Vogelsberger et al.}{Vogelsberger et al.}{2014}]{Vogelsberger2014}
 Vogelsberger M., et al., 2014, MNRAS, 444, 1518
