@@ -152,6 +152,19 @@ lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
 rank, so restarting with a different rank count requires a cumbersome
 intermediate redistribution step.
 
+The original \ramses\ code relies exclusively on MPI for
+parallelism, assigning one MPI rank per processor core. To exploit the
+shared-memory bandwidth of modern multi-core nodes, hybrid MPI+OpenMP
+implementations have been developed: the Horizon Run~5 simulation
+\citep{Lee2021} and the NewCluster zoom-in simulation
+\citep{Han2026} both employ RAMSES-yOMP, which adds OpenMP threading
+within each MPI rank for improved intra-node scalability. However,
+MPI+OpenMP alone still leaves the GPU compute capability of modern
+heterogeneous nodes untapped. With the emergence of exascale
+supercomputers whose floating-point throughput is dominated by GPU
+accelerators, a three-level MPI+OpenMP+CUDA parallelism is essential
+to fully utilise the available hardware.
+
 In this paper we describe \curamses, a comprehensive set of
 modifications to \ramses\ that addresses each of these challenges. We
 introduce a recursive \ksec\ domain decomposition
@@ -1620,9 +1633,15 @@ Dubois Y., et al., 2021, A\&A, 651, A109
 \bibitem[\protect\citeauthoryear{Hahn \& Abel}{Hahn \& Abel}{2011}]{Hahn2011}
 Hahn O., Abel T., 2011, MNRAS, 415, 2101
 
+\bibitem[\protect\citeauthoryear{Han et al.}{Han et al.}{2026}]{Han2026}
+Han S., et al., 2026, A\&A, 705, A169
+
 \bibitem[\protect\citeauthoryear{Knuth}{Knuth}{1997}]{Knuth1997}
 Knuth D.~E., 1997, The Art of Computer Programming, Vol.~3:
 Sorting and Searching, 2nd edn. Addison-Wesley, Reading, MA
+
+\bibitem[\protect\citeauthoryear{Lee et al.}{Lee et al.}{2021}]{Lee2021}
+Lee J., et al., 2021, ApJ, 908, 11
 
 \bibitem[\protect\citeauthoryear{Morton}{Morton}{1966}]{Morton1966}
 Morton G.~M., 1966, A Computer Oriented Geodetic Data Base and a
