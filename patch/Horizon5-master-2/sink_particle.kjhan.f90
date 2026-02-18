@@ -2965,7 +2965,9 @@ subroutine grow_bondi(ilevel)
   integer::igrid,jgrid,ipart,jpart,next_part,idim,info
   integer::i,ig,ip,npart1,npart2,icpu,nx_loc,isink,ilun
   real(dp),dimension(1:3)::velocity
-  integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
+  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
+  common /omp_grow_bondi/ ind_grid, ind_part, ind_grid_part
+!$omp threadprivate(/omp_grow_bondi/)
   real(dp)::r2,density,volume
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
   integer::ind,ivar,iskip
@@ -2974,14 +2976,21 @@ subroutine grow_bondi(ilevel)
   real(dp),dimension(1:3)::xdum,vdum,jdum
   real(dp)::dmaccdum,cdum,vvdum,dmEdddum,mbhdum,ddum,fourpi,prefact
   integer:: mythread, nthreads,npart3
+  integer, dimension(:), allocatable:: nparticles_gb, ptrhead_gb
+  common /omp_gb_threads/ mythread, nthreads
+!$omp threadprivate(/omp_gb_threads/)
   ! Packed ALLREDUCE buffers
   real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
   integer::npack
 
-  call MPI_BARRIER(MPI_COMM_WORLD,info)
-
   if(numbtot(1,ilevel)==0)return
   if(verbose)write(*,111)ilevel
+
+!$omp parallel
+  mythread = omp_get_thread_num()
+  nthreads = omp_get_num_threads()
+!$omp end parallel
+  allocate(nparticles_gb(0:nthreads-1), ptrhead_gb(0:nthreads-1))
 
   ! Conversion factor from user units to cgs units
   call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -3000,12 +3009,13 @@ subroutine grow_bondi(ilevel)
 
   ! Set unew to uold for myid cells
   ! Need unew to get initial density before Bondi accreting mass
-  do ind=1,twotondim
-     iskip=ncoarse+(ind-1)*ngridmax
-     do ivar=1,nvar
-   do i=1,active(ilevel)%ngrid
-      unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
-   enddo
+!$omp parallel do private(ind,iskip,ivar,i) schedule(dynamic,1024)
+  do i=1,active(ilevel)%ngrid
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do ivar=1,nvar
+           unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
+        enddo
      enddo
   enddo
 
@@ -3081,6 +3091,11 @@ subroutine grow_bondi(ilevel)
      igrid=headl(icpu,ilevel)
      npart3 = numbl(icpu,ilevel)
 
+     call pthreadLinkedList(headl(icpu,ilevel), numbl(icpu,ilevel), nthreads, nparticles_gb, ptrhead_gb, next)
+!$omp parallel private(igrid,npart3,jgrid, npart1, npart2,ipart,jpart,next_part,ip,ig)
+     npart3 = nparticles_gb(mythread)
+     igrid = ptrhead_gb(mythread)
+
      ig=0
      ip=0
      do jgrid=1,npart3
@@ -3135,6 +3150,7 @@ subroutine grow_bondi(ilevel)
      if(ip>0) then
         call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
      endif
+!$omp end parallel
 102  end do
   ! End loop over cpus
 
@@ -3188,6 +3204,8 @@ subroutine grow_bondi(ilevel)
   if(spin_bh)call kjhan_growspin
   ! YDspin
 
+
+  deallocate(nparticles_gb, ptrhead_gb)
 
 111 format('  +Entering grow_bondi for level ',I2)
 
@@ -3458,19 +3476,25 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         dmsink=dmsink*(1d0-epsilon_r)
 
         ! Add the accreted mass to the total accreted mass over
-        ! a coarse time step
+        ! a coarse time step (atomic for OpenMP thread safety)
+!$omp atomic
         dMBH_coarse_new(ksink)=dMBH_coarse_new(ksink) + &
              & dMBHoverdt(ksink)*weight/total_volume(ksink)*dtnew(ilevel)
+!$omp atomic
         dMEd_coarse_new(ksink)=dMEd_coarse_new(ksink) + &
              & dMEdoverdt(ksink)*weight/total_volume(ksink)*dtnew(ilevel)
+!$omp atomic
         dMsmbh_new     (ksink)=dMsmbh_new     (ksink) + dmsink
-
+!$omp atomic
         msink_new(ksink    )=msink_new(ksink  )+dmsink
+!$omp atomic
         vsink_new(ksink,1)=vsink_new(ksink,1)+dmsink*u
 #if NDIM>1
+!$omp atomic
         vsink_new(ksink,2)=vsink_new(ksink,2)+dmsink*v
 #endif
 #if NDIM>2
+!$omp atomic
         vsink_new(ksink,3)=vsink_new(ksink,3)+dmsink*w
 #endif
 
@@ -3530,6 +3554,7 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
               dvdrag=fdrag(idim)*dtnew(ilevel)
               dpdrag(idim)=mp(ind_part(j))*dvdrag
               vp(ind_part(j),idim)=vp(ind_part(j),idim)+dvdrag
+!$omp atomic
               vsink_new(ksink,idim)=vsink_new(ksink,idim)+dvdrag*mp(ind_part(j))!/msink(isink)
            enddo
 
