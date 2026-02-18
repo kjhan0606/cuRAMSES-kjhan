@@ -26,6 +26,17 @@ module poisson_commons
   ! Pre-computed neighbor grids for fine-level MG solver
   integer, allocatable, dimension(:,:) :: nbor_grid_fine
 
+  ! Pre-computed neighbor grids/cpus for coarse-level MG solver
+  type mg_nbor_cache_t
+     integer, allocatable, dimension(:,:) :: grid  ! (0:twondim, 1:ngrid)
+     integer, allocatable, dimension(:,:) :: cpu   ! (1:twondim, 1:ngrid)
+  end type mg_nbor_cache_t
+  type(mg_nbor_cache_t), allocatable, dimension(:) :: nbor_mg_cache
+
+  ! Coarse MG timing accumulators
+  real(dp) :: mg_c_gs=0d0, mg_c_res=0d0, mg_c_restrict=0d0
+  real(dp) :: mg_c_recurse=0d0, mg_c_interp=0d0, mg_c_total=0d0
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

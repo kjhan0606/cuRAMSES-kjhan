@@ -217,6 +217,11 @@ subroutine multigrid_fine(ilevel,icount)
       call set_scan_flag_coarse(ifine)
    end do
 
+   ! Precompute neighbor grids for coarse MG levels
+   if(ilevel>1 .and. levelmin_mg < ilevel) then
+      call precompute_nbor_grid_coarse(levelmin_mg, ilevel-1)
+   end if
+
    mg_t1 = MPI_WTIME()
    mg_t_nbor = mg_t1 - mg_t_mask - mg_t_commbuild - mg_t_setup - mg_t0
 
@@ -227,6 +232,10 @@ subroutine multigrid_fine(ilevel,icount)
    mg_sum_presmooth = 0d0; mg_sum_residual = 0d0; mg_sum_restrict = 0d0
    mg_sum_coarse = 0d0; mg_sum_correct = 0d0; mg_sum_postsmooth = 0d0
    mg_sum_finalres = 0d0
+
+   ! Reset coarse MG timing accumulators
+   mg_c_gs=0d0; mg_c_res=0d0; mg_c_restrict=0d0
+   mg_c_recurse=0d0; mg_c_interp=0d0; mg_c_total=0d0
    mg_t_iter_start = MPI_WTIME()
 
    iter = 0
@@ -336,6 +345,11 @@ subroutine multigrid_fine(ilevel,icount)
    ! Free pre-computed neighbor grids
    if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
 
+   ! Free pre-computed coarse neighbor cache
+   if(ilevel>1 .and. levelmin_mg < ilevel) then
+      call cleanup_nbor_grid_coarse(levelmin_mg, ilevel-1)
+   end if
+
    mg_t_cleanup = MPI_WTIME()
 
    if(myid==1) then
@@ -349,6 +363,10 @@ subroutine multigrid_fine(ilevel,icount)
       write(*,'(A,F10.3,A)') '     residual (fine)       :', mg_sum_residual, ' s'
       write(*,'(A,F10.3,A)') '     restrict+reverse_comm :', mg_sum_restrict, ' s'
       write(*,'(A,F10.3,A)') '     coarse MG solve       :', mg_sum_coarse, ' s'
+      write(*,'(A,F10.3,A)') '       c-GS (pre+post+bot) :', mg_c_gs, ' s'
+      write(*,'(A,F10.3,A)') '       c-residual          :', mg_c_res, ' s'
+      write(*,'(A,F10.3,A)') '       c-restrict+comm     :', mg_c_restrict, ' s'
+      write(*,'(A,F10.3,A)') '       c-interpolate+corr  :', mg_c_interp, ' s'
       write(*,'(A,F10.3,A)') '     interpolate+correct   :', mg_sum_correct, ' s'
       write(*,'(A,F10.3,A)') '     post-smooth (GS+comm) :', mg_sum_postsmooth, ' s'
       write(*,'(A,F10.3,A)') '     final residual+allred :', mg_sum_finalres, ' s'
@@ -393,13 +411,22 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    real(dp) :: debug_norm2, debug_norm2_tot
    integer :: i, icpu, info, icycle, ncycle
 
+   ! Timing variables for coarse MG breakdown
+   real(kind=8) :: mg_c_t1, mg_c_t2, mg_c_start
+
+   mg_c_start = MPI_WTIME()
+
    if(ifinelevel<=levelmin_mg) then
       ! Solve 'directly'
+      mg_c_t1 = MPI_WTIME()
       do i=1,2*ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
+      mg_c_t2 = MPI_WTIME()
+      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
+      mg_c_total = mg_c_total + (mg_c_t2 - mg_c_start)
       return
    end if
 
@@ -412,15 +439,20 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    do icycle=1,ncycle
 
       ! Pre-smoothing
+      mg_c_t1 = MPI_WTIME()
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
+      mg_c_t2 = MPI_WTIME()
+      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
 
       ! Compute residual and restrict into upper level RHS
+      mg_c_t1 = MPI_WTIME()
       call cmp_residual_mg_coarse(ifinelevel)
-      ! Residual exchange removed: restriction uses local cells only
+      mg_c_t2 = MPI_WTIME()
+      mg_c_res = mg_c_res + (mg_c_t2 - mg_c_t1)
 
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
@@ -429,8 +461,11 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       end do
 
       ! Restrict and do reverse-comm
+      mg_c_t1 = MPI_WTIME()
       call restrict_residual_coarse_reverse(ifinelevel)
       call make_reverse_mg_dp(2,ifinelevel-1) ! communicate rhs
+      mg_c_t2 = MPI_WTIME()
+      mg_c_restrict = mg_c_restrict + (mg_c_t2 - mg_c_t1)
 
       ! Reset correction from upper level before solve
       do icpu=1,ncpu
@@ -439,20 +474,31 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       end do
 
       ! Multigrid-solve the upper level
+      mg_c_t1 = MPI_WTIME()
       call recursive_multigrid_coarse(ifinelevel-1, safe)
+      mg_c_t2 = MPI_WTIME()
+      mg_c_recurse = mg_c_recurse + (mg_c_t2 - mg_c_t1)
 
       ! Interpolate coarse solution and correct back into fine solution
+      mg_c_t1 = MPI_WTIME()
       call interpolate_and_correct_coarse(ifinelevel)
       call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
+      mg_c_t2 = MPI_WTIME()
+      mg_c_interp = mg_c_interp + (mg_c_t2 - mg_c_t1)
 
       ! Post-smoothing
+      mg_c_t1 = MPI_WTIME()
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
+      mg_c_t2 = MPI_WTIME()
+      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
 
    end do
+
+   mg_c_total = mg_c_total + (MPI_WTIME() - mg_c_start)
 
 end subroutine recursive_multigrid_coarse
 

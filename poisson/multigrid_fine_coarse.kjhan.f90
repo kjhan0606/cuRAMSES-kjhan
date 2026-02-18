@@ -147,7 +147,6 @@ subroutine cmp_residual_mg_coarse(ilevel)
    ! Computes the residual for pure MG levels, and stores it into active_mg(myid,ilevel)%u(:,3)
    use amr_commons
    use poisson_commons
-   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
 
@@ -180,10 +179,10 @@ subroutine cmp_residual_mg_coarse(ilevel)
 !$omp parallel do private(igrid_mg,ind,iskip_mg,iskip_amr,igrid_amr,icell_mg,phi_c,nb_sum,inbor,idim,igshift,igrid_nbor_amr,cpu_nbor_amr,igrid_nbor_mg,icell_nbor_mg,j,nbor_grids_cache,nbor_cpu_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
-      ! Precompute 6 neighbor grids and CPUs for this grid (cached)
+      ! Use precomputed neighbor grids and CPUs from cache
       do j=1,twondim
-         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
-         nbor_cpu_cache(j)   = cpu_map(morton_nbor_cell(igrid_amr, ilevel, j))
+         nbor_grids_cache(j) = nbor_mg_cache(ilevel)%grid(j, igrid_mg)
+         nbor_cpu_cache(j)   = nbor_mg_cache(ilevel)%cpu(j, igrid_mg)
       end do
       ! Loop over cells myid
       do ind=1,twotondim
@@ -345,7 +344,6 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
    use amr_commons
    use pm_commons
    use poisson_commons
-   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
    logical, intent(in) :: safe
@@ -386,10 +384,10 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
 !$omp parallel do private(igrid_mg,ind0,ind,iskip_mg,igrid_amr,icell_mg,nb_sum,inbor,idim,igshift,igrid_nbor_amr,cpu_nbor_amr,igrid_nbor_mg,icell_nbor_mg,weight,j,nbor_grids_cache,nbor_cpu_cache)
    do igrid_mg=1,ngrid
       igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
-      ! Precompute 6 neighbor grids and CPUs for this grid (cached)
+      ! Use precomputed neighbor grids and CPUs from cache
       do j=1,twondim
-         nbor_grids_cache(j) = morton_nbor_grid(igrid_amr, ilevel, j)
-         nbor_cpu_cache(j)   = cpu_map(morton_nbor_cell(igrid_amr, ilevel, j))
+         nbor_grids_cache(j) = nbor_mg_cache(ilevel)%grid(j, igrid_mg)
+         nbor_cpu_cache(j)   = nbor_mg_cache(ilevel)%cpu(j, igrid_mg)
       end do
       ! Loop over cells, with red/black ordering
       do ind0=1,twotondim/2      ! Only half of the cells for a red or black sweep
@@ -838,3 +836,55 @@ subroutine set_scan_flag_coarse(ilevel)
       end do
    end do
 end subroutine set_scan_flag_coarse
+
+! ------------------------------------------------------------------------
+! Precompute neighbor grids and CPUs for coarse MG levels
+! ------------------------------------------------------------------------
+
+subroutine precompute_nbor_grid_coarse(lmin, lmax)
+   use amr_commons
+   use poisson_commons
+   use morton_hash
+   implicit none
+   integer, intent(in) :: lmin, lmax
+   integer :: ilevel, ngrid, igrid_mg, igrid_amr, j
+
+   if(.not.allocated(nbor_mg_cache)) allocate(nbor_mg_cache(1:nlevelmax))
+
+   do ilevel = lmin, lmax
+      ngrid = active_mg(myid, ilevel)%ngrid
+      if(ngrid == 0) cycle
+      if(allocated(nbor_mg_cache(ilevel)%grid)) deallocate(nbor_mg_cache(ilevel)%grid)
+      if(allocated(nbor_mg_cache(ilevel)%cpu))  deallocate(nbor_mg_cache(ilevel)%cpu)
+      allocate(nbor_mg_cache(ilevel)%grid(0:twondim, 1:ngrid))
+      allocate(nbor_mg_cache(ilevel)%cpu(1:twondim, 1:ngrid))
+
+      !$omp parallel do private(igrid_mg, igrid_amr, j)
+      do igrid_mg = 1, ngrid
+         igrid_amr = active_mg(myid, ilevel)%igrid(igrid_mg)
+         nbor_mg_cache(ilevel)%grid(0, igrid_mg) = igrid_amr
+         do j = 1, twondim
+            nbor_mg_cache(ilevel)%grid(j, igrid_mg) = morton_nbor_grid(igrid_amr, ilevel, j)
+            nbor_mg_cache(ilevel)%cpu(j, igrid_mg)  = cpu_map(morton_nbor_cell(igrid_amr, ilevel, j))
+         end do
+      end do
+   end do
+end subroutine precompute_nbor_grid_coarse
+
+! ------------------------------------------------------------------------
+! Cleanup precomputed neighbor cache for coarse MG levels
+! ------------------------------------------------------------------------
+
+subroutine cleanup_nbor_grid_coarse(lmin, lmax)
+   use poisson_commons
+   implicit none
+   integer, intent(in) :: lmin, lmax
+   integer :: ilevel
+
+   if(.not.allocated(nbor_mg_cache)) return
+
+   do ilevel = lmin, lmax
+      if(allocated(nbor_mg_cache(ilevel)%grid)) deallocate(nbor_mg_cache(ilevel)%grid)
+      if(allocated(nbor_mg_cache(ilevel)%cpu))  deallocate(nbor_mg_cache(ilevel)%cpu)
+   end do
+end subroutine cleanup_nbor_grid_coarse
