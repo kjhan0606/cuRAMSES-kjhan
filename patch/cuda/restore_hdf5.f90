@@ -17,19 +17,6 @@
 #ifdef HDF5
 
 !###########################################################################
-! Module for variable-ncpu restart data shared between AMR/hydro/poisson
-!###########################################################################
-module varcpu_hdf5_data
-  use amr_parameters, only: dp, i8b
-  implicit none
-  ! igrid → file index mapping (set during AMR restore, used by hydro/poisson)
-  integer, allocatable, save :: varcpu_grid_file_idx(:)  ! (1:ngridmax)
-  ! Total grids per level in file
-  integer, allocatable, save :: varcpu_ngrid_file(:)     ! (1:nlevelmax)
-  logical, save :: varcpu_restart = .false.
-end module varcpu_hdf5_data
-
-!###########################################################################
 ! AMR restore from HDF5
 !###########################################################################
 subroutine restore_amr_hdf5()
@@ -39,13 +26,12 @@ subroutine restore_amr_hdf5()
   use morton_keys
   use morton_hash
   use ramses_hdf5_io
-  use varcpu_hdf5_data
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
   integer :: ilevel, i, igrid, ind, iskip, idim, info
-  integer :: ncpu_file, nlevelmax_file
+  integer :: nlevelmax_file
   integer(i8b) :: ngrid_total
   integer, allocatable :: ngrid_per_cpu(:)
   integer, allocatable :: son_flag_buf(:), cpu_map_buf(:)
@@ -686,13 +672,13 @@ subroutine restore_hydro_hdf5()
   use amr_commons
   use hydro_commons
   use ramses_hdf5_io
-  use varcpu_hdf5_data
+  ! varcpu variables now in amr_commons
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
   integer :: ilevel, i, igrid, ind, iskip, ivar, info
-  integer :: ngrid_loc, ncpu_file, nvar_file, fidx
+  integer :: ngrid_loc, nvar_file, fidx
   integer, allocatable :: ngrid_all(:)
   integer(i8b) :: ncells_total, offset_cells, ngrid_total
   real(dp), allocatable :: ubuf(:), ubuf_all(:)
@@ -851,7 +837,7 @@ subroutine restore_poisson_hdf5()
   use amr_commons
   use poisson_commons
   use ramses_hdf5_io
-  use varcpu_hdf5_data
+  ! varcpu variables now in amr_commons
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -1037,7 +1023,7 @@ subroutine restore_part_hdf5()
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
-  integer :: i, idim, info, ncpu_file
+  integer :: i, idim, info
   integer :: npart_loc
   integer(i8b) :: npart_total_file, offset_part, tmp_long
   integer, allocatable :: npart_per_cpu(:)

@@ -7,6 +7,8 @@ module amr_commons
   logical::balance=.false.                      ! Load balance or run
   logical::shrink=.false.                       ! Shrink mesh or run
   logical::varcpu_restart_done=.false.          ! Force load_balance after variable-ncpu restart
+  logical::varcpu_restart=.false.               ! Variable-ncpu restart in progress
+  integer::ncpu_file=0                          ! ncpu from restart file (if varcpu_restart)
   integer::nstep=0                              ! Time step
   integer::nstep_coarse=0                       ! Coarse step
   integer::nstep_coarse_old=0                   ! Old coarse step
@@ -80,6 +82,21 @@ module amr_commons
 
   ! Pre-computed neighbor grids for flag routines
   integer ,allocatable,dimension(:,:)::nbor_active_cache
+
+  ! Variable-ncpu restart: distributed exchange metadata
+  type varcpu_exc_t
+     integer :: nsend = 0, nrecv = 0
+     integer, allocatable :: scount(:), rcount(:)  ! (0:ncpu-1) per-rank send/recv counts
+     integer, allocatable :: sdispl(:), rdispl(:)  ! (0:ncpu-1) displacements
+     integer, allocatable :: send_order(:)         ! (nsend) local buf index for j-th send
+     integer, allocatable :: recv_igrid(:)         ! (nrecv) local igrid for j-th received grid
+  end type
+  type(varcpu_exc_t), allocatable :: varcpu_exc(:)   ! (nlevelmax) per-level exchange
+  integer, allocatable :: varcpu_nactive(:,:)        ! (ncpu_file, nlevelmax) active grids per file
+  integer, allocatable :: varcpu_my_files(:)         ! file indices assigned to this rank
+  integer :: varcpu_nfiles_local = 0                 ! number of files this rank reads
+  integer, allocatable :: varcpu_ngrid_file(:)       ! (1:nlevelmax) total grids per level in file
+  integer, allocatable :: varcpu_grid_file_idx(:)    ! (1:ngridmax) local grid → file index (HDF5 path)
 
   ! Global indexing
   integer ,allocatable,dimension(:)  ::cpu_map  ! domain decomposition

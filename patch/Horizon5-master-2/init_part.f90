@@ -196,6 +196,13 @@ subroutine init_part
      end if
 #endif
 
+     if(varcpu_restart) then
+        if(sink) call init_sink_alloc
+        call restore_part_binary_varcpu()
+        if(myid==1) write(*,*) 'Binary varcpu PART backup files read completed'
+        goto 999
+     end if
+
      ilun=2*ncpu+myid+10
      call title(nrestart,nchar)
 
@@ -208,7 +215,7 @@ subroutine init_part
 
      call title(myid,nchar)
      fileloc=TRIM(fileloc)//TRIM(nchar)
-     ! Wait for the token                                                                                                                                                                    
+     ! Wait for the token
 #ifndef WITHOUTMPI
      if(IOGROUPSIZE>0) then
         if (mod(myid-1,IOGROUPSIZE)/=0) then
@@ -227,7 +234,7 @@ subroutine init_part
      read(ilun)nstar_tot
      read(ilun)mstar_tot
      read(ilun)mstar_lost
-     read(ilun)nsink     
+     read(ilun)nsink
      if(ncpu2.ne.ncpu.or.ndim2.ne.ndim.or.npart2.gt.npartmax)then
         write(*,*)'File part.tmp not compatible'
         write(*,*)'Found   =',ncpu2,ndim2,npart2
@@ -971,6 +978,221 @@ subroutine init_part
   if(sink .and. .not. allocated(idsink)) call init_sink
 
 end subroutine init_part
+
+subroutine restore_part_binary_varcpu
+  use amr_commons
+  use pm_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer :: icpu_file, idim, i, info, ilun
+  integer :: ncpu2, ndim2, npart2, npart_this
+  integer :: ipart, nread, read_start, read_end
+  integer :: nDMloc
+  integer(i8b) :: npart_total, npp, remainder, my_offset, tmp_long
+  integer(i8b) :: global_offset, file_start, file_end, my_start, my_end
+  integer :: my_npart
+  integer, allocatable :: npart_per_file(:)
+  real(dp), allocatable :: xdp(:)
+  integer(i8b), allocatable :: isp8(:)
+  integer, allocatable :: isp(:)
+  character(LEN=80) :: fileloc
+  character(LEN=5) :: nchar, ncharcpu
+
+  if(myid==1) write(*,*) 'Binary varcpu particle restore: ncpu_file=', ncpu_file
+
+  ilun = 99
+
+  ! Step 1: Rank 0 reads headers from all files to get npart counts
+  allocate(npart_per_file(ncpu_file))
+  if(myid == 1) then
+     call title(nrestart, nchar)
+     do icpu_file = 1, ncpu_file
+        if(IOGROUPSIZEREP>0)then
+           call title(((icpu_file-1)/IOGROUPSIZEREP)+1, ncharcpu)
+           fileloc='output_'//TRIM(nchar)//'/group_'//TRIM(ncharcpu)//'/part_'//TRIM(nchar)//'.out'
+        else
+           fileloc='output_'//TRIM(nchar)//'/part_'//TRIM(nchar)//'.out'
+        endif
+        call title(icpu_file, ncharcpu)
+        fileloc=TRIM(fileloc)//TRIM(ncharcpu)
+
+        open(unit=ilun, file=fileloc, form='unformatted')
+        read(ilun) ncpu2
+        read(ilun) ndim2
+        read(ilun) npart2
+        npart_per_file(icpu_file) = npart2
+        if(icpu_file == 1) then
+           ! Read global scalar values from file 1
+           read(ilun) localseed
+           read(ilun) nstar_tot
+           read(ilun) mstar_tot
+           read(ilun) mstar_lost
+           read(ilun) nsink
+        end if
+        close(ilun)
+     end do
+  end if
+
+  ! Broadcast header info
+  call MPI_BCAST(npart_per_file, ncpu_file, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
+  call MPI_BCAST(localseed, IRandNumSize, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
+#ifndef LONGINT
+  call MPI_BCAST(nstar_tot, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
+#else
+  call MPI_BCAST(nstar_tot, 1, MPI_INTEGER8, 0, MPI_COMM_WORLD, info)
+#endif
+  call MPI_BCAST(mstar_tot, 1, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, info)
+  call MPI_BCAST(mstar_lost, 1, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, info)
+  call MPI_BCAST(nsink, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
+
+  ! Step 2: Compute total particles and even distribution
+  npart_total = 0
+  do icpu_file = 1, ncpu_file
+     npart_total = npart_total + npart_per_file(icpu_file)
+  end do
+
+  npp = npart_total / ncpu
+  remainder = npart_total - npp * ncpu
+  if(myid <= int(remainder)) then
+     my_npart = int(npp + 1)
+     my_offset = (npp + 1) * int(myid - 1, i8b)
+  else
+     my_npart = int(npp)
+     my_offset = (npp + 1) * remainder + npp * int(myid - 1 - remainder, i8b)
+  end if
+
+  if(my_npart > npartmax) then
+     write(*,*) 'ERROR: my_npart > npartmax', my_npart, npartmax, ' myid=', myid
+     call clean_stop
+  end if
+
+  if(myid==1) write(*,*) 'Binary varcpu particles: total=', npart_total, &
+       ' per rank ~', npp
+
+  ! Step 3: Read from relevant files
+  ipart = 0
+  global_offset = 0
+  my_start = my_offset + 1
+  my_end = my_offset + my_npart
+
+  call title(nrestart, nchar)
+
+  do icpu_file = 1, ncpu_file
+     npart_this = npart_per_file(icpu_file)
+     file_start = global_offset + 1
+     file_end = global_offset + npart_this
+
+     if(file_end < my_start .or. file_start > my_end .or. npart_this == 0) then
+        global_offset = global_offset + npart_this
+        cycle
+     end if
+
+     ! Compute overlap: which particles in this file belong to me
+     read_start = int(max(file_start, my_start) - global_offset)
+     read_end = int(min(file_end, my_end) - global_offset)
+     nread = read_end - read_start + 1
+
+     ! Open file
+     if(IOGROUPSIZEREP>0)then
+        call title(((icpu_file-1)/IOGROUPSIZEREP)+1, ncharcpu)
+        fileloc='output_'//TRIM(nchar)//'/group_'//TRIM(ncharcpu)//'/part_'//TRIM(nchar)//'.out'
+     else
+        fileloc='output_'//TRIM(nchar)//'/part_'//TRIM(nchar)//'.out'
+     endif
+     call title(icpu_file, ncharcpu)
+     fileloc=TRIM(fileloc)//TRIM(ncharcpu)
+
+     open(unit=ilun, file=fileloc, form='unformatted')
+     ! Skip header (8 records)
+     do i = 1, 8
+        read(ilun)
+     end do
+
+     ! Read positions
+     allocate(xdp(1:npart_this))
+     do idim = 1, ndim
+        read(ilun) xdp
+        xp(ipart+1:ipart+nread, idim) = xdp(read_start:read_end)
+     end do
+     ! Read velocities
+     do idim = 1, ndim
+        read(ilun) xdp
+        vp(ipart+1:ipart+nread, idim) = xdp(read_start:read_end)
+     end do
+     ! Read mass
+     read(ilun) xdp
+     mp(ipart+1:ipart+nread) = xdp(read_start:read_end)
+     deallocate(xdp)
+
+     ! Read identity (i8b)
+     allocate(isp8(1:npart_this))
+     read(ilun) isp8
+     idp(ipart+1:ipart+nread) = isp8(read_start:read_end)
+     deallocate(isp8)
+
+     ! Read level
+     allocate(isp(1:npart_this))
+     read(ilun) isp
+     levelp(ipart+1:ipart+nread) = isp(read_start:read_end)
+     deallocate(isp)
+
+#ifdef OUTPUT_PARTICLE_POTENTIAL
+     read(ilun)
+#endif
+
+     if(star .or. sink) then
+        allocate(xdp(1:npart_this))
+        ! Read birth epoch
+        read(ilun) xdp
+        tp(ipart+1:ipart+nread) = xdp(read_start:read_end)
+        ! Read metallicity
+        if(metal) then
+           read(ilun) xdp
+           zp(ipart+1:ipart+nread) = xdp(read_start:read_end)
+        end if
+        ! Read tpp
+        read(ilun) xdp
+        tpp(ipart+1:ipart+nread) = xdp(read_start:read_end)
+        ! Read mp0
+        read(ilun) xdp
+        mp0(ipart+1:ipart+nread) = xdp(read_start:read_end)
+        ! Read indtab
+        read(ilun) xdp
+        indtab(ipart+1:ipart+nread) = xdp(read_start:read_end)
+        deallocate(xdp)
+     end if
+
+     close(ilun)
+     ipart = ipart + nread
+     global_offset = global_offset + npart_this
+  end do
+
+  npart = ipart
+
+  ! Compute nDM
+  nDMloc = 0
+  if(star .or. sink) then
+     do i = 1, npart
+        if(idp(i) > 0 .and. tp(i) == 0.) nDMloc = nDMloc + 1
+     end do
+  else
+     nDMloc = npart
+  end if
+#ifndef LONGINT
+  call MPI_ALLREDUCE(nDMloc, nDM, 1, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, info)
+#else
+  tmp_long = nDMloc
+  call MPI_ALLREDUCE(tmp_long, nDM, 1, MPI_INTEGER8, MPI_SUM, MPI_COMM_WORLD, info)
+#endif
+
+  deallocate(npart_per_file)
+
+  if(myid==1) write(*,*) 'Binary varcpu particle restore done. npart_total=', npart_total
+
+end subroutine restore_part_binary_varcpu
+
 #define TIME_START(cs) call SYSTEM_CLOCK(COUNT=cs)
 #define TIME_END(ce) call SYSTEM_CLOCK(COUNT=ce)
 #define TIME_SPENT(cs,ce,cr) REAL((ce-cs)/cr)
