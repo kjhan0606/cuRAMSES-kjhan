@@ -325,18 +325,18 @@ The k-section tree enables \textbf{hierarchical MPI exchange} where communicatio
 \label{fig:ksection_domains}
 \end{figure}
 
-Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the k-section tree construction.  Starting from the full simulation domain, the tree is built by recursively bisecting (or $k$-secting) along successive coordinate axes.  In this example with $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs, the decomposition proceeds in three stages:
+Figure~\ref{fig:ksection_progressive} illustrates the progressive nature of the recursive k-section tree construction.  Starting from the undivided simulation domain~(a), the tree is built by recursively $k$-secting along successive coordinate axes.  In this example with $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs, the decomposition proceeds in three stages:
 \begin{enumerate}[nosep]
   \item \textbf{Level~1 ($k_1=3$)}: The domain is split into 3 slabs along the $x$-axis.
   \item \textbf{Level~2 ($k_2=2$)}: Each slab is bisected along the $y$-axis, producing 6 subdomains.
   \item \textbf{Level~3 ($k_3=2$)}: Each subdomain is bisected along the $z$-axis, yielding the final 12 subdomains.
 \end{enumerate}
-The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain, resulting in non-uniform subdomain volumes that reflect the local workload.  The color hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions, respectively.
+The split positions at each level are determined by the load-balancing histogram to ensure equal computational cost per subdomain, resulting in non-uniform subdomain volumes that reflect the local workload.  The colour hue in Figure~\ref{fig:ksection_progressive} encodes the $x$-slab membership (red/green/blue), with saturation and brightness variations indicating the $y$ and $z$ subdivisions.  Below each panel, the corresponding recursive k-section tree is shown, with leaf nodes coloured to match their domain.
 
 \begin{figure}[ht]
 \centering
 \includegraphics[width=\textwidth]{ksection_progressive.png}
-\caption{Progressive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs with non-uniform split positions.  \textbf{Left}: first split into 3 slabs along $x$ with unequal widths.  \textbf{Center}: each slab bisected along $y$ at load-dependent positions ($3 \times 2 = 6$ subdomains).  \textbf{Right}: final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains).  Subdomain volumes vary by ${\sim}10$--$30\%$, reflecting load-balanced wall placement.  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
+\caption{Progressive recursive k-section decomposition for $k_1 \times k_2 \times k_3 = 3 \times 2 \times 2 = 12$ CPUs. (a)~Undivided simulation domain. (b)~First split into 3 slabs along $x$. (c)~Each slab bisected along $y$ ($3 \times 2 = 6$ subdomains). (d)~Final bisection along $z$ ($3 \times 2 \times 2 = 12$ subdomains). Below each panel, the corresponding k-section tree shows the hierarchical structure; leaf node colours match domain colours. Subdomain volumes vary by ${\sim}10$--$30\%$, reflecting load-balanced wall placement.  Each face shows projected column density $\log_{10}(1+\Sigma)$ from a $4096^3$ TSC density field.}
 \label{fig:ksection_progressive}
 \end{figure}
 

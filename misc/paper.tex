@@ -254,17 +254,23 @@ splitting sequence $(3, 2, 2)$ with $L = 3$ tree levels: the root is
 split into 3 slabs along the longest axis, each slab is bisected, and
 each half is bisected again, yielding 12 leaf nodes --- one per rank.
 Fig.~\ref{fig:ksec_progressive} illustrates this progressive
-decomposition for $\ncpu = 12$.
+decomposition for $\ncpu = 12$, from the undivided domain through
+three successive levels of splitting, with the corresponding
+\ksec\ tree shown beneath each panel.
 
 \begin{figure}
 \centering
-\includegraphics[width=\columnwidth]{../docs/manual/ksection_progressive.png}
-\caption{Progressive \ksec\ decomposition for $\ncpu = 12 = 3 \times
-2 \times 2$. Left: the root domain is split into $k = 3$ slabs along
-the longest axis. Centre: each slab is bisected ($k = 3 \times 2 = 6$
-sub-domains). Right: each half is bisected again ($k = 3 \times 2
-\times 2 = 12$ leaf domains). Colours distinguish individual MPI
-ranks; particles are shown as dots to indicate the load distribution.}
+\includegraphics[width=\columnwidth]{../misc/ksection_progressive.png}
+\caption{Progressive recursive \ksec\ decomposition for $\ncpu = 12 =
+3 \times 2 \times 2$. (a)~The undivided simulation domain. (b)~First
+split into $k = 3$ slabs along the longest axis. (c)~Each slab bisected
+along the second axis ($3 \times 2 = 6$ sub-domains). (d)~Final bisection
+along the third axis ($3 \times 2 \times 2 = 12$ leaf domains). Below
+each panel, the corresponding \ksec\ tree is shown; colours encode
+$x$-slab membership (red/green/blue), with saturation and brightness
+indicating $y$ and $z$ subdivisions. Each face displays projected
+column density from a $4096^3$ TSC density field. Sub-domain volumes
+vary by ${\sim}10$--$30\,\%$, reflecting load-balanced wall placement.}
 \label{fig:ksec_progressive}
 \end{figure}
 
