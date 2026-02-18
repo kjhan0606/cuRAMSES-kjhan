@@ -33,10 +33,6 @@ module poisson_commons
   end type mg_nbor_cache_t
   type(mg_nbor_cache_t), allocatable, dimension(:) :: nbor_mg_cache
 
-  ! Coarse MG timing accumulators
-  real(dp) :: mg_c_gs=0d0, mg_c_res=0d0, mg_c_restrict=0d0
-  real(dp) :: mg_c_recurse=0d0, mg_c_interp=0d0, mg_c_total=0d0
-
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

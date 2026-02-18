@@ -53,73 +53,35 @@ subroutine multigrid_fine(ilevel,icount)
 
    logical :: allmasked, allmasked_tot
 
-   ! Timing variables
-   real(kind=8) :: mg_t0, mg_t1, mg_t_setup, mg_t_commbuild
-   real(kind=8) :: mg_t_mask, mg_t_nbor, mg_t_iter_start
-   real(kind=8) :: mg_t_presmooth, mg_t_residual, mg_t_restrict
-   real(kind=8) :: mg_t_coarse, mg_t_correct, mg_t_postsmooth
-   real(kind=8) :: mg_t_finalres, mg_t_cleanup
-   real(kind=8) :: mg_sum_presmooth, mg_sum_residual, mg_sum_restrict
-   real(kind=8) :: mg_sum_coarse, mg_sum_correct, mg_sum_postsmooth
-   real(kind=8) :: mg_sum_finalres
-   real(kind=8) :: mg_ts0,mg_ts1,mg_ts2,mg_ts3,mg_ts4,mg_ts5,mg_ts6,mg_ts6b,mg_ts7
-
    if(gravity_type>0)return
    if(numbtot(1,ilevel)==0)return
 
    if(verbose) print '(A,I2)','Entering fine multigrid at level ',ilevel
 
-   mg_t0 = MPI_WTIME()
-
    ! ---------------------------------------------------------------------
    ! Prepare first guess, mask and BCs at finest level
    ! ---------------------------------------------------------------------
 
-   mg_ts0 = MPI_WTIME()
    if(ilevel>levelmin)then
       call make_initial_phi(ilevel,icount)         ! Interpolate phi down
    else
       call make_multipole_phi(ilevel)       ! Fill with simple initial guess
    endif
-   mg_ts1 = MPI_WTIME()
    call make_virtual_fine_dp(phi(1),ilevel) ! Update boundaries
-   mg_ts2 = MPI_WTIME()
    call make_boundary_phi(ilevel)           ! Update physical boundaries
-   mg_ts3 = MPI_WTIME()
 
    call make_fine_mask  (ilevel)            ! Fill the fine mask
-   mg_ts4 = MPI_WTIME()
    call make_virtual_fine_dp(f(:,3),ilevel) ! Communicate mask
-   mg_ts5 = MPI_WTIME()
    call make_boundary_mask(ilevel)          ! Set mask to -1 in phys bounds
-   mg_ts6 = MPI_WTIME()
 
    ! Pre-compute neighbor grids BEFORE bc_rhs so it can use the array
    call precompute_nbor_grid_fine(ilevel)
-   mg_ts6b = MPI_WTIME()
 
    call make_fine_bc_rhs(ilevel,icount)            ! Fill BC-modified RHS
-   mg_ts7 = MPI_WTIME()
 
    ! ---------------------------------------------------------------------
    ! Build communicators up
    ! ---------------------------------------------------------------------
-
-   mg_t1 = MPI_WTIME()
-   mg_t_setup = mg_t1 - mg_t0
-
-   if(myid==1) then
-      write(*,'(A,I2,A)') '  MG setup detail level=',ilevel,':'
-      write(*,'(A,F10.3,A)') '    make_initial_phi     :', mg_ts1-mg_ts0, ' s'
-      write(*,'(A,F10.3,A)') '    virtual_fine(phi)     :', mg_ts2-mg_ts1, ' s'
-      write(*,'(A,F10.3,A)') '    boundary_phi         :', mg_ts3-mg_ts2, ' s'
-      write(*,'(A,F10.3,A)') '    make_fine_mask        :', mg_ts4-mg_ts3, ' s'
-      write(*,'(A,F10.3,A)') '    virtual_fine(mask)    :', mg_ts5-mg_ts4, ' s'
-      write(*,'(A,F10.3,A)') '    boundary_mask         :', mg_ts6-mg_ts5, ' s'
-      write(*,'(A,F10.3,A)') '    precompute_nbor       :', mg_ts6b-mg_ts6, ' s'
-      write(*,'(A,F10.3,A)') '    make_fine_bc_rhs      :', mg_ts7-mg_ts6b, ' s'
-      write(*,'(A,F10.3,A)') '    SETUP TOTAL           :', mg_ts7-mg_ts0, ' s'
-   end if
 
    ! @ finer level
    call build_parent_comms_mg(active(ilevel),ilevel)
@@ -127,9 +89,6 @@ subroutine multigrid_fine(ilevel,icount)
    do ifine=(ilevel-1),2,-1
       call build_parent_comms_mg(active_mg(myid,ifine),ifine)
    end do
-
-   mg_t1 = MPI_WTIME()
-   mg_t_commbuild = mg_t1 - mg_t_setup - mg_t0
 
    ! ---------------------------------------------------------------------
    ! Restrict mask up, then set scan flag
@@ -206,9 +165,6 @@ subroutine multigrid_fine(ilevel,icount)
    end if
    if(nboundary>0)levelmin_mg=max(levelmin_mg,2)
 
-   mg_t1 = MPI_WTIME()
-   mg_t_mask = mg_t1 - mg_t_commbuild - mg_t_setup - mg_t0
-
    ! nbor_grid_fine already precomputed before make_fine_bc_rhs
 
    ! Update flag with scan flag (uses nbor_grid_fine if available)
@@ -222,35 +178,20 @@ subroutine multigrid_fine(ilevel,icount)
       call precompute_nbor_grid_coarse(levelmin_mg, ilevel-1)
    end if
 
-   mg_t1 = MPI_WTIME()
-   mg_t_nbor = mg_t1 - mg_t_mask - mg_t_commbuild - mg_t_setup - mg_t0
-
    ! ---------------------------------------------------------------------
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
-
-   mg_sum_presmooth = 0d0; mg_sum_residual = 0d0; mg_sum_restrict = 0d0
-   mg_sum_coarse = 0d0; mg_sum_correct = 0d0; mg_sum_postsmooth = 0d0
-   mg_sum_finalres = 0d0
-
-   ! Reset coarse MG timing accumulators
-   mg_c_gs=0d0; mg_c_res=0d0; mg_c_restrict=0d0
-   mg_c_recurse=0d0; mg_c_interp=0d0; mg_c_total=0d0
-   mg_t_iter_start = MPI_WTIME()
 
    iter = 0
    err = 1.0d0
    main_iteration_loop: do
       iter=iter+1
-      mg_t1 = MPI_WTIME()
       ! Pre-smoothing
       do i=1,ngs_fine
          call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
          call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
-      mg_t_presmooth = MPI_WTIME()
-      mg_sum_presmooth = mg_sum_presmooth + (mg_t_presmooth - mg_t1)
 
       ! Compute residual and restrict into upper level RHS
       ! Fuse residual + norm computation on first iteration
@@ -265,9 +206,6 @@ subroutine multigrid_fine(ilevel,icount)
          call cmp_residual_mg_fine(ilevel)
       end if
 
-      mg_t_residual = MPI_WTIME()
-      mg_sum_residual = mg_sum_residual + (mg_t_residual - mg_t_presmooth)
-
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
          if(active_mg(icpu,ilevel-1)%ngrid==0) cycle
@@ -276,9 +214,6 @@ subroutine multigrid_fine(ilevel,icount)
       ! Restrict and do reverse-comm
       call restrict_residual_fine_reverse(ilevel)
       call make_reverse_mg_dp(2,ilevel-1) ! communicate rhs
-
-      mg_t_restrict = MPI_WTIME()
-      mg_sum_restrict = mg_sum_restrict + (mg_t_restrict - mg_t_residual)
 
       if(ilevel>1) then
          ! Reset correction at upper level before solve
@@ -290,17 +225,9 @@ subroutine multigrid_fine(ilevel,icount)
          ! Multigrid-solve the upper level
          call recursive_multigrid_coarse(ilevel-1, safe_mode(ilevel))
 
-         mg_t_coarse = MPI_WTIME()
-         mg_sum_coarse = mg_sum_coarse + (mg_t_coarse - mg_t_restrict)
-
          ! Interpolate coarse solution and correct fine solution
          call interpolate_and_correct_fine(ilevel)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
-
-         mg_t_correct = MPI_WTIME()
-         mg_sum_correct = mg_sum_correct + (mg_t_correct - mg_t_coarse)
-      else
-         mg_t_correct = mg_t_restrict
       end if
 
       ! Post-smoothing
@@ -310,9 +237,6 @@ subroutine multigrid_fine(ilevel,icount)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
       end do
 
-      mg_t_postsmooth = MPI_WTIME()
-      mg_sum_postsmooth = mg_sum_postsmooth + (mg_t_postsmooth - mg_t_correct)
-
       ! Update fine residual (fused with norm computation)
       call cmp_residual_mg_fine(ilevel, res_norm2)
 #ifndef WITHOUTMPI
@@ -320,9 +244,6 @@ subroutine multigrid_fine(ilevel,icount)
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
       res_norm2=res_norm2_tot
 #endif
-
-      mg_t_finalres = MPI_WTIME()
-      mg_sum_finalres = mg_sum_finalres + (mg_t_finalres - mg_t_postsmooth)
 
       last_err = err
       err = sqrt(res_norm2/(i_res_norm2+1d-20*rho_tot**2))
@@ -348,30 +269,6 @@ subroutine multigrid_fine(ilevel,icount)
    ! Free pre-computed coarse neighbor cache
    if(ilevel>1 .and. levelmin_mg < ilevel) then
       call cleanup_nbor_grid_coarse(levelmin_mg, ilevel-1)
-   end if
-
-   mg_t_cleanup = MPI_WTIME()
-
-   if(myid==1) then
-      write(*,'(A,I2,A,I3)') ' ---- MG timing level=', ilevel, ' iters=', iter
-      write(*,'(A,F10.3,A)') '   setup (init_phi+mask+bc):', mg_t_setup, ' s'
-      write(*,'(A,F10.3,A)') '   build_parent_comms      :', mg_t_commbuild, ' s'
-      write(*,'(A,F10.3,A)') '   restrict_mask+scan_flag :', mg_t_mask, ' s'
-      write(*,'(A,F10.3,A)') '   precompute_nbor+scanflag:', mg_t_nbor, ' s'
-      write(*,'(A,F10.3,A)') '   --- iteration loop total:', mg_t_cleanup - mg_t_iter_start, ' s'
-      write(*,'(A,F10.3,A)') '     pre-smooth (GS+comm)  :', mg_sum_presmooth, ' s'
-      write(*,'(A,F10.3,A)') '     residual (fine)       :', mg_sum_residual, ' s'
-      write(*,'(A,F10.3,A)') '     restrict+reverse_comm :', mg_sum_restrict, ' s'
-      write(*,'(A,F10.3,A)') '     coarse MG solve       :', mg_sum_coarse, ' s'
-      write(*,'(A,F10.3,A)') '       c-GS (pre+post+bot) :', mg_c_gs, ' s'
-      write(*,'(A,F10.3,A)') '       c-residual          :', mg_c_res, ' s'
-      write(*,'(A,F10.3,A)') '       c-restrict+comm     :', mg_c_restrict, ' s'
-      write(*,'(A,F10.3,A)') '       c-interpolate+corr  :', mg_c_interp, ' s'
-      write(*,'(A,F10.3,A)') '     interpolate+correct   :', mg_sum_correct, ' s'
-      write(*,'(A,F10.3,A)') '     post-smooth (GS+comm) :', mg_sum_postsmooth, ' s'
-      write(*,'(A,F10.3,A)') '     final residual+allred :', mg_sum_finalres, ' s'
-      write(*,'(A,F10.3,A)') '   TOTAL (this level)      :', mg_t_cleanup - mg_t0, ' s'
-      write(*,'(A)') ' ----------------------------------------'
    end if
 
    if(myid==1) print '(A,I5,A,I5,A,1pE10.3)','   ==> Level=',ilevel, ' Step=', &
@@ -411,22 +308,13 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    real(dp) :: debug_norm2, debug_norm2_tot
    integer :: i, icpu, info, icycle, ncycle
 
-   ! Timing variables for coarse MG breakdown
-   real(kind=8) :: mg_c_t1, mg_c_t2, mg_c_start
-
-   mg_c_start = MPI_WTIME()
-
    if(ifinelevel<=levelmin_mg) then
       ! Solve 'directly'
-      mg_c_t1 = MPI_WTIME()
       do i=1,2*ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
-      mg_c_t2 = MPI_WTIME()
-      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
-      mg_c_total = mg_c_total + (mg_c_t2 - mg_c_start)
       return
    end if
 
@@ -439,20 +327,14 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
    do icycle=1,ncycle
 
       ! Pre-smoothing
-      mg_c_t1 = MPI_WTIME()
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
-      mg_c_t2 = MPI_WTIME()
-      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
 
       ! Compute residual and restrict into upper level RHS
-      mg_c_t1 = MPI_WTIME()
       call cmp_residual_mg_coarse(ifinelevel)
-      mg_c_t2 = MPI_WTIME()
-      mg_c_res = mg_c_res + (mg_c_t2 - mg_c_t1)
 
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
@@ -461,11 +343,8 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       end do
 
       ! Restrict and do reverse-comm
-      mg_c_t1 = MPI_WTIME()
       call restrict_residual_coarse_reverse(ifinelevel)
       call make_reverse_mg_dp(2,ifinelevel-1) ! communicate rhs
-      mg_c_t2 = MPI_WTIME()
-      mg_c_restrict = mg_c_restrict + (mg_c_t2 - mg_c_t1)
 
       ! Reset correction from upper level before solve
       do icpu=1,ncpu
@@ -474,31 +353,20 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       end do
 
       ! Multigrid-solve the upper level
-      mg_c_t1 = MPI_WTIME()
       call recursive_multigrid_coarse(ifinelevel-1, safe)
-      mg_c_t2 = MPI_WTIME()
-      mg_c_recurse = mg_c_recurse + (mg_c_t2 - mg_c_t1)
 
       ! Interpolate coarse solution and correct back into fine solution
-      mg_c_t1 = MPI_WTIME()
       call interpolate_and_correct_coarse(ifinelevel)
       call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
-      mg_c_t2 = MPI_WTIME()
-      mg_c_interp = mg_c_interp + (mg_c_t2 - mg_c_t1)
 
       ! Post-smoothing
-      mg_c_t1 = MPI_WTIME()
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
          call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
       end do
-      mg_c_t2 = MPI_WTIME()
-      mg_c_gs = mg_c_gs + (mg_c_t2 - mg_c_t1)
 
    end do
-
-   mg_c_total = mg_c_total + (MPI_WTIME() - mg_c_start)
 
 end subroutine recursive_multigrid_coarse
 
@@ -534,9 +402,17 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
    integer :: nact_tot, nreq_tot, nreq_tot2
    integer, dimension(1:ncpu) :: nreq, nreq2
 
-   integer, dimension(1:nvector), save :: ind_cell_father
-   integer, dimension(1:nvector,1:twotondim),   save :: nbors_father_grids
-   integer, dimension(1:nvector,1:threetondim), save :: nbors_father_cells
+   ! Per-thread work arrays for OpenMP (Stages 1 & 4)
+   integer, dimension(:,:), target, allocatable :: P_icf_bp
+   integer, dimension(:,:,:), target, allocatable :: P_nfg_bp, P_nfc_bp
+   integer, dimension(:), pointer :: ind_cell_father
+   integer, dimension(:,:), pointer :: nbors_father_grids
+   integer, dimension(:,:), pointer :: nbors_father_cells
+   common /omp_build_parent_comms/ ind_cell_father, nbors_father_cells, nbors_father_grids
+!$omp threadprivate(/omp_build_parent_comms/)
+   integer :: mythread, nthreads
+   common /openmpthreads/ mythread, nthreads
+!$omp threadprivate(/openmpthreads/)
 
    type(communicator), dimension(1:ncpu) :: comm_send, comm_receive
    type(communicator), dimension(1:ncpu) :: comm_send2, comm_receive2
@@ -553,12 +429,27 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
    nreq_tot=0; nreq=0
    indx=0; recvbuf=0
 
+   ! Setup per-thread work arrays for OpenMP
+!$omp parallel
+   mythread = omp_get_thread_num()
+   nthreads = omp_get_num_threads()
+!$omp end parallel
+   allocate(P_icf_bp(1:nvector, 0:nthreads-1))
+   allocate(P_nfg_bp(1:nvector, 1:twotondim, 0:nthreads-1))
+   allocate(P_nfc_bp(1:nvector, 1:threetondim, 0:nthreads-1))
+!$omp parallel
+   ind_cell_father => P_icf_bp(:, mythread)
+   nbors_father_grids => P_nfg_bp(:, :, mythread)
+   nbors_father_cells => P_nfc_bp(:, :, mythread)
+!$omp end parallel
+
    ! ---------------------------------------------------------------------
    ! STAGE 1 : Coarse grid MG activation for local grids (1st pass)
    ! ---------------------------------------------------------------------
 
    ! Loop over the AMR active communicator first
    ngrids = active_f_comm%ngrid
+!$omp parallel do private(istart,nbatch,i,ind,cur_grid,cur_cpu) schedule(dynamic,128)
    do istart=1,ngrids,nvector
       nbatch=min(nvector,ngrids-istart+1)
       ! Gather grid indices and retrieve parent cells
@@ -574,26 +465,27 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
       do ind=1,twotondim
          do i=1,nbatch
             cur_grid = nbors_father_grids(i,ind)
-            if(lookup_mg(cur_grid)>0) cycle ! Grid already active
+            if(lookup_mg(cur_grid)>0) cycle ! Grid already active (pre-check)
 
             cur_cpu=cpu_map(father(cur_grid))
             if(cur_cpu==0) cycle
 
-            if(cur_cpu==myid) then
-               ! Stack grid for local activation
-               ! We own the grid: fill lookup_mg with its final value
-               nact_tot=nact_tot+1
-               flag2(nact_tot)=cur_grid
-               lookup_mg(cur_grid)=nact_tot
-            else
-               ! Stack grid into 2nd part of flag2 for remote activation
-               ! Here, lookup_mg(cur_grid) should be MINUS the AMR index
-               ! of the grid in the corresponding CPU AMR structure.
-               nreq_tot=nreq_tot+1
-               nreq(cur_cpu)=nreq(cur_cpu)+1
-               flag2(ngridmax+nreq_tot)=cur_grid ! "home" index in 2nd part
-               lookup_mg(cur_grid)=abs(lookup_mg(cur_grid)) ! Flag visited (>0)
+            !$omp critical(stage1_update)
+            if(lookup_mg(cur_grid)<=0) then  ! Definitive check under lock
+               if(cur_cpu==myid) then
+                  ! Stack grid for local activation
+                  nact_tot=nact_tot+1
+                  flag2(nact_tot)=cur_grid
+                  lookup_mg(cur_grid)=nact_tot
+               else
+                  ! Stack grid for remote activation
+                  nreq_tot=nreq_tot+1
+                  nreq(cur_cpu)=nreq(cur_cpu)+1
+                  flag2(ngridmax+nreq_tot)=cur_grid
+                  lookup_mg(cur_grid)=abs(lookup_mg(cur_grid))
+               end if
             end if
+            !$omp end critical(stage1_update)
          end do
       end do
    end do
@@ -721,6 +613,7 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
    ngrids = active_mg(myid,icoarselevel)%ngrid
    nreq2 = 0
    nreq_tot2 = 0
+!$omp parallel do private(istart,nbatch,i,ind,cur_cell,cur_cpu,cur_grid) schedule(dynamic,128)
    do istart=1,ngrids,nvector
       nbatch=min(nvector,ngrids-istart+1)
       ! Gather grid indices and retrieve parent cells
@@ -741,12 +634,15 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
             if(cur_cpu/=myid) then
                ! Neighbor cell is not managed by current CPU
                if (cur_grid==0) cycle              ! No grid there
-               if (lookup_mg(cur_grid)>0) cycle    ! Already selected
-               ! Add grid to request
-               nreq_tot2=nreq_tot2+1
-               nreq2(cur_cpu)=nreq2(cur_cpu)+1
-               flag2(ngridmax+nreq_tot+nreq_tot2)=cur_grid
-               lookup_mg(cur_grid)=abs(lookup_mg(cur_grid))  ! Mark visited
+               if (lookup_mg(cur_grid)>0) cycle    ! Already selected (pre-check)
+               !$omp critical(stage4_update)
+               if(lookup_mg(cur_grid)<=0) then  ! Definitive check under lock
+                  nreq_tot2=nreq_tot2+1
+                  nreq2(cur_cpu)=nreq2(cur_cpu)+1
+                  flag2(ngridmax+nreq_tot+nreq_tot2)=cur_grid
+                  lookup_mg(cur_grid)=abs(lookup_mg(cur_grid))
+               end if
+               !$omp end critical(stage4_update)
             end if
          end do
       end do
@@ -963,6 +859,8 @@ subroutine build_parent_comms_mg(active_f_comm, ifinelevel)
       if(comm_receive2(icpu)%ngrid>0) deallocate(comm_receive2(icpu)%igrid)
    end do
 #endif
+
+   deallocate(P_icf_bp, P_nfg_bp, P_nfc_bp)
 
 end subroutine build_parent_comms_mg
 
