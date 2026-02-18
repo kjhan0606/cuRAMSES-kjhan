@@ -1057,8 +1057,8 @@ subroutine kinetic_feedback
   endif
 
 #ifndef WITHOUTMPI
-  tt1=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in counting SNII: ',tt1-tt0
+! tt1=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in counting SNII: ',tt1-tt0
 #endif
 
   if(TRIM(ordering)=='ksection') then
@@ -1093,8 +1093,8 @@ subroutine kinetic_feedback
   end do
 
 #ifndef WITHOUTMPI
-  tt2=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in building SNII arrays: ',tt2-tt1
+! tt2=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in building SNII arrays: ',tt2-tt1
 #endif
   deallocate(nparticles,ptrhead,mynewSN)
 
@@ -1145,8 +1145,8 @@ subroutine kinetic_feedback
   deallocate(sendbuf_ex1, xmin_ex1, xmax_ex1)
 
 #ifndef WITHOUTMPI
-  tt3=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 1 (overlap): ',tt3-tt2
+! tt3=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 1 (overlap): ',tt3-tt2
 #endif
 
   ! Unpack received SN
@@ -1184,8 +1184,8 @@ subroutine kinetic_feedback
        mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN,ekBlast_vol)
 
 #ifndef WITHOUTMPI
-  tt4=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in average_SN_ksec: ',tt4-tt3
+! tt4=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in average_SN_ksec: ',tt4-tt3
 #endif
 
   ! ===== Exchange 2: Exclusive → owner (cell contributions) =====
@@ -1236,8 +1236,8 @@ subroutine kinetic_feedback
   deallocate(vol_gas, dq, u2Blast_loc, mloadSN, ZloadSN, celoadSN, vloadSN, ekBlast_vol)
 
 #ifndef WITHOUTMPI
-  tt5=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 2 (exclusive): ',tt5-tt4
+! tt5=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 2 (exclusive): ',tt5-tt4
 #endif
 
   ! ===== Owner aggregation =====
@@ -1357,8 +1357,8 @@ subroutine kinetic_feedback
   deallocate(blast_center_cpu)
 
 #ifndef WITHOUTMPI
-  tt6=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 3 (overlap): ',tt6-tt5
+! tt6=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in Exchange 3 (overlap): ',tt6-tt5
 #endif
 
   ! ===== Sedov_blast_ksec =====
@@ -1371,9 +1371,9 @@ subroutine kinetic_feedback
   deallocate(astarproper)
 
 #ifndef WITHOUTMPI
-  tt7=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in Sedov_blast_ksec: ',tt7-tt6
-  if(myid .eq. 1) write(*,*)'Total time in SNII kinetic feedback (ksec): ',tt7-tt0
+! tt7=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in Sedov_blast_ksec: ',tt7-tt6
+! if(myid .eq. 1) write(*,*)'Total time in SNII kinetic feedback (ksec): ',tt7-tt0
 #endif
 
   else
@@ -1417,8 +1417,8 @@ subroutine kinetic_feedback
   ! End loop over levels
 
 #ifndef WITHOUTMPI
-  tt2=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in building linked list and computing feedback: ',tt2-tt1
+! tt2=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in building linked list and computing feedback: ',tt2-tt1
 #endif
   deallocate(nparticles,ptrhead)
   deallocate(mynewSN)
@@ -1458,14 +1458,14 @@ subroutine kinetic_feedback
 #endif
 
 #ifndef WITHOUTMPI
-  tt3=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in packed MPI_ALLREDUCE (6->1): ',tt3-tt2
+! tt3=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in packed MPI_ALLREDUCE (6->1): ',tt3-tt2
 #endif
   call getSNonmyid(itemp,nSN,xSN_tot,nSN_tot)
 
 #ifndef WITHOUTMPI
-  tt8=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in getting SNonmyid: ',tt8-tt3
+! tt8=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in getting SNonmyid: ',tt8-tt3
 #endif
 
 
@@ -1497,21 +1497,21 @@ subroutine kinetic_feedback
   allocate(mloadSN(1:nSN),ZloadSN(1:nSN),celoadSN(1:nSN,1:nelt),vloadSN(1:nSN,1:3))
 
 #ifndef WITHOUTMPI
-  tt4=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in operating SNII array modification: ',tt4-tt3
+! tt4=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in operating SNII array modification: ',tt4-tt3
 #endif
   call average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,indSN,nSN,nSN_tot,iSN_myid,mSN,mloadSN,ZSN,ZloadSN,ceSN,celoadSN,vloadSN)
 
 #ifndef WITHOUTMPI
-  tt5=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in averageSN: ',tt5-tt4
+! tt5=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in averageSN: ',tt5-tt4
 #endif
   ! Modify hydro quantities to account for a Sedov blast wave
   call Sedov_blast(xSN,mSN,NbSN,indSN,vol_gas,dq,ekBlast,nSN,mloadSN,ZloadSN,celoadSN,vloadSN)
 
 #ifndef WITHOUTMPI
-  tt6=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in Sedov blast: ',tt6-tt5
+! tt6=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in Sedov blast: ',tt6-tt5
 #endif
   deallocate(xSN,vSN,mSN,ZSN,indSN,vol_gas,dq,ekBlast,ceSN,NbSN,iSN_myid)
   deallocate(mloadSN,ZloadSN,celoadSN,vloadSN)
@@ -1526,8 +1526,8 @@ subroutine kinetic_feedback
      enddo
   enddo
 #ifndef WITHOUTMPI
-  tt7=MPI_WTIME()
-  if(myid .eq. 1) write(*,*)'Time elapsed in the SNII kinetic feedback routine: ',tt7-tt0
+! tt7=MPI_WTIME()
+! if(myid .eq. 1) write(*,*)'Time elapsed in the SNII kinetic feedback routine: ',tt7-tt0
 #endif
 end subroutine kinetic_feedback
 !################################################################

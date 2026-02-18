@@ -19,7 +19,7 @@ module Tree_commons
    TYPE Tree_Particle
      integer:: sibling
      integer:: gid
-     logical:: included
+     logical:: included,checked
      real(dp):: x,y,z
    end TYPE Tree_Particle
 
@@ -161,6 +161,120 @@ function pfof_open(node, particle,np, inow, ptr, foflink, boxsize)
 end function pfof_open
 
 
+function Check_FoF_link(gndx, node, particle, np, foflink , linked, gindx, boxsize, factG)  result(ncount)
+#ifdef _KJHAN_TEST
+  use AA
+#else
+  use pm_commons
+  use amr_commons
+#endif
+  use Tree_commons
+  implicit none
+  integer:: i,j,k,ptr,optr, nptr,now,gndx,gindx,np
+  integer:: ncount
+  TYPE(Tree_Node), dimension(1:2*np), intent(inout):: node
+  TYPE(Tree_Particle),  dimension(1:np), intent(inout):: particle
+  integer, dimension(1:np), intent(inout):: linked
+  real(dp), dimension(3):: boxsize
+  real(dp):: foflink2,tmpx,tmpy,tmpz, foflink,rr
+  real(dp):: egrav,ekin,uxcom,uycom,uzcom,v2rel1,v2rel2,factG
+  logical, external:: pfof_open
+
+  foflink2 = foflink*foflink
+  ncount = 0
+  now = 0
+
+  do while(.true.)
+     optr =  -1
+     ptr = -1;
+     do while(ptr .ne. 0)
+        if(ptr.lt. 0) then
+           if(node(-ptr)%sibling .eq. node(-ptr)%daughter) then
+              call EraseFromTree(node, particle,np, optr,ptr, node(-ptr)%sibling)
+              ptr = node(-ptr)%sibling
+           else
+              if(pfof_open(node, particle,np,gndx, ptr, foflink, boxsize).eq. .true.) then
+                 optr = ptr
+                 ptr = node(-ptr)%daughter
+              else
+                 optr = ptr;
+                 ptr = node(-ptr)%sibling
+              endif
+           endif
+        else if(ptr .gt.0) then
+           if(particle(ptr)%included .eq. .true.) then
+              nptr = particle(ptr)%sibling
+              call EraseFromTree(node, particle,np, optr, ptr, nptr)
+              ptr = nptr
+           else
+              tmpx = (particle(gndx)%x - particle(ptr)%x)
+              tmpy = (particle(gndx)%y - particle(ptr)%y)
+              tmpz = (particle(gndx)%z - particle(ptr)%z)
+              if(tmpx.ge.boxsize(1)*0.5) then
+                tmpx = tmpx - boxsize(1) 
+              endif
+              if(tmpx.le.-boxsize(1)*0.5) then
+                tmpx = tmpx + boxsize(1) 
+              endif
+              rr = tmpx*tmpx
+#if NDIM>1
+              if(tmpy.ge.boxsize(2)*0.5) then
+                tmpy = tmpy - boxsize(2)
+              endif
+              if(tmpy.le.-boxsize(2)*0.5) then
+                tmpy = tmpy + boxsize(2) 
+              endif
+              rr = rr+ tmpy*tmpy
+#endif
+#if NDIM>2
+              if(tmpz.ge.boxsize(3)*0.5) then
+                tmpz = tmpz - boxsize(3)
+              endif
+              if(tmpz.le.-boxsize(3)*0.5) then
+                tmpz = tmpz + boxsize(3) 
+              endif
+              rr = rr+ tmpz*tmpz
+#endif
+              if(rr .le. foflink2) then
+                 if(vrel_merge) then
+                    egrav=msink(ptr)*msink(gndx)/(rr+tiny(0.d0))*factG
+                    uxcom=(msink(ptr)*vsink(ptr,1)+msink(gndx)*vsink(gndx,1))/(msink(ptr)+msink(gndx))
+                    uycom=(msink(ptr)*vsink(ptr,2)+msink(gndx)*vsink(gndx,2))/(msink(ptr)+msink(gndx))
+                    uzcom=(msink(ptr)*vsink(ptr,3)+msink(gndx)*vsink(gndx,3))/(msink(ptr)+msink(gndx))
+                    v2rel1=(vsink(ptr,1)-uxcom)**2+(vsink(ptr,2)-uycom)**2+(vsink(ptr,3)-uzcom)**2
+                    v2rel2=(vsink(gndx,1)-uxcom)**2+(vsink(gndx,2)-uycom)**2+(vsink(gndx,3)-uzcom)**2
+                    ekin=0.5d0*(msink(ptr)*v2rel1+msink(gndx)*v2rel2)
+                    if(ekin .lt. egrav) then
+                       ncount = ncount + 1
+                       linked(ncount) = ptr
+                       particle(ptr)%gid = gindx
+                       particle(ptr)%checked = .true.
+                       nptr = particle(ptr)%sibling
+                       call EraseFromTree(node, particle,np, optr, ptr, nptr)
+                    else
+                       optr = ptr
+                    endif
+                 else
+                    ncount = ncount + 1
+                    linked(ncount) = ptr
+                    particle(ptr)%gid = gindx
+                    particle(ptr)%checked = .true.
+                    nptr = particle(ptr)%sibling
+                    call EraseFromTree(node, particle,np, optr, ptr, nptr)
+                 endif
+              else
+                 optr = ptr
+              endif
+              ptr = particle(ptr)%sibling
+           endif
+        endif
+     enddo
+     now = now + 1
+     if(now .gt. ncount) exit
+     gndx = linked(now)
+  enddo
+end function Check_FoF_link
+
 function FoF_link(gndx, node, particle, np, foflink , linked, gindx, boxsize, factG)  result(ncount)
 #ifdef _KJHAN_TEST
   use AA
@@ -276,6 +390,93 @@ function FoF_link(gndx, node, particle, np, foflink , linked, gindx, boxsize, fa
 end function FoF_link
 
 
+function Omp_Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
+#ifdef _KJHAN_TEST
+  use AA
+#else
+  use pm_commons
+  use amr_commons
+#endif
+  use Tree_commons
+  implicit none
+  integer:: i,j,k, indx,numsink, gindx
+! TYPE(Tree_Node),  dimension(1:2*numsink):: node
+! TYPE(Tree_Particle),  dimension(1:numsink):: particle
+! integer, dimension(1:numsink):: linked
+
+  TYPE(Tree_Node),  dimension(:), allocatable:: node
+  TYPE(Tree_Particle),  dimension(:),allocatable:: particle
+  integer, dimension(:),allocatable:: linked
+
+
+
+  integer, dimension(1:numsink)::psink,gsink
+  integer:: gnum,ii,icount
+  real(dp), dimension(1:3):: boxsize
+  real(dp):: foflink
+  real(dp):: dx_min2
+  real(dp):: factG, scale
+  real(dp),dimension(1:3)::xbound,skip_loc
+  integer, external:: FoF_link
+  integer:: nx_loc
+
+
+  allocate(node(1:2*numsink))
+  allocate(particle(1:numsink))
+  allocate(linked(1:numsink))
+
+
+  xbound(1:3)=(/dble(nx),dble(ny),dble(nz)/)
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+
+
+
+  foflink = sqrt(rmerge**2*dx_min2)
+  MINCELLWIDTH = 5*foflink
+  boxsize(1) = scale*xbound(1)
+  boxsize(2) = scale*xbound(2)
+  boxsize(3) = scale*xbound(3)
+  do i = 1, numsink
+     particle(i)%x = xsink(i,1)
+     particle(i)%y = xsink(i,2)
+     particle(i)%z = xsink(i,3)
+     particle(i)%included = .false.
+     particle(i)%checked = .false.
+  enddo
+  call Build_Tree(node, particle, numsink)
+
+  gindx = 0
+  icount = 0
+
+  do i = 1, numsink
+     if(particle(i)%included .eq. .false.) then
+        ii = i
+        gindx = gindx + 1
+!       gnum = Check_FoF_link(ii, node, particle, numsink, foflink, linked, gindx, boxsize, factG)
+!       if(gnum .eq.0 .or. particle(i)%included .ne. .true.) then
+!          print *, 'Missing finding', gnum, particle(i)%included
+!          stop
+!       endif
+        do j = 1, gnum
+!          if(linked(j) .le.0 .or. linked(j).gt.numsink) then
+!             print *,'wrong detection of linked', j, linked(j)
+!             stop
+!          endif
+           psink(icount+j) = linked(j)
+           gsink(linked(j)) = gindx
+        enddo
+        icount = icount + gnum
+     endif
+  enddo
+! if(icount .ne. numsink) then
+!    print *, 'Missing particles are detected ', icount, numsink
+! endif
+  deallocate(node,particle,linked)
+end function Omp_Do_FoF_Tree
+
+
+
 function Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
 #ifdef _KJHAN_TEST
   use AA
@@ -356,10 +557,7 @@ function Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
 ! if(icount .ne. numsink) then
 !    print *, 'Missing particles are detected ', icount, numsink
 ! endif
-
   deallocate(node,particle,linked)
-
-
 end function Do_FoF_Tree
 
 subroutine Build_Tree(node, particle, np)
