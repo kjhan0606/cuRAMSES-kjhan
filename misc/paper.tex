@@ -1475,37 +1475,31 @@ Several scaling trends are evident:
   over the 4-rank baseline.
 \end{itemize}
 
+Fig.~\ref{fig:scaling} visualises these trends.  Panel~(a) shows the
+per-component timer values as a function of $\ncpu$.  Particles,
+Poisson, and flag operations decrease monotonically, following the
+ideal scaling line at low rank counts before flattening due to
+communication overhead.  The MG solver plateaus near 5.5\,s beyond
+32~ranks, limited by inter-rank ghost-zone communication in the
+V-cycle.  The Godunov solver increases at high $\ncpu$ because
+fine-level AMR patches become localised and load-imbalanced.
+Panel~(b) shows the speedup relative to 4~ranks: Particles and Flag
+achieve $9.4\times$ and $8.0\times$ speedup at 64~ranks, respectively,
+while the total elapsed time peaks at $2.2\times$ speedup (16~ranks)
+before communication costs dominate.
 
-\subsection{Variable-$\ncpu$ restart verification}
-\label{sec:perf_varcpu}
-
-Table~\ref{tab:varcpu} confirms that the variable-$\ncpu$ restart
-preserves bit-identical physics across all tested $\ncpu$ values.
-The slight variation in $e_{\rm cons}$ ($5.23$--$5.35 \times 10^{-3}$)
-is due to differing domain decomposition topologies, which affect the
-order of floating-point reductions.
-
-\begin{table}
+\begin{figure*}
 \centering
-\caption{Variable-$\ncpu$ restart verification. All runs restart from
-a 12-rank HDF5 checkpoint at step~5 and evolve to step~10.}
-\label{tab:varcpu}
-\begin{tabular}{rccl}
-\toprule
-$\ncpu$ & $e_{\rm pot}$ & $e_{\rm kin}$ & Restart type \\
-\midrule
-4  & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-8  & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-12 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & same-$\ncpu$ \\
-16 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-24 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-32 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-48 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-64 & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ & varcpu \\
-\bottomrule
-\end{tabular}
-\end{table}
-
+\includegraphics[width=\textwidth]{strong_scaling.pdf}
+\caption{Strong scaling of \curamses\ on a dual-socket AMD EPYC 7543
+node (64 cores) with a $200 \times 10^6$ particle cosmological
+simulation.  (a)~Per-component wall-clock times versus $\ncpu$; the
+dashed line shows ideal scaling from the 4-rank baseline.
+(b)~Speedup relative to 4~ranks.  Particles and flag operations scale
+nearly ideally, while the MG solver and Godunov hydro are limited by
+communication overhead and load imbalance at high rank counts.}
+\label{fig:scaling}
+\end{figure*}
 
 \subsection{Memory-weighted load balancing}
 \label{sec:perf_membal}
