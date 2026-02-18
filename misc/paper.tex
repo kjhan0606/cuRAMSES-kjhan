@@ -1243,7 +1243,93 @@ pairs per exchange call.
 
 
 % ===================================================================
-% 9. PERFORMANCE RESULTS
+% 9. HYBRID CPU/GPU DISPATCH
+% ===================================================================
+\section{Hybrid CPU/GPU Dispatch}
+\label{sec:hybrid}
+
+Certain compute-intensive routines---the Godunov solver, gravity force
+computation, hydrodynamic synchronisation, CFL timestep, prolongation,
+and radiative cooling---are amenable to GPU acceleration.  Rather than
+offloading entire time steps to the GPU, \curamses\ adopts a
+\emph{hybrid dispatch} model in which OMP threads dynamically choose
+between CPU and GPU execution at runtime.
+
+\subsection{Dynamic dispatch model}
+\label{sec:hybrid_dispatch}
+
+At the start of each parallel region, each OMP thread attempts to
+acquire a GPU stream slot via an atomic counter.  Threads that succeed
+accumulate grid data into a \textbf{superbatch buffer} of configurable
+size (typically 4096 grids) and launch GPU kernels asynchronously when
+the buffer is full.  Threads that do not acquire a slot execute the
+standard CPU code path.  The \code{schedule(dynamic)} clause ensures
+load balancing: if a GPU thread is waiting for kernel completion,
+remaining loop iterations are picked up by CPU threads.
+
+This design requires no code duplication---the CPU path is the
+original Fortran subroutine, and the GPU path is an alternative branch
+within the same \code{!\$omp do} loop.
+
+\subsection{Superbatch buffering and scatter-reduce}
+\label{sec:hybrid_superbatch}
+
+GPU kernel launch latency ($\sim$10--50\,$\mu$s) is amortised by
+batching: each GPU thread accumulates the full stencil data for many
+grids before launching a single kernel covering all accumulated grids.
+For the Godunov solver, the GPU pipeline executes five kernels in
+sequence: primitive variable conversion, slope computation, Riemann
+tracing, flux computation, and artificial diffusion.
+
+A key optimisation is the on-device \textbf{scatter-reduce} kernel
+that computes the conservative update entirely on the GPU.  Instead of
+transferring the full flux array back to the host ($\sim$98\,MB per
+flush), the kernel reduces fluxes into compact per-grid output arrays,
+reducing the device-to-host transfer to $\sim$5\,MB per flush---a
+$20\times$ reduction in PCIe bandwidth.
+
+\subsection{Lock-free level $L{-}1$ update}
+\label{sec:hybrid_scatter}
+
+The Godunov solver updates conservative variables at both the current
+level~$L$ and the coarser level~$L{-}1$.  Level~$L$ writes are
+conflict-free by construction (each grid maps to unique cell indices),
+but level~$L{-}1$ writes can conflict when multiple fine grids share
+the same coarse parent cell.  The original code serialised both levels
+with \code{!\$omp critical}, destroying all OMP parallelism in the
+scatter phase.
+
+We eliminate this lock entirely: level~$L$ results are written
+directly to \code{unew}, while each thread appends level~$L{-}1$ flux
+contributions to a private scatter buffer.  After the parallel region,
+a serial merge applies all buffered entries.  The merge cost is
+negligible ($< 0.01$\,s in all tests), and the result is exact---no
+approximation or race condition.
+
+\subsection{Fortran--CUDA interface}
+\label{sec:hybrid_interface}
+
+The Fortran--CUDA interface uses a two-layer design: a C binding layer
+(\code{bind(C)} with \code{type(c\_ptr)} arguments) and a Fortran
+wrapper layer that converts assumed-size arrays to C pointers via
+\code{c\_loc}.  The assumed-size pattern avoids Fortran array
+descriptors, which can produce incorrect addresses with certain
+compilers (notably Intel ifx).
+
+\subsection{Performance}
+\label{sec:hybrid_perf}
+
+The GPU-accelerated code produces bit-identical physics results
+compared to the CPU-only build.  On an RTX~5000 Ada GPU with 4 MPI
+ranks $\times$ 2 OMP threads, the Godunov solver is accelerated by
+16\,per\,cent (22.0\,s $\to$ 18.4\,s).  The overall speedup is modest
+because the host-to-device transfer currently dominates (50\,per\,cent
+of GPU time), leaving significant room for future optimisation via
+persistent device-side data structures.
+
+
+% ===================================================================
+% 10. PERFORMANCE RESULTS
 % ===================================================================
 \section{Performance Results}
 \label{sec:performance}
@@ -1474,6 +1560,14 @@ cosmological simulations. The main contributions are:
   automatic domain redistribution enables checkpoint/restart with
   arbitrary rank counts, improving workflow flexibility for production
   simulations on shared facilities.
+
+\item \textbf{Hybrid CPU/GPU dispatch.} A dynamic dispatch model in
+  which OMP threads acquire GPU stream slots at runtime, with fallback
+  to CPU execution.  Superbatch buffering amortises kernel launch
+  latency, and an on-device scatter-reduce kernel reduces PCIe
+  transfer volume by $20\times$.  The Godunov solver achieves a
+  16\,per\,cent speedup on an RTX~5000 Ada GPU while producing
+  bit-identical results.
 \end{enumerate}
 
 All modifications preserve physical consistency, as verified by
