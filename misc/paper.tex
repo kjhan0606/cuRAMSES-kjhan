@@ -1,4 +1,4 @@
-% cuRAMSES: Scalable Domain Decomposition and Memory-Efficient AMR
+% cuRAMSES: Scalable Domain Decomposition and CUDA-enabled AMR
 % for Cosmological Simulations
 %
 % MNRAS-style LaTeX paper
@@ -72,8 +72,8 @@ A hybrid CPU/GPU dispatch model allows OMP threads to dynamically
 offload compute-intensive routines --- including the Godunov solver,
 gravity force computation, and radiative cooling --- to GPU streams at
 runtime, with automatic fallback to CPU execution when streams are
-unavailable. We also
-implement variable-$\ncpu$ restart via HDF5 parallel I/O, removing the
+unavailable. We also implement variable-$\ncpu$ restart via HDF5
+parallel I/O, removing the
 constraint that checkpoint files must be read with the same number of
 MPI ranks as were used to write them. All modifications preserve
 physical consistency, as verified by conservation-law diagnostics
@@ -97,17 +97,18 @@ to the observable properties of galaxies, the intergalactic medium,
 and the large-scale structure of the Universe. Over the past decade,
 a series of landmark galaxy formation simulations have advanced our
 understanding of cosmic structure: the Illustris and IllustrisTNG
-projects \citep{Vogelsberger2014,Pillepich2018} using the
-moving-mesh code \textsc{arepo}, the EAGLE simulation
-\citep{Schaye2015} with the smoothed-particle hydrodynamics code
-\textsc{gadget}, the Horizon-AGN simulation \citep{Dubois2014} and
-its high-resolution successor NewHorizon \citep{Dubois2021} using the
-adaptive mesh refinement (AMR) code \ramses, and the FIRE project
+projects \citep{Vogelsberger2014,Pillepich2018,Nelson2019} using the
+moving-mesh code \textsc{arepo} \citep{Springel2010}, the EAGLE
+simulation \citep{Schaye2015} with the smoothed-particle hydrodynamics
+code \textsc{gadget} \citep{Springel2005}, the Horizon-AGN simulation
+\citep{Dubois2014} and its high-resolution successor NewHorizon
+\citep{Dubois2021} using the adaptive mesh refinement (AMR) code
+\ramses\ \citep{Teyssier2002}, and the FIRE project
 \citep{Hopkins2018} with the meshless finite-mass code \textsc{gizmo}.
 
 Among the numerical approaches employed by these simulations, AMR
-codes such as \ramses\ \citep{Teyssier2002} and Enzo
-\citep{Bryan2014} provide a particularly attractive framework: the
+codes such as \ramses\ and Enzo \citep{Bryan2014} provide a
+particularly attractive framework: the
 computational mesh is refined only where the physics demands it,
 concentrating resources on collapsing haloes and star-forming regions
 while keeping the cost of smooth, low-density regions manageable.
@@ -134,7 +135,7 @@ standard \ramses\ implementation, ghost-zone exchange requires each
 rank to broadcast its emission and reception lists to all other ranks
 via \code{MPI\_ALLTOALL}, leading to $\Olog{\ncpu^2}$ message
 complexity and $\Olog{\ncpu}$ per-rank buffer memory --- a severe
-bottleneck when $\ncpu$ exceeds $\sim$$10^3$
+bottleneck when $\ncpu$ exceeds ${\sim}10^3$
 \citep{Teyssier2002}. Furthermore, the Hilbert ordering distributes
 load based on cell count alone, which becomes increasingly inadequate
 for cosmological simulations where the particle distribution is highly
@@ -156,9 +157,9 @@ alone consumes $48\,\ngridmax$ bytes \citep{Teyssier2002}, and the
 Hilbert key array adds another $16\,\ngridmax$ bytes (when compiled
 with \code{QUADHILBERT}), together approaching 1\,GB per rank for
 production configurations with $\ngridmax \sim 5 \times 10^6$. The
-multigrid Poisson solver typically dominates runtime, its per-iteration
-cost driven by frequent ghost-zone exchanges and repeated hash table
-lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
+multigrid Poisson solver \citep{Guillet2011} typically dominates
+runtime, its per-iteration cost driven by frequent ghost-zone exchanges
+and repeated hash table lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
 rank, so restarting with a different rank count requires a cumbersome
 intermediate redistribution step.
 
@@ -180,7 +181,7 @@ modifications to \ramses\ that addresses each of these challenges. We
 introduce a recursive \ksec\ domain decomposition
 (Section~\ref{sec:ksection}) that replaces Hilbert ordering with a
 hierarchical multi-way spatial partitioning, enabling MPI exchange with
-$\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table
+$\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table \citep{Morton1966}
 (Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely,
 saving $\sim$240\,MB per rank, and on-demand allocation of redundant
 large arrays (Section~\ref{sec:memory}) yields over 1\,GB of
@@ -254,7 +255,7 @@ The splitting sequence is then
 yielding $L = \sum_i m_i$ levels in the tree. At each level $l$, the
 domain is split into $k_l$ sub-domains along the longest axis of the
 current bounding box. This longest-axis selection ensures roughly
-isotropic sub-domains, minimizing the surface-to-volume ratio and
+isotropic sub-domains, minimising the surface-to-volume ratio and
 hence the ghost-zone count.
 
 For example, $\ncpu = 12 = 3 \times 2 \times 2$ produces the
@@ -505,7 +506,7 @@ array into a single \ksec\ exchange call:
 \label{eq:bulk_format}
 \end{equation}
 for $v = 1, \ldots, N_{\rm var}$ and $j = 1, \ldots, \twotondim$,
-plus two metadata entries. This amortizes the tree-walk overhead and
+plus two metadata entries. This amortises the tree-walk overhead and
 MPI latency over $N_{\rm var}$ variables, yielding a significant
 reduction in the number of exchange calls per time step (from
 $N_{\rm var}$ individual calls to a single bulk call at each of the
@@ -911,7 +912,7 @@ dispatch.
 \label{sec:mg_arithmetic}
 
 The GS fast-path computation involves a division by
-$2^{N_{\rm dim}} = 8$:
+$2 N_{\rm dim} = 6$:
 \begin{equation}
 \phi_{\rm new} = \frac{\sum_j \phi_j - h^2 f}{2 N_{\rm dim}}.
 \label{eq:gs_update}
@@ -1509,7 +1510,7 @@ $\ncpu$ & $e_{\rm pot}$ & $e_{\rm kin}$ & Restart type \\
 \subsection{Memory-weighted load balancing}
 \label{sec:perf_membal}
 
-The memory-weighted cost function (equation~\ref{eq:mem_cost})
+The memory-weighted cost function (equation~\ref{eq:cost_function})
 assigns $w_{\rm grid} = 270$ bytes per grid cell and
 $w_{\rm part} = 12$ bytes per particle.
 With standard equal-volume decomposition, the peak-to-mean memory
@@ -1653,14 +1654,17 @@ Dubois Y., et al., 2014, MNRAS, 444, 1453
 \bibitem[\protect\citeauthoryear{Dubois et al.}{Dubois et al.}{2021}]{Dubois2021}
 Dubois Y., et al., 2021, A\&A, 651, A109
 
+\bibitem[\protect\citeauthoryear{Guillet \& Teyssier}{Guillet \& Teyssier}{2011}]{Guillet2011}
+Guillet T., Teyssier R., 2011, J.\ Comput.\ Phys., 230, 4756
+
 \bibitem[\protect\citeauthoryear{Hahn \& Abel}{Hahn \& Abel}{2011}]{Hahn2011}
 Hahn O., Abel T., 2011, MNRAS, 415, 2101
 
-\bibitem[\protect\citeauthoryear{Hopkins et al.}{Hopkins et al.}{2018}]{Hopkins2018}
-Hopkins P.~F., et al., 2018, MNRAS, 480, 800
-
 \bibitem[\protect\citeauthoryear{Han et al.}{Han et al.}{2026}]{Han2026}
 Han S., et al., 2026, A\&A, 705, A169
+
+\bibitem[\protect\citeauthoryear{Hopkins et al.}{Hopkins et al.}{2018}]{Hopkins2018}
+Hopkins P.~F., et al., 2018, MNRAS, 480, 800
 
 \bibitem[\protect\citeauthoryear{Knuth}{Knuth}{1997}]{Knuth1997}
 Knuth D.~E., 1997, The Art of Computer Programming, Vol.~3:
@@ -1669,27 +1673,33 @@ Sorting and Searching, 2nd edn. Addison-Wesley, Reading, MA
 \bibitem[\protect\citeauthoryear{Lee et al.}{Lee et al.}{2021}]{Lee2021}
 Lee J., et al., 2021, ApJ, 908, 11
 
-\bibitem[\protect\citeauthoryear{Pillepich et al.}{Pillepich et al.}{2018}]{Pillepich2018}
-Pillepich A., et al., 2018, MNRAS, 473, 4077
-
 \bibitem[\protect\citeauthoryear{Morton}{Morton}{1966}]{Morton1966}
 Morton G.~M., 1966, A Computer Oriented Geodetic Data Base and a
 New Technique in File Sequencing. IBM, Ottawa
 
-\bibitem[\protect\citeauthoryear{Springel}{Springel}{2005}]{Springel2005}
-Springel V., 2005, MNRAS, 364, 1105
+\bibitem[\protect\citeauthoryear{Nelson et al.}{Nelson et al.}{2019}]{Nelson2019}
+Nelson D., et al., 2019, Comput.\ Astrophys.\ Cosmol., 6, 2
+
+\bibitem[\protect\citeauthoryear{Pillepich et al.}{Pillepich et al.}{2018}]{Pillepich2018}
+Pillepich A., et al., 2018, MNRAS, 473, 4077
 
 \bibitem[\protect\citeauthoryear{Schaye et al.}{Schaye et al.}{2015}]{Schaye2015}
 Schaye J., et al., 2015, MNRAS, 446, 521
 
+\bibitem[\protect\citeauthoryear{Springel}{Springel}{2005}]{Springel2005}
+Springel V., 2005, MNRAS, 364, 1105
+
+\bibitem[\protect\citeauthoryear{Springel}{Springel}{2010}]{Springel2010}
+Springel V., 2010, MNRAS, 401, 791
+
 \bibitem[\protect\citeauthoryear{Teyssier}{Teyssier}{2002}]{Teyssier2002}
 Teyssier R., 2002, A\&A, 385, 337
 
-\bibitem[\protect\citeauthoryear{Warren \& Salmon}{Warren \& Salmon}{1993}]{Warren1993}
-Warren M.~S., Salmon J.~K., 1993, in Proc.\ Supercomputing '93. ACM, New York, p.~12
-
 \bibitem[\protect\citeauthoryear{Vogelsberger et al.}{Vogelsberger et al.}{2014}]{Vogelsberger2014}
 Vogelsberger M., et al., 2014, MNRAS, 444, 1518
+
+\bibitem[\protect\citeauthoryear{Warren \& Salmon}{Warren \& Salmon}{1993}]{Warren1993}
+Warren M.~S., Salmon J.~K., 1993, in Proc.\ Supercomputing '93. ACM, New York, p.~12
 
 \end{thebibliography}
 
