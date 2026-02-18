@@ -156,9 +156,9 @@ The original \ramses\ code relies exclusively on MPI for
 parallelism, assigning one MPI rank per processor core. To exploit the
 shared-memory bandwidth of modern multi-core nodes, hybrid MPI+OpenMP
 implementations have been developed: the Horizon Run~5 simulation
-\citep{Lee2021} and the NewCluster zoom-in simulation
-\citep{Han2026} both employ RAMSES-yOMP, which adds OpenMP threading
-within each MPI rank for improved intra-node scalability. However,
+\citep{Lee2021} employs OMP-RAMSES, and the NewCluster zoom-in
+simulation \citep{Han2026} employs RAMSES-yOMP, both adding OpenMP
+threading within each MPI rank for improved intra-node scalability. However,
 MPI+OpenMP alone still leaves the GPU compute capability of modern
 heterogeneous nodes untapped. With the emergence of exascale
 supercomputers whose floating-point throughput is dominated by GPU
@@ -1523,8 +1523,13 @@ to run with $\sim$40\,per\,cent less total allocated memory.
 We have presented \curamses, a set of algorithmic and implementation
 improvements to the \ramses\ cosmological AMR code that collectively
 address the key scaling bottlenecks --- communication overhead, memory
-consumption, and solver efficiency --- encountered in large-scale
-cosmological simulations. The main contributions are:
+consumption, solver efficiency, and hardware utilisation --- encountered
+in large-scale cosmological simulations. While previous efforts such as
+OMP-RAMSES \citep{Lee2021} and RAMSES-yOMP \citep{Han2026} introduced
+MPI+OpenMP hybrid parallelism, \curamses\ extends this to a three-level
+MPI+OpenMP+CUDA paradigm suited to the GPU-dominated architectures of
+current and upcoming exascale supercomputers. The main contributions
+are:
 
 \begin{enumerate}
 \item \textbf{Recursive \ksec\ domain decomposition.} A recursive $k$-ary
@@ -1584,7 +1589,20 @@ hash table, in particular, is a drop-in replacement for any
 neighbour-pointer array in an octree code, requiring only that grid
 positions be available at each level. The \ksec\ decomposition can be
 adopted by any code whose domain decomposition is currently based on
-one-dimensional space-filling curve ordering.
+one-dimensional space-filling curve ordering. The hybrid CPU/GPU
+dispatch model demonstrates that GPU acceleration can be integrated
+into a legacy Fortran codebase without sacrificing portability: the
+same source compiles and runs correctly in CPU-only mode when CUDA is
+unavailable, making it practical for heterogeneous computing
+environments where not all nodes are equipped with GPUs.
+
+Looking ahead, the three-level MPI+OpenMP+CUDA parallelism
+positions \curamses\ well for exascale platforms such as Frontier,
+Aurora, and LUMI, where the majority of floating-point throughput
+resides in GPU accelerators. Further optimisation of the host-to-device
+data transfer --- currently the dominant cost in the GPU pipeline ---
+through persistent device-side data structures and asynchronous
+prefetching will be a key focus of future work.
 
 \curamses\ is being used in production for the Horizon Run~5
 cosmological simulation project and will be made publicly available
