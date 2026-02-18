@@ -78,6 +78,9 @@ module amr_commons
   integer ,allocatable,dimension(:)  ::flag1   ! flag for refine
   integer ,allocatable,dimension(:)  ::flag2   ! flag for expansion
 
+  ! Pre-computed neighbor grids for flag routines
+  integer ,allocatable,dimension(:,:)::nbor_active_cache
+
   ! Global indexing
   integer ,allocatable,dimension(:)  ::cpu_map  ! domain decomposition
   integer ,allocatable,dimension(:)  ::cpu_map2 ! new domain decomposition

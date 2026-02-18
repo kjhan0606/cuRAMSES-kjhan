@@ -30,8 +30,12 @@ subroutine sub_hydro_flag(ilevel,igrid,ngrid,iflag)
      ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
   end do
 
-  ! Gather neighboring offsets
-  call getnborgrids(ind_grid,igridn,ngrid)
+  ! Use precomputed neighbor cache instead of hash lookup
+  do i=1,ngrid
+     do j=0,twondim
+        igridn(i,j) = nbor_active_cache(j, igrid+i-1)
+     end do
+  end do
 
   ! Loop over cells
   do ind=1,twotondim

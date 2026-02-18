@@ -75,6 +75,9 @@ subroutine flag_fine(ilevel,icount)
   if(ilevel<levelmin)return
   if(balance)return
 
+  ! Precompute neighbor grids for this level
+  call precompute_nbor_active(ilevel)
+
   ! Step 2: make one cubic buffer around flagged cells,
   ! in order to enforce numerical rule.
   call smooth_fine(ilevel)
@@ -90,6 +93,9 @@ subroutine flag_fine(ilevel,icount)
      call smooth_fine(ilevel)
   end do
   if(verbose)write(*,*) ' +==> end step 4',nflag
+
+  ! Cleanup neighbor cache
+  call cleanup_nbor_active()
 
   if(verbose)write(*,112)nflag
 
@@ -781,7 +787,7 @@ subroutine smooth_fine(ilevel)
   ! Array flag2 is used as temporary workspace.
   ! -------------------------------------------------------------------
   integer::ismooth,mflag
-  integer::i,ncache,iskip,ngrid,iflag,jflag
+  integer::i,j,ncache,iskip,ngrid,iflag,jflag
   integer::igrid,ind
   integer,dimension(1:3)::n_nbor
 ! integer,dimension(1:nvector),save::ind_grid,ind_cell
@@ -832,13 +838,15 @@ subroutine smooth_fine(ilevel)
            end do
         end do
      end do
-     ! Count neighbors and set flag2 accordingly
+     ! Count neighbors and set flag2 accordingly (cache + OpenMP)
+!$omp parallel do private(igrid,ngrid,i,j,ind,igridn)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
-           ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+           do j=0,twondim
+              igridn(i,j) = nbor_active_cache(j, igrid+i-1)
+           end do
         end do
-        call getnborgrids(ind_grid,igridn,ngrid)
         do ind=1,twotondim
            call count_nbors(igridn,ind,n_nbor(ismooth),ngrid)
         end do
@@ -1193,3 +1201,49 @@ subroutine init_refmap_fine(ilevel)
 111 format('   Entering init_refmap_fine ',I2)
 
 end subroutine init_refmap_fine
+!##############################################################
+!##############################################################
+!##############################################################
+!##############################################################
+subroutine precompute_nbor_active(ilevel)
+  use amr_commons
+  use morton_keys
+  use morton_hash
+  implicit none
+  integer, intent(in) :: ilevel
+  integer :: ncache, igrid, igrid_amr, j
+  integer :: l, nmax_x, nmax_y, nmax_z
+  integer(mkb) :: mkey, nkey
+
+  ncache = active(ilevel)%ngrid
+  if(ncache == 0) return
+
+  if(allocated(nbor_active_cache)) deallocate(nbor_active_cache)
+  allocate(nbor_active_cache(0:twondim, 1:ncache))
+
+  l = ilevel
+  nmax_x = nx * 2**(l-1)
+  nmax_y = ny * 2**(l-1)
+  nmax_z = nz * 2**(l-1)
+
+!$omp parallel do private(igrid, igrid_amr, j, mkey, nkey)
+  do igrid = 1, ncache
+     igrid_amr = active(ilevel)%igrid(igrid)
+     nbor_active_cache(0, igrid) = igrid_amr
+     mkey = grid_to_morton(igrid_amr, l)
+     do j = 1, twondim
+        nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
+        nbor_active_cache(j, igrid) = morton_hash_lookup(mort_table(l), nkey)
+     end do
+  end do
+
+end subroutine precompute_nbor_active
+!##############################################################
+!##############################################################
+!##############################################################
+!##############################################################
+subroutine cleanup_nbor_active()
+  use amr_commons
+  implicit none
+  if(allocated(nbor_active_cache)) deallocate(nbor_active_cache)
+end subroutine cleanup_nbor_active
