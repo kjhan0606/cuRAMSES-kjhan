@@ -72,10 +72,10 @@ A hybrid CPU/GPU dispatch model allows OMP threads to dynamically
 offload compute-intensive routines --- including the Godunov solver,
 gravity force computation, and radiative cooling --- to GPU streams at
 runtime, with automatic fallback to CPU execution when streams are
-unavailable. We also implement variable-$\ncpu$ restart via HDF5
-parallel I/O, removing the
-constraint that checkpoint files must be read with the same number of
-MPI ranks as were used to write them. All modifications preserve
+unavailable. We also implement variable-$\ncpu$ restart for both HDF5 and
+native binary checkpoint formats, removing the constraint that
+checkpoint files must be read with the same number of MPI ranks as
+were used to write them. All modifications preserve
 physical consistency, as verified by conservation-law diagnostics
 across extensive test suites.
 \end{abstract}
@@ -192,7 +192,7 @@ scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
 AGN feedback by orders of magnitude. A hybrid CPU/GPU dispatch model
 (Section~\ref{sec:hybrid}) dynamically offloads compute-intensive
 routines to GPU streams at runtime. We also implement variable-$\ncpu$
-restart with HDF5 parallel I/O (Section~\ref{sec:varcpu}), along with
+restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}), along with
 miscellaneous improvements described in Section~\ref{sec:misc}.
 Performance benchmarks are presented in
 Section~\ref{sec:performance}, and we conclude in
@@ -1122,6 +1122,63 @@ temporary overhead is a few hundred MB --- well within the memory
 budget freed by the optimizations of Sections~\ref{sec:morton}--\ref{sec:memory}.
 
 
+\subsection{Binary distributed I/O restart}
+\label{sec:varcpu_binary}
+
+When HDF5 is unavailable or the native binary format
+(\code{informat='origin'}) is preferred, a distributed I/O strategy
+enables variable-$\ncpu$ restart from the per-rank binary files
+written by standard \ramses.  The binary format stores one file per
+MPI rank --- \code{amr\_XXXXX.outYYYYY},
+\code{hydro\_XXXXX.outYYYYY}, etc. --- so the number of files equals
+$\ncpu^{\rm file}$, which may differ from the current $\ncpu$.
+
+The restart proceeds in three stages.
+
+\paragraph{Stage 1: Early detection and file assignment.}
+Rank~1 probes the header of file~00001 to read $\ncpu^{\rm file}$.
+If $\ncpu^{\rm file} \ne \ncpu$, the variable-$\ncpu$ path is
+activated (requiring \ksec\ ordering).  The $\ncpu^{\rm file}$ files
+are distributed among the $\ncpu$ ranks by round-robin assignment:
+rank $r$ reads files whose index satisfies
+$(f - 1) \bmod \ncpu = r - 1$.
+
+\paragraph{Stage 2: Distributed AMR reconstruction.}
+Each rank reads only its assigned AMR files, extracting per-level
+active grid metadata (positions $\mathbf{x}_g$ and son flags).  The
+per-level active grid counts are aggregated via
+\code{MPI\_ALLREDUCE}.  For each level, the grids read by each rank
+are assigned to their correct owner by evaluating
+\code{cmp\_ksection\_cpumap} on the father cell position (computed
+from $\mathbf{x}_g$ and the parent--child octant relationship).
+An \code{MPI\_ALLTOALLV} exchange then routes each grid's data to
+its owner, who creates the local AMR grid.  The exchange metadata
+--- send ordering and receive-grid mapping --- is stored for reuse.
+
+\paragraph{Stage 3: Hydro and gravity scatter.}
+The hydro and gravity binary files are read in the same distributed
+fashion: each rank reads only its assigned files and packs the
+cell-centred data into per-level send buffers using the stored
+send ordering.  The same \code{MPI\_ALLTOALLV} counts and
+displacements from Stage~2 are reused, and the receive-grid mapping
+scatters incoming data to the correct local cells.  Since the binary
+format stores primitive variables (density, velocity, pressure),
+a primitive-to-conservative conversion is applied on the receiving
+side.
+
+Particle files are handled independently: each rank reads its
+assigned files and retains only those particles whose positions fall
+within the local \ksec\ domain.
+
+This three-stage approach ensures that no rank reads more than
+$\lceil \ncpu^{\rm file} / \ncpu \rceil$ files (at most two for
+practical configurations), and the \code{MPI\_ALLTOALLV} exchange
+per level has cost proportional to the number of grids exchanged
+rather than the total number of ranks.  Verification tests confirm
+$e_{\rm cons} = 0$ for both upward ($4 \to 12$) and downward
+($12 \to 4$) rank-count changes.
+
+
 \subsection{Stream-access IC reading}
 \label{sec:stream_ic}
 
@@ -1564,10 +1621,11 @@ are:
   $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm event/bin}}$, achieving
   speedups of one to two orders of magnitude.
 
-\item \textbf{Variable-ncpu restart.} HDF5 parallel I/O with
-  automatic domain redistribution enables checkpoint/restart with
-  arbitrary rank counts, improving workflow flexibility for production
-  simulations on shared facilities.
+\item \textbf{Variable-ncpu restart.} Both HDF5 parallel I/O and
+  distributed binary I/O enable checkpoint/restart with arbitrary rank
+  counts, improving workflow flexibility for production simulations on
+  shared facilities.  The binary path uses round-robin file assignment
+  and per-level \code{MPI\_ALLTOALLV} with reusable exchange metadata.
 
 \item \textbf{Hybrid CPU/GPU dispatch.} A dynamic dispatch model in
   which OMP threads acquire GPU stream slots at runtime, with fallback
