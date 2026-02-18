@@ -143,8 +143,9 @@ factor.
 Beyond the communication and load-balancing challenges, several other
 bottlenecks arise. Large per-rank arrays scale linearly with
 $\ngridmax$: the neighbour-pointer array \code{nbor($\ngridmax$, 6)}
-alone consumes $48\,\ngridmax$ bytes, and the Hilbert key array adds
-another $16\,\ngridmax$ bytes, together approaching 1\,GB per rank for
+alone consumes $48\,\ngridmax$ bytes \citep{Teyssier2002}, and the
+Hilbert key array adds another $16\,\ngridmax$ bytes (when compiled
+with \code{QUADHILBERT}), together approaching 1\,GB per rank for
 production configurations with $\ngridmax \sim 5 \times 10^6$. The
 multigrid Poisson solver typically dominates runtime, its per-iteration
 cost driven by frequent ghost-zone exchanges and repeated hash table
