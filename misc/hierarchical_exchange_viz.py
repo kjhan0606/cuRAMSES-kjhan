@@ -29,20 +29,33 @@ def assign_colors_12():
     return colors
 
 
-# ── Position mapping with inter-group gaps ────────────────────────────
-# Level-1 groups: {0-3}, {4-7}, {8-11} → add gap between groups
-GAP = 0.5  # gap between level-1 groups
-def rank_x(rank_idx):
-    """Map 0-indexed rank to x-position with inter-group gaps."""
-    group = rank_idx // 4
-    within = rank_idx % 4
-    return group * (4 + GAP) + within + 0.5
+# ── Position mapping with hierarchical inter-group gaps ───────────────
+GAP_LV1 = 0.6   # gap between level-1 groups (groups of 4)
+GAP_LV2 = 0.35  # gap between level-2 sub-groups (pairs) within a group of 4
 
 
-def draw_rank_boxes(ax, colors, box_w=0.7, box_h=0.5, y0=0.0):
-    """Draw 12 colored rank boxes at y=y0 with group gaps."""
+def rank_x_lv1(rank_idx):
+    """Position for Level 1 panels: gaps between groups of 4 only."""
+    group4 = rank_idx // 4
+    within4 = rank_idx % 4
+    return group4 * (4 + GAP_LV1) + within4 + 0.5
+
+
+def rank_x_lv23(rank_idx):
+    """Position for Level 2/3 panels: gaps between groups of 4 AND between pairs."""
+    group4 = rank_idx // 4
+    pair_in_group = (rank_idx % 4) // 2   # 0 or 1
+    within_pair = rank_idx % 2
+    group4_width = 4 + GAP_LV2  # 2 + gap + 2
+    return (group4 * (group4_width + GAP_LV1)
+            + pair_in_group * (2 + GAP_LV2)
+            + within_pair + 0.5)
+
+
+def draw_rank_boxes(ax, colors, rank_x_fn, box_w=0.7, box_h=0.5, y0=0.0):
+    """Draw 12 colored rank boxes at y=y0."""
     for i in range(12):
-        cx = rank_x(i)
+        cx = rank_x_fn(i)
         rect = mpatches.FancyBboxPatch(
             (cx - box_w / 2, y0 - box_h / 2), box_w, box_h,
             boxstyle="round,pad=0.06",
@@ -56,12 +69,12 @@ def draw_rank_boxes(ax, colors, box_w=0.7, box_h=0.5, y0=0.0):
                 fontsize=9, fontweight='bold', color=tc, zorder=11)
 
 
-def draw_node_groups(ax, groups, y0=0.0, box_h=0.5, pad=0.15,
+def draw_node_groups(ax, groups, rank_x_fn, y0=0.0, box_h=0.5, pad=0.15,
                      edgecolor='#666666', lw=1.2, label_y=None):
     """Draw solid transparent rectangles around rank groups (tree nodes)."""
     for start, end, label in groups:
-        x_left = rank_x(start) - 0.35 - pad
-        x_right = rank_x(end) + 0.35 + pad
+        x_left = rank_x_fn(start) - 0.35 - pad
+        x_right = rank_x_fn(end) + 0.35 + pad
         y_bot = y0 - box_h / 2 - pad
         h = box_h + 2 * pad
         rect = mpatches.FancyBboxPatch(
@@ -71,14 +84,14 @@ def draw_node_groups(ax, groups, y0=0.0, box_h=0.5, pad=0.15,
             linewidth=lw, linestyle='-', zorder=3)
         ax.add_patch(rect)
         if label and label_y is not None:
-            ax.text((rank_x(start) + rank_x(end)) / 2, label_y, label,
+            ax.text((rank_x_fn(start) + rank_x_fn(end)) / 2, label_y, label,
                     ha='center', va='top', fontsize=7, color=edgecolor)
 
 
-def draw_arc_simple(ax, r1, r2, y_base, arc_color='#555555', lw=1.8):
+def draw_arc_simple(ax, r1, r2, rank_x_fn, y_base, arc_color='#555555', lw=1.8):
     """Draw a clean arc with small arrow tips between rank indices."""
-    x1c = rank_x(r1)
-    x2c = rank_x(r2)
+    x1c = rank_x_fn(r1)
+    x2c = rank_x_fn(r2)
     cx = (x1c + x2c) / 2
     width = abs(x2c - x1c)
     height = np.sqrt(width) * 0.45 + 0.3
@@ -107,14 +120,18 @@ def draw_arc_simple(ax, r1, r2, y_base, arc_color='#555555', lw=1.8):
         ax.add_patch(tri)
 
 
-# ── Communication stages ──────────────────────────────────────────────
+# ── Node groupings ────────────────────────────────────────────────────
 
-node_groups_lv1 = [
+# Level 1 groups (3 children of root, 4 ranks each)
+groups_lv1 = [
     (0, 3, 'child 1'), (4, 7, 'child 2'), (8, 11, 'child 3'),
 ]
-node_groups_lv2 = [
+# Level 2 groups (6 children, 2 ranks each)
+groups_lv2 = [
     (0, 1, ''), (2, 3, ''), (4, 5, ''), (6, 7, ''), (8, 9, ''), (10, 11, ''),
 ]
+
+# ── Communication stages ──────────────────────────────────────────────
 
 stages = [
     {
@@ -126,7 +143,8 @@ stages = [
             {'pair': (2, 6), 'color': '#AA4444'},
             {'pair': (3, 7), 'color': '#AA4444'},
         ],
-        'groups': node_groups_lv1,
+        'groups': groups_lv1,
+        'rank_x': rank_x_lv1,
     },
     {
         'label': 'Level 1, step 2\n'
@@ -145,7 +163,8 @@ stages = [
             ('#BB3333', 'child 1$\\leftrightarrow$3'),
             ('#DD8822', 'child 2$\\leftrightarrow$3'),
         ],
-        'groups': node_groups_lv1,
+        'groups': groups_lv1,
+        'rank_x': rank_x_lv1,
     },
     {
         'label': 'Level 2\n($k_2{=}2$)',
@@ -157,7 +176,8 @@ stages = [
             {'pair': (8, 10), 'color': '#44AA44'},
             {'pair': (9, 11), 'color': '#44AA44'},
         ],
-        'groups': node_groups_lv2,
+        'groups': groups_lv2,
+        'rank_x': rank_x_lv23,
     },
     {
         'label': 'Level 3\n($k_3{=}2$)',
@@ -169,7 +189,8 @@ stages = [
             {'pair': (8, 9),   'color': '#4444AA'},
             {'pair': (10, 11), 'color': '#4444AA'},
         ],
-        'groups': [],
+        'groups': groups_lv2,
+        'rank_x': rank_x_lv23,
     },
 ]
 
@@ -180,11 +201,11 @@ colors = assign_colors_12()
 
 box_y = 0.0
 arc_y = 0.30
-x_max = rank_x(11) + 0.8  # rightmost rank + margin
 
 ylim_ranges = []
 for stage in stages:
-    max_width = max(abs(rank_x(p['pair'][1]) - rank_x(p['pair'][0]))
+    rx = stage['rank_x']
+    max_width = max(abs(rx(p['pair'][1]) - rx(p['pair'][0]))
                     for p in stage['pairs'])
     max_arc_h = np.sqrt(max_width) * 0.45 + 0.3
     ylo, yhi = -0.65, arc_y + max_arc_h + 0.3
@@ -201,8 +222,12 @@ fig.suptitle(
     '$N_{\\rm cpu}=12\\;(=3\\times 2\\times 2)$',
     fontsize=13, y=0.97, fontweight='bold')
 
+# Compute consistent x range across all panels
+x_max = max(stage['rank_x'](11) for stage in stages) + 0.8
+
 for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
     ylo, yhi, max_arc_h = ylim_ranges[ax_idx]
+    rx = stage['rank_x']
 
     ax.set_xlim(-0.5, x_max + 0.5)
     ax.set_ylim(ylo, yhi)
@@ -211,17 +236,17 @@ for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
 
     # Draw node grouping boxes (behind everything)
     if stage.get('groups'):
-        draw_node_groups(ax, stage['groups'], y0=box_y, box_h=0.5,
+        draw_node_groups(ax, stage['groups'], rx, y0=box_y, box_h=0.5,
                          pad=0.15, edgecolor='#666666', lw=1.2,
                          label_y=-0.52)
 
     # Draw rank boxes
-    draw_rank_boxes(ax, colors, y0=box_y)
+    draw_rank_boxes(ax, colors, rx, y0=box_y)
 
     # Draw arcs
     for p in stage['pairs']:
         a, b = p['pair']
-        draw_arc_simple(ax, a, b, y_base=arc_y,
+        draw_arc_simple(ax, a, b, rx, y_base=arc_y,
                         arc_color=p['color'], lw=1.6)
 
     # Stage label on the left
