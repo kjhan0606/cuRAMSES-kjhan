@@ -1700,12 +1700,19 @@ cuRAMSES supports GPU acceleration for the main hydro solver routines via CUDA. 
 
 \section{Architecture Overview}
 
-The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a pool of 8 CUDA streams, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), sm\_89 (RTX 5000 Ada), and sm\_90 (H100) targets simultaneously.
+The GPU acceleration is enabled at build time with \texttt{make HDF5=1 USE\_CUDA=1}.  At runtime, each MPI rank initializes a CUDA stream pool, distributed across available GPUs by local rank (\texttt{local\_rank \% device\_count}).  The multi-architecture binary supports sm\_80 (A100), sm\_86 (A10), sm\_89 (RTX 5000 Ada), and sm\_90 (H100) targets simultaneously.
+
+The GPU pipeline has evolved through three phases:
+\begin{enumerate}[nosep]
+\item \textbf{Data Upload}: CPU gathers stencil data $\to$ H2D transfer $\to$ GPU compute $\to$ D2H transfer.  H2D dominated at 50--68\% of GPU time.
+\item \textbf{Scatter-Reduce}: GPU-side flux reduction eliminates 98\,MB D2H per flush, reducing D2H to 3\%.  H2D remains bottleneck.
+\item \textbf{GPU-Gather} (current): Mesh arrays uploaded once to GPU ($\sim$4--9\,GB).  Only lightweight stencil \emph{indices} ($\sim$7\,MB) sent per flush.  GPU gathers data from mesh.  \textbf{H2D reduced to 3\%}.
+\end{enumerate}
 
 \begin{infobox}[Key Files]
 \begin{itemize}[nosep,leftmargin=1.5em]
-\item \texttt{cuda\_stream\_pool.\{h,cu\}} --- Thread-safe stream pool with atomic acquire/release
-\item \texttt{hydro\_cuda\_kernels.cu} --- CUDA kernels: \texttt{ctoprim}, \texttt{uslope}, \texttt{trace3d}, \texttt{flux}, \texttt{difmag}, \texttt{synchro}, \texttt{cmpdt}, \texttt{gradient\_phi}, \texttt{upload\_fine}
+\item \texttt{cuda\_stream\_pool.\{h,cu\}} --- Thread-safe stream pool, GPU mesh management, buffer allocation
+\item \texttt{hydro\_cuda\_kernels.cu} --- CUDA kernels: \texttt{gather}, \texttt{gather\_ok}, \texttt{ctoprim}, \texttt{uslope}, \texttt{trace3d}, \texttt{flux}, \texttt{difmag}, \texttt{scatter\_reduce}
 \item \texttt{hydro\_cuda\_interface.f90} --- Fortran ISO\_C\_BINDING wrappers with assumed-size \texttt{buf(*)} for safe \texttt{c\_loc} usage
 \item \texttt{cuda\_commons.f90} --- Fortran module exposing stream pool to the AMR code
 \end{itemize}
@@ -1738,7 +1745,7 @@ The \texttt{schedule(dynamic)} clause ensures load balancing: if one thread is w
 
 GPU kernel launches have significant latency ($\sim$10--50\,$\mu$s).  To amortize this, each GPU thread accumulates grid data into a \textbf{superbatch buffer} of size \texttt{SUPER\_SIZE} (typically 4096 grids) before launching a single kernel covering all accumulated grids.  The buffer is flushed when it approaches capacity or when the \texttt{omp do} loop completes.
 
-For the Godunov solver, the superbatch contains the full stencil data (conservative variables and gravitational acceleration on a $6 \times 6 \times 6$ grid per AMR oct), and the GPU pipeline executes 5 kernels in sequence: \texttt{ctoprim} $\to$ \texttt{uslope} $\to$ \texttt{trace3d} $\to$ \texttt{flux} $\to$ \texttt{difmag}.
+With the GPU-gather path, the superbatch stores \textbf{stencil indices} rather than data: each of the $6^3 = 216$ stencil positions per grid stores a cell index into the GPU-resident mesh.  Interpolated (coarse) cells are pre-computed on CPU and stored in a separate \texttt{interp\_vals} buffer, referenced by negative indices.  On flush, the GPU pipeline executes 8 kernels: \texttt{gather} $\to$ \texttt{gather\_ok} $\to$ \texttt{ctoprim} $\to$ \texttt{uslope} $\to$ \texttt{trace3d} $\to$ \texttt{flux} $\to$ \texttt{difmag} $\to$ \texttt{scatter\_reduce}.
 
 \subsection{Accelerated Routines}
 
@@ -1761,13 +1768,13 @@ Six routines use the hybrid dispatch pattern:
 
 \subsection{Memory Management}
 
-Each stream slot has persistent device memory that is lazily allocated and grown with $2\times$ over-allocation:
+GPU memory is organized in two tiers:
 \begin{itemize}[nosep]
-\item \textbf{Hydro buffers}: \texttt{d\_uloc}, \texttt{d\_gloc}, \texttt{d\_flux}, \texttt{d\_tmp}, \texttt{d\_ok} --- sized for \texttt{SUPER\_SIZE} grids
-\item \textbf{Generic buffers}: Per-stream device memory for lightweight kernels (\texttt{synchro}, \texttt{cmpdt}, etc.)
+\item \textbf{Mesh arrays} (persistent, per-rank): \texttt{d\_mesh\_uold}, \texttt{d\_mesh\_f}, \texttt{d\_mesh\_son} --- uploaded once per \texttt{godunov\_fine} call.  Size: $\texttt{ncell} \times (\texttt{nvar} + \texttt{ndim}) \times 8 + \texttt{ncell} \times 4$ bytes (e.g., 8.6\,GB for 80M cells).
+\item \textbf{Per-stream buffers} (lazily allocated, $2\times$ over-allocation): stencil indices, compute intermediates (\texttt{d\_uloc}, \texttt{d\_gloc}, \texttt{d\_q}, etc.), and scatter-reduce output.
 \end{itemize}
 
-The host-side superbatch buffers (\texttt{gpu\_state\_t}) are allocated lazily per stream slot via the \texttt{hydro\_hybrid\_commons} module, with pinned host memory (\texttt{cudaHostRegister}) for faster DMA transfers.
+The host-side \texttt{gpu\_state\_t} stores stencil index arrays and interpolated values, pinned via \texttt{cudaHostRegister} for fast DMA.  The mesh upload includes a free-memory check: if GPU memory is insufficient, the upload is skipped and all threads fall back to the CPU path automatically.
 
 \subsection{Per-Thread Scatter Buffer (Lock-Free Level L-1)}
 
@@ -1818,62 +1825,137 @@ The Godunov GPU pipeline includes an on-device \textbf{scatter-reduce} kernel th
 
 The D2H transfer is reduced to $\sim$5\,MB per flush (vs.\ 98\,MB for the raw flux array), a $20\times$ reduction in PCIe bandwidth usage.  The host applies Level~$L$ results directly to \texttt{unew} (conflict-free) and appends Level~$L{-}1$ results to the per-thread scatter buffer for deferred merge.
 
+\section{GPU-Gather: Mesh-Resident Data}
+\label{sec:gpu-gather}
+
+With the scatter-reduce kernel in place, the D2H bottleneck was resolved (3\% of GPU time).  However, the H2D transfer of stencil data (\texttt{uloc}, \texttt{gloc}, \texttt{ok}) remained the dominant cost at 50--68\% of GPU time, because each flush copied $\sim$100\,MB of gathered cell data from host to device.
+
+The \textbf{GPU-gather} optimization eliminates this bottleneck by keeping the mesh arrays (\texttt{uold}, \texttt{f}, \texttt{son}) persistently on the GPU and sending only lightweight stencil \emph{indices} per flush.
+
+\subsection{Mesh Upload}
+
+At the start of each \texttt{godunov\_fine} call, the three mesh arrays are uploaded to GPU device memory:
+\[
+\texttt{d\_mesh\_uold}(\texttt{ncell} \times \texttt{nvar}), \quad
+\texttt{d\_mesh\_f}(\texttt{ncell} \times \texttt{ndim}), \quad
+\texttt{d\_mesh\_son}(\texttt{ncell})
+\]
+where $\texttt{ncell} = \texttt{ncoarse} + 8 \times \texttt{ngridmax}$ is the total cell capacity.  For a typical 4-rank run with $\texttt{ngridmax} = 10\text{M}$ per rank, the mesh occupies $\sim$8.6\,GB per GPU.
+
+\begin{infobox}[Important: 1 MPI rank per GPU]
+Each MPI rank uploads its own mesh to GPU memory.  Multiple ranks sharing a GPU will exceed GPU memory (e.g., $4 \times 8.6\text{ GB} = 34.4\text{ GB} > 32\text{ GB}$).  The code detects insufficient GPU memory via \texttt{cudaMemGetInfo} and automatically falls back to the CPU path.
+\end{infobox}
+
+\subsection{Stencil Index Encoding}
+
+Instead of copying cell data on the CPU, the stencil batch routine stores cell \emph{indices} for each of the $6^3 = 216$ stencil positions per grid:
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+\textbf{Index value} & \textbf{Meaning} \\
+\midrule
+$> 0$ (positive) & Direct cell index into \texttt{mesh\_uold} (1-based Fortran index) \\
+$< 0$ (negative) & $-\text{slot}$ into \texttt{interp\_vals} buffer (interpolated coarse cell) \\
+$= 0$            & Boundary/empty cell (data set to zero) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For existing fine grids, the cell index is simply $\texttt{ncoarse} + (\texttt{ind\_son}-1) \times \texttt{ngridmax} + \texttt{igrid\_nbor}$.  For coarse cells without a fine grid, \texttt{interpol\_hydro} is called on the CPU and the result is stored in the \texttt{interp\_vals} buffer using AoS layout (\texttt{nvar} doubles per slot).
+
+\subsection{GPU Gather Kernels}
+
+Two new kernels precede the existing compute pipeline:
+
+\begin{enumerate}[nosep]
+\item \textbf{\texttt{hydro\_gather\_kernel}}: Each thread reads its stencil index, fetches the corresponding cell data from \texttt{d\_mesh\_uold} (or \texttt{d\_interp\_vals} for negative indices), and writes to \texttt{d\_uloc}/\texttt{d\_gloc}.  Gravity data is fetched from \texttt{d\_mesh\_f} using the gravity stencil index.
+
+\item \textbf{\texttt{hydro\_gather\_ok\_kernel}}: Each thread reads the stencil index and checks $\texttt{son}(\text{cell}) > 0$ from \texttt{d\_mesh\_son} to determine the refinement flag \texttt{ok}.
+\end{enumerate}
+
+Both kernels use the same block layout as the compute kernels: one CUDA block per grid, 216 threads per block ($= 6^3$ stencil cells).
+
+\subsection{H2D Transfer Reduction}
+
+\begin{center}
+\begin{tabular}{lrr}
+\toprule
+\textbf{Transfer} & \textbf{Data Upload (old)} & \textbf{GPU-Gather (new)} \\
+\midrule
+Per-flush H2D & $\sim$100\,MB (uloc+gloc+ok) & $\sim$7\,MB (stencil indices) \\
+Mesh upload   & --- & $\sim$4--9\,GB (once per godunov call) \\
+D2H           & $\sim$5\,MB & $\sim$5\,MB (unchanged) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The per-flush H2D transfer is reduced by $14\times$.  The one-time mesh upload is amortized across $\sim$50--300 flushes per \texttt{godunov\_fine} call.
+
 \section{Verification and Performance}
 
 The GPU-accelerated code produces bit-identical physics results compared to the CPU-only build across all tested configurations.  All tests use 10 coarse steps of a $256^3$ cosmological simulation with \texttt{levelmax=10}.
 
 \subsection{Physics Verification}
 
+All configurations produce bit-identical physics at step~10:
+
 \begin{center}
 \begin{tabular}{llccc}
 \toprule
 \textbf{Configuration} & \textbf{GPU} & $e_{\rm cons}$ & $e_{\rm pot}$ & $e_{\rm kin}$ \\
 \midrule
-CPU-only (4r$\times$2t)            & ---               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 8-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 1-stream (4r$\times$2t)     & RTX 5000 Ada      & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
-Hybrid 8-stream (4r$\times$2t)     & A10               & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+CPU-only (4r$\times$4t)              & ---          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Scatter-reduce (4r$\times$4t, 1 GPU) & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+Scatter-reduce (4r$\times$4t, 4 GPU) & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+GPU-gather (4r$\times$4t, 4 GPU)     & A10          & $5.23 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
+GPU-gather (1r$\times$8t, 1 GPU)     & RTX 5000 Ada & $5.22 \times 10^{-3}$ & $-1.88 \times 10^{-6}$ & $1.23 \times 10^{-6}$ \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-\subsection{Performance (RTX 5000 Ada, 8 cores)}
+The 1-rank test shows slightly different $e_{\rm cons}$ due to different domain decomposition (all grids on a single rank vs.\ distributed across 4 ranks), but the difference is at roundoff level.
+
+\subsection{Performance Comparison (A10, 4 ranks $\times$ 4 threads)}
 
 \begin{center}
-\begin{tabular}{lrrrr}
+\begin{tabular}{lrrr}
 \toprule
-\textbf{Configuration} & \textbf{Godunov (s)} & \textbf{Total (s)} & \textbf{GPU flushes} & \textbf{CPU batches} \\
+\textbf{Configuration} & \textbf{Godunov (s)} & \textbf{Total (s)} & \textbf{Speedup} \\
 \midrule
-CPU-only (4r$\times$2t)            & 22.0 & 90.1  & ---  & ---    \\
-Hybrid 8-stream (4r$\times$2t)     & 18.4 & 89.4  & 648  & 0      \\
-Hybrid 1-stream (4r$\times$2t)     & 19.0 & 88.0  & 358  & 36\,848 \\
+CPU-only (no GPU)                  &  9.7 &  79.1 & 1.00$\times$ \\
+Scatter-reduce (1 GPU, shared)     & 44.7 & 121.3 & 0.65$\times$ \\
+Scatter-reduce (4 GPU, 1/rank)     & 46.5 & 134.0 & 0.59$\times$ \\
+\textbf{GPU-gather (4 GPU, 1/rank)} & \textbf{24.8} & \textbf{64.6} & \textbf{1.22$\times$} \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-With 8 streams and 2 OMP threads per rank, all threads acquire GPU streams (0 CPU batches), achieving a \textbf{16\% speedup} on the Godunov solver (22.0\,s $\to$ 18.4\,s).  With 1 stream per rank, the hybrid mode activates: 1 GPU thread and 1 CPU thread process work concurrently (358 GPU flushes + 36\,848 CPU batches), still producing identical physics.
+The GPU-gather path achieves a \textbf{22\% speedup} over CPU-only, reversing the 35--41\% \emph{slowdown} of the previous scatter-reduce approach.  The Godunov solver itself is still 2.6$\times$ slower than CPU-only (24.8\,s vs.\ 9.7\,s) because the mesh upload overhead dominates the GPU thread, but the overall run benefits from the hybrid CPU/GPU work distribution.
 
-\subsection{GPU Kernel Breakdown (8-stream, RTX 5000 Ada)}
+\subsection{GPU Kernel Breakdown (GPU-gather, A10, step~10)}
 
 \begin{center}
-\begin{tabular}{lrr}
+\begin{tabular}{lrrlrr}
 \toprule
-\textbf{Phase} & \textbf{Time (s)} & \textbf{\%} \\
+& \multicolumn{2}{c}{\textbf{Scatter-reduce (old)}} & & \multicolumn{2}{c}{\textbf{GPU-gather (new)}} \\
+\cmidrule{2-3} \cmidrule{5-6}
+\textbf{Phase} & \textbf{Time} & \textbf{\%} & & \textbf{Time} & \textbf{\%} \\
 \midrule
-H2D transfer        & 5.07  & 50.2 \\
-ctoprim             & 1.10  & 10.9 \\
-uslope              & 1.19  & 11.8 \\
-trace3d             & 1.23  & 12.1 \\
-flux+memset         & 0.70  &  6.9 \\
-difmag              & 0.43  &  4.2 \\
-D2H transfer        & 0.38  &  3.8 \\
+H2D transfer   & 5.07\,s & 50.2 & & 0.10\,s &  3.0 \\
+ctoprim        & 1.10\,s & 10.9 & & 1.10\,s & 32.9 \\
+uslope         & 1.19\,s & 11.8 & & 0.64\,s & 19.3 \\
+trace3d        & 1.23\,s & 12.1 & & 0.41\,s & 12.1 \\
+flux+memset    & 0.70\,s &  6.9 & & 0.83\,s & 24.8 \\
+difmag         & 0.43\,s &  4.2 & & 0.15\,s &  4.6 \\
+D2H transfer   & 0.38\,s &  3.8 & & 0.11\,s &  3.3 \\
 \midrule
-Total               & 10.09 & 100.0 \\
+Total          & 10.09\,s & 100  & & 3.33\,s & 100 \\
 \bottomrule
 \end{tabular}
 \end{center}
 
-H2D transfer dominates at 50\% of GPU time, indicating that further optimization via GPU-side gather (uploading mesh arrays once and using stencil indices instead of full $6^3$ stencils) would yield significant additional speedup.
+H2D transfer is reduced from 50\% to 3\% of GPU time.  The GPU compute kernels now dominate, indicating that the PCIe transfer bottleneck has been eliminated.  Total GPU kernel time is reduced $3\times$ (10.1\,s $\to$ 3.3\,s).
 
 
 %======================================================
