@@ -121,7 +121,8 @@ extern "C" {
     void cuda_mesh_upload(const double* uold, const double* f_grav,
                           const int* son, long long ncell, int nvar, int ndim);
     void cuda_mesh_free(void);
-    int  cuda_mesh_is_ready(void);  // returns 1 if mesh uploaded successfully
+    int  cuda_mesh_is_ready(void);  // returns 1 if mesh allocated successfully
+    cudaEvent_t cuda_get_upload_event(void);  // event signaling async upload done
 
     // Scatter-reduce: 5 kernels + scatter_reduce kernel, D2H compact output
     void hydro_cuda_unsplit_reduce_async(

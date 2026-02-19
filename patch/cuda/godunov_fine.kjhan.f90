@@ -93,6 +93,7 @@ module hydro_hybrid_commons
 
   ! Timing accumulators
   real(dp), save :: acc_gather = 0, acc_gpu = 0, acc_scatter_l = 0, acc_merge = 0
+  real(dp), save :: acc_mesh_upload = 0, acc_omp_total = 0
   integer, save :: n_gpu_flushes = 0, n_cpu_batches = 0, n_hybrid_calls = 0
 
 contains
@@ -1114,10 +1115,14 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
   end do
 
   ! Upload mesh arrays to GPU (serial, once per godunov_fine call)
+  call system_clock(t_start)
   ncell_total = int(ncoarse, c_long_long) + int(twotondim, c_long_long) * int(ngridmax, c_long_long)
   call cuda_mesh_upload_f(uold, f, son, ncell_total, int(nvar, c_int), int(ndim, c_int), poisson)
   mesh_on_gpu = (cuda_mesh_is_ready_c() == 1)
+  call system_clock(t_now)
+  acc_mesh_upload = acc_mesh_upload + dble(t_now - t_start) / dble(clock_rate)
 
+  call system_clock(t_start)  ! OMP total timer
   !$omp parallel private(tid, stream_slot, igrid, ngrid)
   tid = 0
   !$ tid = omp_get_thread_num()
@@ -1177,6 +1182,8 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      call cuda_release_stream_c(int(stream_slot, c_int))
   end if
   !$omp end parallel
+  call system_clock(t_now)
+  acc_omp_total = acc_omp_total + dble(t_now - t_start) / dble(clock_rate)
 
   ! Serial merge of L-1 scatter buffers
   call system_clock(t_start)
@@ -1199,6 +1206,8 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
   ! Print timing at last step
   if (nstep >= nstepmax .and. myid == 1) then
      write(*,'(A)') ' === Hybrid CPU/GPU timing ==='
+     write(*,'(A,F8.3,A)') '   mesh upload : ', acc_mesh_upload, ' s'
+     write(*,'(A,F8.3,A)') '   OMP total   : ', acc_omp_total, ' s'
      write(*,'(A,F8.3,A)') '   gather      : ', acc_gather, ' s'
      write(*,'(A,F8.3,A)') '   GPU compute : ', acc_gpu, ' s'
      write(*,'(A,F8.3,A)') '   L scatter   : ', acc_scatter_l, ' s'

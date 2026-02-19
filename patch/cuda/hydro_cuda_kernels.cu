@@ -1749,6 +1749,12 @@ void hydro_cuda_gather_reduce_async(
 
     cudaEvent_t* ev = s->ev_profile;
 
+    // Wait for async mesh upload to complete before using mesh data
+    cudaEvent_t upload_ev = cuda_get_upload_event();
+    if (upload_ev) {
+        cudaStreamWaitEvent(strm, upload_ev, 0);
+    }
+
     // H2D: stencil indices (small: ~7 MB for stride=4096)
     size_t idx_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
     cudaEventRecord(ev[0], strm);

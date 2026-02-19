@@ -28,6 +28,11 @@ static double*    d_mesh_f    = nullptr;
 static int*       d_mesh_son  = nullptr;
 static long long  g_mesh_ncell = 0;
 
+// Async mesh upload: dedicated stream + event for overlap with CPU work
+static cudaStream_t g_upload_stream = nullptr;
+static cudaEvent_t  g_upload_done_event = nullptr;
+static bool         g_mesh_host_pinned = false;
+
 // ============================================================================
 // Buffer management helpers (2x over-allocation)
 // ============================================================================
@@ -291,8 +296,22 @@ int cuda_pool_is_initialized(void) {
 void cuda_mesh_upload(const double* uold, const double* f_grav,
                       const int* son, long long ncell, int nvar, int ndim) {
     if (!pool_initialized) return;
+
+    // Create dedicated upload stream + event on first call
+    if (!g_upload_stream) {
+        cudaStreamCreateWithFlags(&g_upload_stream, cudaStreamNonBlocking);
+        cudaEventCreateWithFlags(&g_upload_done_event, cudaEventDisableTiming);
+    }
+
     // Reallocate if size changed
     if (ncell != g_mesh_ncell) {
+        // Unpin previous host arrays if pinned
+        if (g_mesh_host_pinned) {
+            cudaHostUnregister((void*)uold);  // same pointer, just unpin
+            if (f_grav) cudaHostUnregister((void*)f_grav);
+            cudaHostUnregister((void*)son);
+            g_mesh_host_pinned = false;
+        }
         if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
         if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
         if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -332,19 +351,64 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
                (double)(free_mem - need) / (1024.0*1024.0*1024.0),
                (double)total_mem / (1024.0*1024.0*1024.0));
     }
-    cudaMemcpy(d_mesh_uold, uold,
-               (size_t)ncell * nvar * sizeof(double), cudaMemcpyHostToDevice);
-    if (f_grav) {
-        cudaMemcpy(d_mesh_f, f_grav,
-                   (size_t)ncell * ndim * sizeof(double), cudaMemcpyHostToDevice);
-    } else {
-        cudaMemset(d_mesh_f, 0, (size_t)ncell * ndim * sizeof(double));
+
+    // Pin host arrays for fast async DMA (one-time cost per allocation)
+    if (!g_mesh_host_pinned && g_mesh_ncell > 0) {
+        cudaError_t ep = cudaHostRegister((void*)uold,
+            (size_t)ncell * nvar * sizeof(double), cudaHostRegisterDefault);
+        if (ep == cudaSuccess) {
+            if (f_grav)
+                cudaHostRegister((void*)f_grav,
+                    (size_t)ncell * ndim * sizeof(double), cudaHostRegisterDefault);
+            cudaHostRegister((void*)son,
+                (size_t)ncell * sizeof(int), cudaHostRegisterDefault);
+            g_mesh_host_pinned = true;
+            double gb_pin = ((double)ncell * (nvar + ndim) * sizeof(double) +
+                             (double)ncell * sizeof(int)) / (1024.0*1024.0*1024.0);
+            printf("CUDA mesh: pinned %.1f GB host memory for async DMA\n", gb_pin);
+        }
     }
-    cudaMemcpy(d_mesh_son, son,
-               (size_t)ncell * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Async upload on dedicated stream (non-blocking to CPU)
+    if (g_mesh_host_pinned) {
+        cudaMemcpyAsync(d_mesh_uold, uold,
+            (size_t)ncell * nvar * sizeof(double), cudaMemcpyHostToDevice, g_upload_stream);
+        if (f_grav) {
+            cudaMemcpyAsync(d_mesh_f, f_grav,
+                (size_t)ncell * ndim * sizeof(double), cudaMemcpyHostToDevice, g_upload_stream);
+        } else {
+            cudaMemsetAsync(d_mesh_f, 0,
+                (size_t)ncell * ndim * sizeof(double), g_upload_stream);
+        }
+        cudaMemcpyAsync(d_mesh_son, son,
+            (size_t)ncell * sizeof(int), cudaMemcpyHostToDevice, g_upload_stream);
+        cudaEventRecord(g_upload_done_event, g_upload_stream);
+    } else {
+        // Sync fallback if pinning failed
+        cudaMemcpy(d_mesh_uold, uold,
+            (size_t)ncell * nvar * sizeof(double), cudaMemcpyHostToDevice);
+        if (f_grav) {
+            cudaMemcpy(d_mesh_f, f_grav,
+                (size_t)ncell * ndim * sizeof(double), cudaMemcpyHostToDevice);
+        } else {
+            cudaMemset(d_mesh_f, 0, (size_t)ncell * ndim * sizeof(double));
+        }
+        cudaMemcpy(d_mesh_son, son,
+            (size_t)ncell * sizeof(int), cudaMemcpyHostToDevice);
+    }
 }
 
 void cuda_mesh_free(void) {
+    if (g_upload_stream) {
+        cudaStreamSynchronize(g_upload_stream);
+        cudaStreamDestroy(g_upload_stream);  g_upload_stream = nullptr;
+    }
+    if (g_upload_done_event) {
+        cudaEventDestroy(g_upload_done_event); g_upload_done_event = nullptr;
+    }
+    // Note: host arrays are still in use by Fortran, don't unregister here
+    // (they will be freed by Fortran deallocate which handles unpin)
+    g_mesh_host_pinned = false;
     if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
     if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
     if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -488,3 +552,4 @@ double*   cuda_get_mesh_f()     { return d_mesh_f; }
 int*      cuda_get_mesh_son()   { return d_mesh_son; }
 long long cuda_get_mesh_ncell() { return g_mesh_ncell; }
 int       cuda_mesh_is_ready()  { return (g_mesh_ncell > 0 && d_mesh_uold && d_mesh_son) ? 1 : 0; }
+cudaEvent_t cuda_get_upload_event() { return g_upload_done_event; }
