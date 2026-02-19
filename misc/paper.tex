@@ -356,7 +356,7 @@ The procedure operates level by level, top to bottom. At level $l$:
 The default \ramses\ load balancer weights all cells equally.
 \curamses\ supports an optional memory-weighted cost function:
 \begin{equation}
-C_{\rm cell} = \twotondim^{-1}\bigl(w_{\rm grid} +
+C_{\rm cell} = 2^{-N_{\rm dim}}\bigl(w_{\rm grid} +
 n_{\rm part}({\rm igrid}) \cdot w_{\rm part}\bigr),
 \label{eq:cost_function}
 \end{equation}
