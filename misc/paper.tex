@@ -1457,7 +1457,7 @@ the iteration count.
 
 We measure strong scaling by restarting a production-grade cosmological
 simulation from an HDF5 checkpoint.  The test problem comprises
-$54 \times 10^6$ AMR grids (levels~9--14) and $136 \times 10^6$ particles
+$54 \times 10^6$ AMR grids (levels~9--14) and $135.7 \times 10^6$ particles
 including $3.2 \times 10^4$ sink particles, with full physics enabled
 (radiative cooling, star formation, SNII/AGN feedback).
 The checkpoint was written at coarse step~241 with 12 MPI ranks;
@@ -1480,7 +1480,7 @@ summation order changes across different domain decompositions.
 \centering
 \caption{Strong scaling results for the \curamses\ code on a dual-socket
 AMD EPYC 7543 node (64 cores, 1\,TB RAM).  The test problem has
-$54 \times 10^6$ grids and $136 \times 10^6$ particles with full
+$54 \times 10^6$ grids and $135.7 \times 10^6$ particles with full
 physics (cooling, star formation, sink particles, AGN feedback).
 Elapsed is the total wall-clock time; timer values are per-rank averages.
 Speedup $S$ is relative to the single-rank elapsed time.}
