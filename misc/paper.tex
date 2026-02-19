@@ -26,7 +26,7 @@
 \newcommand{\ngridmax}{N_{\rm gridmax}}
 \newcommand{\nlevelmax}{N_{\rm levelmax}}
 \newcommand{\twotondim}{2^{N_{\rm dim}}}
-\newcommand{\ksec}{k\text{-section}}
+\newcommand{\ksec}{\ensuremath{k}\text{-section}}
 \newcommand{\Olog}[1]{\mathcal{O}(#1)}
 \newcommand{\code}[1]{\texttt{#1}}
 
@@ -73,8 +73,8 @@ offload compute-intensive routines --- including the Godunov solver,
 gravity force computation, and radiative cooling --- to GPU streams at
 runtime, with automatic fallback to CPU execution when streams are
 unavailable. We also implement variable-$\ncpu$ restart for both HDF5 and
-native binary checkpoint formats, removing the constraint that
-checkpoint files must be read with the same number of MPI ranks as
+native binary output formats, removing the constraint that
+output files must be read with the same number of MPI ranks as
 were used to write them. All modifications preserve
 physical consistency, as verified by conservation-law diagnostics
 across extensive test suites.
@@ -104,7 +104,8 @@ code \textsc{gadget} \citep{Springel2005}, the Horizon-AGN simulation
 \citep{Dubois2014} and its high-resolution successor NewHorizon
 \citep{Dubois2021} using the adaptive mesh refinement (AMR) code
 \ramses\ \citep{Teyssier2002}, and the FIRE project
-\citep{Hopkins2018} with the meshless finite-mass code \textsc{gizmo}.
+\citep{Hopkins2018} with the meshless finite-mass code \textsc{gizmo}
+\citep{Hopkins2015}.
 
 Among the numerical approaches employed by these simulations, AMR
 codes such as \ramses\ and Enzo \citep{Bryan2014} provide a
@@ -131,9 +132,9 @@ particles and $10^4$--$10^5$ MPI ranks reveals fundamental
 limitations. The one-dimensional nature of the SFC means that
 \emph{every} rank may, in principle, border \emph{any other} rank,
 forcing communication patterns that scale poorly with $\ncpu$. In the
-standard \ramses\ implementation, ghost-zone exchange requires each
-rank to broadcast its emission and reception lists to all other ranks
-via \code{MPI\_ALLTOALL}, leading to $\Olog{\ncpu^2}$ message
+standard \ramses\ implementation, ghost-zone exchange, grid and particle migration, and sink particle
+synchronisation all rely on \code{MPI\_ALLTOALL} to communicate
+counts among all ranks, leading to $\Olog{\ncpu^2}$ message
 complexity and $\Olog{\ncpu}$ per-rank buffer memory --- a severe
 bottleneck when $\ncpu$ exceeds ${\sim}10^3$
 \citep{Teyssier2002}. Furthermore, the Hilbert ordering distributes
@@ -156,12 +157,15 @@ $\ngridmax$: the neighbour-pointer array \code{nbor($\ngridmax$, 6)}
 alone consumes $48\,\ngridmax$ bytes \citep{Teyssier2002}, and the
 Hilbert key array adds another $16\,\ngridmax$ bytes (when compiled
 with \code{QUADHILBERT}), together approaching 1\,GB per rank for
-production configurations with $\ngridmax \sim 5 \times 10^6$. The
+production configurations with $\ngridmax \sim 5\,\mathrm{M}$. The
 multigrid Poisson solver \citep{Guillet2011} typically dominates
 runtime, its per-iteration cost driven by frequent ghost-zone exchanges
 and repeated hash table lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
-rank, so restarting with a different rank count requires a cumbersome
-intermediate redistribution step.
+rank, so restarting with a different rank count is practically
+infeasible: the AMR tree structure --- parent--child links, neighbour
+pointers, and per-rank communication tables --- is tightly coupled to
+the original domain decomposition and cannot be reconstructed without
+re-reading and redistributing every grid from scratch.
 
 The original \ramses\ code relies exclusively on MPI for
 parallelism, assigning one MPI rank per processor core. To exploit the
@@ -189,11 +193,12 @@ additional savings. Algorithmic optimizations to the multigrid Poisson
 solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
 from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
 scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
-AGN feedback by orders of magnitude. A hybrid CPU/GPU dispatch model
-(Section~\ref{sec:hybrid}) dynamically offloads compute-intensive
-routines to GPU streams at runtime. We also implement variable-$\ncpu$
+AGN feedback by orders of magnitude. We also implement variable-$\ncpu$
 restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}), along with
 miscellaneous improvements described in Section~\ref{sec:misc}.
+A hybrid CPU/GPU dispatch model
+(Section~\ref{sec:hybrid}) dynamically offloads compute-intensive
+routines to GPU streams at runtime.
 Performance benchmarks are presented in
 Section~\ref{sec:performance}, and we conclude in
 Section~\ref{sec:conclusions}.
@@ -239,7 +244,7 @@ than the total number of ranks.
 \subsection{Hierarchical Partitioning of Spatial and Communication Domain}
 \label{sec:ksec_tree}
 
-Given $\ncpu$ MPI ranks, we first compute the prime factorization:
+Given $\ncpu$ MPI ranks, we first compute the prime factorization as
 \begin{equation}
 \ncpu = p_1^{m_1} \times p_2^{m_2} \times \cdots \times p_r^{m_r},
 \quad p_1 > p_2 > \cdots > p_r.
@@ -252,7 +257,8 @@ The splitting sequence is then
               \underbrace{p_r, \ldots, p_r}_{m_r}),
 \label{eq:split_sequence}
 \end{equation}
-yielding $L = \sum_i m_i$ levels in the tree. At each level $l$, the
+yielding $L\,(= \sum_i m_i)$ levels in the tree, which encodes both
+the domain hierarchy and the communication pattern. At each level $l$, the
 domain is split into $k_l$ sub-domains along the longest axis of the
 current bounding box. This longest-axis selection ensures roughly
 isotropic sub-domains, minimising the surface-to-volume ratio and
@@ -262,7 +268,7 @@ For example, $\ncpu = 12 = 3 \times 2 \times 2$ produces the
 splitting sequence $(3, 2, 2)$ with $L = 3$ tree levels: the root is
 split into 3 slabs along the longest axis, each slab is bisected, and
 each half is bisected again, yielding 12 leaf nodes --- one per rank.
-Fig.~\ref{fig:ksec_progressive} illustrates this progressive
+Figure~\ref{fig:ksec_progressive} illustrates this progressive
 decomposition for $\ncpu = 12$, from the undivided domain through
 three successive levels of splitting, with the corresponding
 \ksec\ tree shown beneath each panel.
@@ -283,16 +289,13 @@ vary by ${\sim}10$--$30\,\%$, reflecting load-balanced wall placement.}
 \label{fig:ksec_progressive}
 \end{figure}
 
-The tree is stored as a set of arrays indexed by node identifier:
-\begin{itemize}
-\item \code{ksec\_next(node, j)}: child node index for partition $j$
-  ($j = 1, \ldots, k_l$);
-\item \code{ksec\_wall(node, j)}: spatial coordinate of the $j$-th
-  partition boundary within the node's extent;
-\item \code{ksec\_indx(leaf)}: the MPI rank assigned to a leaf node;
-\item \code{ksec\_cpumin(node)}, \code{ksec\_cpumax(node)}: range of
-  MPI ranks contained in the subtree rooted at this node.
-\end{itemize}
+The tree is stored as a set of arrays indexed by node identifier.
+For each internal node, the child indices for each of the $k_l$
+partitions and the spatial coordinates of the partition boundaries
+are recorded; for each leaf node, the assigned MPI rank is stored.
+Every node also carries the minimum and maximum rank indices of all
+leaves in its subtree, enabling rapid range queries during the
+hierarchical exchange.
 
 The total number of tree nodes is
 \begin{equation}
@@ -327,7 +330,7 @@ The procedure operates level by level, top to bottom. At level $l$:
   $[i_{\rm min}, i_{\rm max}]$ with total count
   $n = i_{\rm max} - i_{\rm min} + 1$ is
   \begin{equation}
-  f_j = \frac{\sum_{m=1}^{j} n_m}{n},
+  f_j = n^{-1}\sum_{m=1}^{j} n_m,
   \label{eq:target_frac}
   \end{equation}
   where $n_m$ is the number of ranks assigned to partition $m$
@@ -335,10 +338,10 @@ The procedure operates level by level, top to bottom. At level $l$:
   the first $n \bmod k_l$ partitions).
 
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
-  all ranks to obtain the global cumulative load at each wall
+  all $\ncpu$ ranks to obtain the global cumulative load at each wall
   position. The dichotomy converges when the relative load imbalance
   $|\hat{L}_j - L_j^{\rm target}| / L_j^{\rm target}$ falls below a
-  tolerance $\epsilon_{\rm tol}$ (typically $10^{-2}$), or when the
+  tolerance $\epsilon_{\rm tol}$ (typically 1\,per\,cent), or when the
   wall position can no longer be resolved at the histogram resolution.
 
 \item After wall convergence, the cells are repartitioned (sorted)
@@ -353,8 +356,8 @@ The procedure operates level by level, top to bottom. At level $l$:
 The default \ramses\ load balancer weights all cells equally.
 \curamses\ supports an optional memory-weighted cost function:
 \begin{equation}
-C_{\rm cell} = \frac{w_{\rm grid}}{\twotondim} +
-\frac{n_{\rm part}({\rm igrid}) \cdot w_{\rm part}}{\twotondim},
+C_{\rm cell} = \twotondim^{-1}\bigl(w_{\rm grid} +
+n_{\rm part}({\rm igrid}) \cdot w_{\rm part}\bigr),
 \label{eq:cost_function}
 \end{equation}
 where $w_{\rm grid}$ is the memory cost per grid slot (default 270
@@ -373,23 +376,24 @@ integers to avoid overflow when summing costs across millions of cells.
 Activating memory-weighted balancing requires setting
 \code{memory\_balance = .true.} and optionally tuning
 \code{mem\_weight\_grid} and \code{mem\_weight\_part} in the namelist.
-Our tests with $2 \times 10^8$ particles on 12 ranks show that
+Our tests with $200\,\mathrm{M}$ particles on 12 ranks show that
 memory-weighted balancing reduces the peak-to-mean memory ratio from
 2.5 to 1.3 without affecting physics results (identical
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$ to machine precision).
 
 
-\subsection{Hierarchical MPI exchange}
+\section{Hierarchical MPI Communication}
 \label{sec:ksec_exchange}
 
-The tree structure enables a hierarchical exchange protocol that
-replaces the global \code{MPI\_ALLTOALL} with a sequence of
-level-by-level correspondent exchanges. We implement two variants:
+The tree structure described in Section~\ref{sec:ksec_tree} enables
+a hierarchical exchange protocol that replaces the global
+\code{MPI\_ALLTOALL} with a sequence of level-by-level correspondent
+exchanges. We implement two variants.
 
-\subsubsection{Exclusive exchange}
+\subsection{Exclusive exchange}
 \label{sec:ksec_exclusive}
 
-In the exclusive exchange (\code{ksection\_exchange\_dp}), each item
+In the exclusive exchange, each item
 has a unique destination rank. The algorithm walks the tree from root
 to leaf:
 
@@ -425,8 +429,9 @@ number of messages per rank per exchange is
 N_{\rm msg} = \sum_{l=1}^{L} (k_l - 1) = \sum_i m_i (p_i - 1),
 \label{eq:msg_count}
 \end{equation}
-which for $\ncpu = 1024 = 2^{10}$ gives $N_{\rm msg} = 10$, compared
-to $\Olog{1024}$ messages in the original all-to-all pattern.
+which for $\ncpu = 1024 = 2^{10}$ gives $N_{\rm msg} = 10$ --- two
+orders of magnitude fewer than the ${\sim}1024$ messages required in
+the original all-to-all pattern.
 
 Working buffers are managed with Fortran 2003 \code{move\_alloc} for
 zero-copy buffer swaps at each level, and per-level arrays (child
@@ -435,15 +440,15 @@ counts, peer lists, MPI request handles) are pre-allocated with
 on repeated calls.
 
 
-\subsubsection{Overlap exchange}
+\subsection{Overlap exchange}
 \label{sec:ksec_overlap}
 
-The overlap exchange (\code{ksection\_exchange\_dp\_overlap}) handles
-items with spatial extent (bounding boxes) that may overlap multiple
-sub-domains. At each tree level, an item is replicated to all children
-whose bounding box intersects the item's spatial extent. This is used
-for operations such as the supernova feedback, where each SN blast
-has a finite physical radius.
+The overlap exchange handles items with spatial extent (bounding
+boxes) that may overlap multiple sub-domains. At each tree level, an
+item is replicated to all children whose bounding box intersects the
+item's spatial extent. This is used for operations such as the
+supernova and AGN feedback, where each blast has a finite physical
+radius.
 
 To handle periodic boundary conditions, items near the domain boundary
 are pre-processed: for each wrapping dimension, shifted copies are
@@ -464,21 +469,14 @@ without modifying the tree walk itself.
 The ghost-zone (virtual boundary) exchange is the most
 communication-intensive operation in \ramses, called multiple times per
 fine time step for hydro, gravity, and particle updates. We replace
-the standard all-to-all pattern with four \ksec-based routines:
-
-\begin{itemize}
-\item \code{make\_virtual\_fine\_dp\_ksec}: forward exchange (emission
-  grids $\rightarrow$ reception grids).
-\item \code{make\_virtual\_reverse\_dp\_ksec}: reverse accumulation
-  (reception grids $\rightarrow$ emission grids, with \code{+=}
-  semantics).
-\item \code{make\_virtual\_fine\_int\_ksec}: integer variant (via
-  \code{int} $\rightarrow$ \code{dble} conversion, exchange, then
-  \code{nint} inverse).
-\item Multigrid variants: \code{make\_virtual\_mg\_dp\_ksec} and
-  \code{make\_reverse\_mg\_dp\_ksec} for the multigrid solver's active
-  and emission grid structures.
-\end{itemize}
+the standard all-to-all pattern with four \ksec-based variants.
+First, a forward exchange sends data from emission grids to reception
+grids, and a corresponding reverse accumulation adds received values
+back into the emission grids. An integer variant converts integer
+data to double precision for transport and recovers the integer
+values on receipt. Finally, dedicated multigrid variants handle the
+solver's active and emission grid structures with the same
+hierarchical routing.
 
 The data packing format for each ghost grid is:
 \begin{equation}
@@ -520,12 +518,12 @@ components.
 \subsection{Communication structure construction}
 \label{sec:ksec_buildcomm}
 
-The construction of the communication structure (\code{build\_comm})
---- which determines which grids must be exchanged as ghost zones ---
-was itself based on \code{MPI\_ALLTOALL} in the original \ramses. We
-replace this with a \ksec\ exchange: each rank packs its reception
-grids as triplets (sender\_id, reception\_index, grid\_address), sends
-them via \code{ksection\_exchange\_dp}, and the receiver reconstructs
+The construction of the communication structure --- which determines
+which grids must be exchanged as ghost zones --- was itself based on
+\code{MPI\_ALLTOALL} in the original \ramses. We replace this with a
+\ksec\ exchange: each rank packs its reception grids as triplets
+(sender identifier, reception index, grid address), sends them via
+the exclusive hierarchical exchange, and the receiver reconstructs
 its emission arrays from the incoming data. This eliminates the last
 remaining all-to-all communication pattern in the AMR infrastructure.
 
@@ -574,7 +572,7 @@ M_{\rm nbor} = 6 \times 8 \times \ngridmax = 48\,\ngridmax
 \text{ bytes.}
 \label{eq:nbor_memory}
 \end{equation}
-For $\ngridmax = 5 \times 10^6$, this is 240\,MB per rank. Moreover,
+For $\ngridmax = 5\,\mathrm{M}$, this is 240\,MB per rank. Moreover,
 the \code{nbor} array must be maintained during grid creation,
 deletion, defragmentation, and inter-rank migration --- a significant
 source of code complexity and a potential source of bugs.
@@ -710,7 +708,7 @@ bytes, the net savings are
 \end{equation}
 Since $N_{\rm grids} \ll \ngridmax$ in practice (typical occupancy is
 30--60\,per\,cent), the savings are substantial: $\sim$176\,MB for
-$\ngridmax = 5 \times 10^6$ at 50\,per\,cent occupancy.
+$\ngridmax = 5\,\mathrm{M}$ at 50\,per\,cent occupancy.
 
 The computational cost of a hash lookup is $\Olog{1}$ expected time,
 with worst-case linear probing bounded by the load factor. In
@@ -742,7 +740,7 @@ saving
 \label{eq:hilbert_savings}
 \end{equation}
 under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
-For $\ngridmax = 5 \times 10^6$, this is approximately 640\,MB.
+For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
 
 The defragmentation routine, which previously required Hilbert keys
 for reordering, uses a local scratch array (\code{defrag\_dp})
@@ -764,7 +762,7 @@ are
 \approx 320\,\text{MB}
 \label{eq:hist_savings}
 \end{equation}
-for $\ngridmax = 5 \times 10^6$. Since load balancing occurs only
+for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
 every \code{nremap} coarse steps, these arrays are absent during the
 vast majority of the simulation.
 
@@ -773,11 +771,11 @@ vast majority of the simulation.
 \label{sec:mem_summary}
 
 Table~\ref{tab:memory} summarizes the memory savings for
-$\ngridmax = 5 \times 10^6$.
+$\ngridmax = 5\,\mathrm{M}$.
 
 \begin{table}
 \centering
-\caption{Memory savings per MPI rank for $\ngridmax = 5 \times 10^6$.
+\caption{Memory savings per MPI rank for $\ngridmax = 5\,\mathrm{M}$.
 Savings marked with ${}^*$ are conditional on using \ksec\ ordering.}
 \label{tab:memory}
 \begin{tabular}{lrl}
@@ -927,7 +925,7 @@ on most architectures.
 
 Combining all optimizations, the MG Poisson solver's share of total
 runtime is reduced from 55.1\,per\,cent to 38.6\,per\,cent in a
-representative test (200 million particles, 12 ranks, 10 coarse
+representative test ($200\,\mathrm{M}$ particles, 12 ranks, 10 coarse
 steps). The iteration counts are unchanged (Level~8: 5 iterations,
 Level~9: 4 iterations), confirming that the merged red-black exchange
 does not degrade convergence.
@@ -1094,7 +1092,7 @@ with datasets organized hierarchically:
 \subsection{Variable-ncpu restart algorithm}
 \label{sec:varcpu_algorithm}
 
-When the number of ranks in the checkpoint file ($\ncpu^{\rm file}$)
+When the number of ranks in the output file ($\ncpu^{\rm file}$)
 differs from the current run ($\ncpu$), the following procedure
 executes during restart:
 
@@ -1117,7 +1115,7 @@ executes during restart:
 
 This approach requires that all ranks temporarily hold the full grid
 metadata (positions and son flags) during the reconstruction phase.
-For typical production outputs ($\sim$$10^7$ total grids), this
+For typical production outputs (${\sim}10\,\mathrm{M}$ total grids), this
 temporary overhead is a few hundred MB --- well within the memory
 budget freed by the optimizations of Sections~\ref{sec:morton}--\ref{sec:memory}.
 
@@ -1235,7 +1233,7 @@ forced to refine regardless of the Poisson criterion.
 The parameter \code{nremap} controls the frequency of load-rebalancing
 operations (every \code{nremap} coarse steps). We changed the default
 from \code{nremap = 0} (rebalance every step) to \code{nremap = 5}
-based on systematic tests with 200 million particles on 12 ranks over
+based on systematic tests with $200\,\mathrm{M}$ particles on 12 ranks over
 10 coarse steps:
 
 \begin{table}
@@ -1404,11 +1402,11 @@ persistent device-side data structures.
 \label{sec:perf_config}
 
 All tests use a cosmological $\Lambda$CDM simulation with
-$200 \times 10^6$ dark matter particles in a periodic box of side
+$200\,\mathrm{M}$ dark matter particles in a periodic box of side
 256\,$h^{-1}$\,Mpc, initialised at $z = 29.5$ with \textsc{music}
 \citep{Hahn2011}. The base AMR grid is $256^3$ (\code{levelmin}=8)
 with adaptive refinement up to \code{levelmax}=10. The simulation is
-restarted from an HDF5 checkpoint at coarse step~5 and evolved to
+restarted from an HDF5 output at coarse step~5 and evolved to
 step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC
 7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4 memory.
 
@@ -1456,14 +1454,14 @@ the iteration count.
 \label{sec:perf_timing}
 
 We measure strong scaling by restarting a production-grade cosmological
-simulation from an HDF5 checkpoint.  The test problem comprises
-$54 \times 10^6$ AMR grids (levels~9--14) and $135.7 \times 10^6$ particles
+simulation from an HDF5 output.  The test problem comprises
+$54\,\mathrm{M}$ AMR grids (levels~9--14) and $135.7\,\mathrm{M}$ particles
 including $3.2 \times 10^4$ sink particles, with full physics enabled
 (radiative cooling, star formation, SNII/AGN feedback).
-The checkpoint was written at coarse step~241 with 12 MPI ranks;
+The output was written at coarse step~241 with 12 MPI ranks;
 we run 2 additional coarse steps to step~243.
 The variable-$\ncpu$ restart feature (\S\ref{sec:varcpu}) allows the
-checkpoint to be read with any number of MPI ranks; a forced
+output to be read with any number of MPI ranks; a forced
 \code{load\_balance} on the first coarse step ensures optimal grid
 distribution before timing begins.
 The test platform has two AMD EPYC 7543 processors (64 cores, 128 threads)
@@ -1480,7 +1478,7 @@ summation order changes across different domain decompositions.
 \centering
 \caption{Strong scaling results for the \curamses\ code on a dual-socket
 AMD EPYC 7543 node (64 cores, 1\,TB RAM).  The test problem has
-$54 \times 10^6$ grids and $135.7 \times 10^6$ particles with full
+$54\,\mathrm{M}$ grids and $135.7\,\mathrm{M}$ particles with full
 physics (cooling, star formation, sink particles, AGN feedback).
 Elapsed is the total wall-clock time; timer values are per-rank averages.
 Speedup $S$ is relative to the single-rank elapsed time.}
@@ -1533,7 +1531,7 @@ Several scaling trends are evident:
   scaling efficiency ($53\%$) on this shared-memory node.
 \end{itemize}
 
-Fig.~\ref{fig:scaling} visualises these trends.  Panel~(a) shows the
+Figure~\ref{fig:scaling} visualises these trends.  Panel~(a) shows the
 elapsed time and per-component timer values as a function of $\ncpu$
 on a log--log scale.  All major components follow the ideal scaling
 line closely up to $\sim$16 ranks, with gradual deviation at higher
@@ -1546,7 +1544,7 @@ while the elapsed time reaches $33.9\times$ at 64 ranks.
 \centering
 \includegraphics[width=\textwidth]{strong_scaling.pdf}
 \caption{Strong scaling of \curamses\ on a dual-socket AMD EPYC 7543
-node (64 cores) with a $135.7 \times 10^6$ particle cosmological
+node (64 cores) with a $135.7\,\mathrm{M}$ particle cosmological
 simulation including full physics.
 (a)~Elapsed time and per-component wall-clock times versus $\ncpu$;
 the dashed line shows ideal scaling from the single-rank baseline.
@@ -1568,12 +1566,12 @@ scheme across the strong-scaling runs described in the preceding section.
 \begin{table}
 \centering
 \caption{Memory load balance for the strong-scaling test
-  ($54 \times 10^6$ grids, $135.7 \times 10^6$ particles).
+  ($54\,\mathrm{M}$ grids, $135.7\,\mathrm{M}$ particles).
   $M_{\min}$ and $M_{\max}$ are the minimum and maximum per-rank
   resident memory after the final load-balance remap (step 243).
   The ratio $M_{\max}/M_{\min}$ measures memory imbalance.
   The level-10 grid counts illustrate the per-rank work imbalance
-  at the most populated refined level ($19.5 \times 10^6$ grids total).}
+  at the most populated refined level ($19.5\,\mathrm{M}$ grids total).}
 \label{tab:membal}
 \begin{tabular}{rrrrrrr}
 \hline
@@ -1599,7 +1597,7 @@ The memory-weighted balancer keeps the per-rank memory imbalance
 remarkably low: $M_{\max}/M_{\min} \le 1.05$ for all rank counts tested,
 from 2 to 64.  This is achieved despite substantial grid-count imbalance
 at the most populated refined level (level~10, containing
-$19.5 \times 10^6$ grids), where the per-rank max/min ratio grows from
+$19.5\,\mathrm{M}$ grids), where the per-rank max/min ratio grows from
 1.13 at 2~ranks to 1.61 at 64~ranks because the \ksec\ sub-domains
 become smaller relative to the AMR clustering scale.
 
@@ -1648,7 +1646,7 @@ are:
 \item \textbf{Morton key hash table.} A per-level open-addressing hash
   table that replaces the 48-byte-per-grid \code{nbor} array with
   $\Olog{1}$ hash lookups, saving over 190\,MB per rank at
-  $\ngridmax = 5 \times 10^6$ while simplifying the grid management
+  $\ngridmax = 5\,\mathrm{M}$ while simplifying the grid management
   code (no neighbour-pointer maintenance during creation, deletion, or
   migration).
 
@@ -1670,7 +1668,7 @@ are:
   speedups of one to two orders of magnitude.
 
 \item \textbf{Variable-ncpu restart.} Both HDF5 parallel I/O and
-  distributed binary I/O enable checkpoint/restart with arbitrary rank
+  distributed binary I/O enable output/restart with arbitrary rank
   counts, improving workflow flexibility for production simulations on
   shared facilities.  The binary path uses round-robin file assignment
   and per-level \code{MPI\_ALLTOALLV} with reusable exchange metadata.
@@ -1762,6 +1760,9 @@ Hahn O., Abel T., 2011, MNRAS, 415, 2101
 
 \bibitem[\protect\citeauthoryear{Han et al.}{Han et al.}{2026}]{Han2026}
 Han S., et al., 2026, A\&A, 705, A169
+
+\bibitem[\protect\citeauthoryear{Hopkins}{Hopkins}{2015}]{Hopkins2015}
+Hopkins P.~F., 2015, MNRAS, 450, 53
 
 \bibitem[\protect\citeauthoryear{Hopkins et al.}{Hopkins et al.}{2018}]{Hopkins2018}
 Hopkins P.~F., et al., 2018, MNRAS, 480, 800
