@@ -260,16 +260,21 @@ The splitting sequence is then
 \label{eq:split_sequence}
 \end{equation}
 yielding $L\,(= \sum_i m_i)$ levels in the tree, which encodes both
-the domain hierarchy and the communication pattern. At each level $l$, the
-domain is split into $k_l$ sub-domains along the longest axis of the
-current bounding box. This longest-axis selection ensures roughly
-isotropic sub-domains, minimising the surface-to-volume ratio and
-hence the ghost-zone count.
+the domain hierarchy and the communication pattern.
+The tree is a $k$-ary structure in which each \emph{node} represents a
+contiguous group of MPI ranks sharing a spatial sub-domain: the
+\emph{root} node at level~0 spans all $\ncpu$ ranks, and each
+\emph{leaf} node at level~$L$ corresponds to a single rank.
+At each level $l$, the
+domain of a node is split into $k_l$ child nodes along the longest
+axis of the current bounding box. This longest-axis selection ensures
+roughly isotropic sub-domains, minimising the surface-to-volume ratio
+and hence the ghost-zone count.
 
 For example, $\ncpu = 12 = 3 \times 2 \times 2$ produces the
 splitting sequence $(3, 2, 2)$ with $L = 3$ tree levels: the root is
 split into 3 slabs along the longest axis, each slab is bisected, and
-each half is bisected again, yielding 12 leaf nodes --- one per rank.
+each half is bisected again, yielding 12 leaf nodes, one per rank.
 Figure~\ref{fig:ksec_progressive} illustrates this progressive
 decomposition for $\ncpu = 12$, from the undivided domain through
 three successive levels of splitting, with the corresponding
@@ -306,7 +311,7 @@ N_{\rm nodes} = 1 + \sum_{l=1}^{L} \prod_{i=1}^{l} k_i \leq
 \label{eq:tree_nodes}
 \end{equation}
 which for practical values ($\ncpu \leq 10^5$) is at most a few
-hundred --- negligible overhead.
+hundred, negligible overhead.
 
 
 \subsection{Load-Balanced Wall Placement}
@@ -335,9 +340,13 @@ The procedure operates level by level, top to bottom. At level $l$:
   f_j = n^{-1}\sum_{m=1}^{j} n_m,
   \label{eq:target_frac}
   \end{equation}
-  where $n_m$ is the number of ranks assigned to partition $m$
-  ($n_m = \lfloor n/k_l \rfloor$ or $\lfloor n/k_l \rfloor + 1$ for
-  the first $n \bmod k_l$ partitions).
+  where $n_m$ is the number of ranks assigned to partition $m$.
+  Because $n$ ranks cannot always be divided evenly among $k_l$
+  partitions, $n_m = \lfloor n/k_l \rfloor + 1$ for the first
+  $n \bmod k_l$ partitions (which absorb the remainder), and
+  $n_m = \lfloor n/k_l \rfloor$ for the rest.
+  Here $\lfloor \cdot \rfloor$ denotes the floor function (the
+  largest integer not exceeding the argument).
 
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
   all $\ncpu$ ranks to obtain the global cumulative load at each wall
@@ -396,8 +405,14 @@ exchanges. We implement two variants.
 \label{sec:ksec_exclusive}
 
 In the exclusive exchange, each item
-has a unique destination rank. The algorithm walks the tree from root
-to leaf:
+has a unique destination rank. The algorithm walks the \ksec\ tree
+from root to leaf, where each \emph{node} represents a contiguous
+group of MPI ranks at a given tree level. The \emph{root} node
+encompasses all $\ncpu$ ranks and represents the entire computational
+domain. At each level~$l$, a node is partitioned into $k_l$ child
+nodes; the leaf nodes at the bottom of the tree correspond to
+individual MPI ranks.  Algorithm~\ref{alg:exclusive} summarises the
+procedure:
 
 \begin{algorithm}[H]
 \caption{Exclusive hierarchical exchange}
@@ -470,6 +485,23 @@ $3 - 1 = 2$ steps: step~1 pairs child~2 with child~1 ($1 \times 4$
 exchanges), and step~2 pairs child~3 with both children~1 and~2
 ($2 \times 4$ exchanges). Levels~2 and~3 each have $k = 2$, requiring
 only $2 - 1 = 1$ step per level.
+
+A trade-off of the hierarchical routing is that the total data volume
+transmitted per rank exceeds that of a direct \code{MPI\_ALLTOALL}.
+In the all-to-all pattern, each rank sends each item exactly once to
+its destination. In the hierarchical exchange, an item may be
+forwarded through multiple tree levels before reaching its final
+destination, so the same data can traverse several hops. In the worst
+case, a rank's entire send buffer is relayed at every level,
+giving a per-rank volume of at most $L \times V_{\rm local}$, where
+$V_{\rm local}$ is the rank's data size. However, this upper bound is
+rarely approached in practice because items are filtered by child
+index at each level: only the subset destined for a sibling subtree
+is actually transmitted, and successive levels operate on
+progressively smaller subsets. The key advantage, reducing the number
+of communication partners from $\Olog{\ncpu}$ to $\Olog{\sum_l k_l}$,
+more than compensates for the modest increase in aggregate volume,
+particularly at large $\ncpu$ where message startup latency dominates.
 
 \begin{figure}
 \centering
@@ -593,10 +625,11 @@ Buffer memory & $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
 of which is \code{nbor(1:ngridmax, 1:twondim)} --- a six-column
 integer array that records, for each grid, the cell index of its
 neighbour in each of the six Cartesian directions ($\pm x$, $\pm y$,
-$\pm z$). At 8 bytes per entry (64-bit integers), this array consumes
+$\pm z$). Each entry is a 64-bit integer occupying 8\,bytes, so this
+array consumes
 \begin{equation}
-M_{\rm nbor} = 6 \times 8 \times \ngridmax = 48\,\ngridmax
-\text{ bytes.}
+M_{\rm nbor} = 6 \times \ngridmax \times 8\,\text{bytes}
+= 48\,\ngridmax\,\text{bytes}.
 \label{eq:nbor_memory}
 \end{equation}
 For $\ngridmax = 5\,\mathrm{M}$, this is 240\,MB per rank. Moreover,
@@ -620,9 +653,15 @@ M(i_x, i_y, i_z) = \sum_{b=0}^{B-1}
 \Bigr],
 \label{eq:morton_encode}
 \end{equation}
-where $B = 21$ bits per coordinate (supporting grids up to level 22
-for $n_x = 1$, or level 20 for $n_x = 4$), and $\text{bit}_b(n)$
-extracts bit $b$ of integer $n$. The encoding and decoding are
+where $B = 21$ bits per coordinate and $\text{bit}_b(n)$
+extracts bit $b$ of integer $n$. Here $n_x$ denotes the number of
+coarse-level grid cells per dimension (a \ramses\ parameter, typically
+1--4). At AMR level $l$, there are $n_x \cdot 2^{l-1}$ grid cells
+per dimension, so the integer coordinate range is $[0,\, n_x \cdot
+2^{l-1})$. With $B = 21$ bits the maximum representable coordinate is
+$2^{21} - 1 = 2\,097\,151$, which accommodates up to level 22 for
+$n_x = 1$ or level 20 for $n_x = 4$. The encoding and decoding
+(the inverse map $(i_x, i_y, i_z) = M^{-1}(\text{key})$) are
 implemented with simple bit-shift loops.
 
 The integer coordinates of a grid at level $l$ are computed from its
@@ -631,7 +670,15 @@ floating-point centre position $\mathbf{x}_g$ as
 i_d = \lfloor x_{g,d} \cdot 2^{l-1} \rfloor, \quad d \in \{x, y, z\},
 \label{eq:grid_to_int}
 \end{equation}
-where coordinates are in units of the coarse grid spacing.
+where $\lfloor \cdot \rfloor$ denotes the floor function and
+coordinates are in units of the coarse grid spacing.
+Note that AMR does not populate all possible grid positions at a given
+level: only regions that satisfy the refinement criteria contain grids.
+The Morton key therefore serves as a unique spatial address for each
+\emph{existing} grid; the hash table (Section~\ref{sec:morton_hashtable})
+stores only the grids that are actually allocated, making the
+look-up cost independent of the total number of potential grid
+positions at that level.
 
 
 \subsection{Neighbour Finding via Morton Arithmetic}
@@ -641,7 +688,8 @@ The neighbour of a grid in direction $j$ (using the \ramses\ convention
 $1 = -x$, $2 = +x$, $3 = -y$, $4 = +y$, $5 = -z$, $6 = +z$) is
 obtained by:
 \begin{enumerate}
-\item Decoding the Morton key to $(i_x, i_y, i_z)$.
+\item Decoding the Morton key via the inverse map
+  $(i_x, i_y, i_z) = M^{-1}(\text{key})$.
 \item Incrementing or decrementing the appropriate coordinate.
 \item Applying periodic wrapping if the coordinate exceeds
   $[0, n_d \cdot 2^{l-1})$.

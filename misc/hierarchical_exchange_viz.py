@@ -2,6 +2,7 @@
 """
 Hierarchical exchange communication pattern for N_cpu=12 (=3x2x2).
 Shows the progression of communication through tree levels and stages.
+Node groupings shown as transparent bordered rectangles.
 """
 
 import colorsys
@@ -50,37 +51,23 @@ def draw_rank_boxes(ax, colors, box_w=0.7, box_h=0.5, y0=0.0):
                 fontsize=9, fontweight='bold', color=tc, zorder=11)
 
 
-def draw_arc_arrow(ax, x1, x2, y_base, arc_color='#555555', lw=1.5):
-    """Draw a semicircular bidirectional arc between positions x1 and x2."""
-    cx = (x1 + x2) / 2 + 0.5  # centre (rank positions are 0-indexed + 0.5)
-    x1c = x1 + 0.5
-    x2c = x2 + 0.5
-    width = abs(x2 - x1)
-    height = width * 0.38 + 0.25  # arc height proportional to distance
-
-    # Draw arc using plot with parametric curve
-    theta = np.linspace(0, np.pi, 60)
-    xs = cx + (width / 2) * np.cos(theta)
-    ys = y_base + height * np.sin(theta)
-    ax.plot(xs, ys, color=arc_color, linewidth=lw, solid_capstyle='round',
-            zorder=5)
-
-    # Arrowheads at both ends
-    arrow_size = 0.12
-    for xend, direction in [(x1c, 1), (x2c, -1)]:
-        # Small triangle arrowhead
-        idx = 0 if direction == 1 else -1
-        dx = xs[1] - xs[0] if direction == 1 else xs[-1] - xs[-2]
-        dy = ys[1] - ys[0] if direction == 1 else ys[-1] - ys[-2]
-        norm = np.sqrt(dx**2 + dy**2)
-        if norm > 0:
-            dx, dy = dx / norm, dy / norm
-        ax.annotate('', xy=(xend, y_base),
-                    xytext=(xend + direction * arrow_size * 1.5,
-                            y_base + arrow_size * 2),
-                    arrowprops=dict(arrowstyle='->', color=arc_color,
-                                   lw=lw, mutation_scale=12),
-                    zorder=5)
+def draw_node_groups(ax, groups, y0=0.0, box_h=0.5, pad=0.12,
+                     edgecolor='#888888', linestyle='--', lw=1.0, label_y=None):
+    """Draw transparent rectangles around rank groups (tree nodes)."""
+    for start, end, label in groups:
+        x_left = start + 0.5 - 0.35 - pad
+        x_right = end + 0.5 + 0.35 + pad
+        y_bot = y0 - box_h / 2 - pad
+        h = box_h + 2 * pad
+        rect = mpatches.FancyBboxPatch(
+            (x_left, y_bot), x_right - x_left, h,
+            boxstyle="round,pad=0.05",
+            facecolor='none', edgecolor=edgecolor,
+            linewidth=lw, linestyle=linestyle, zorder=3)
+        ax.add_patch(rect)
+        if label and label_y is not None:
+            ax.text((start + end) / 2 + 0.5, label_y, label,
+                    ha='center', va='top', fontsize=7, color=edgecolor)
 
 
 def draw_arc_simple(ax, x1, x2, y_base, arc_color='#555555', lw=1.8):
@@ -126,6 +113,18 @@ def draw_arc_simple(ax, x1, x2, y_base, arc_color='#555555', lw=1.8):
 # Level 2 (k=2): within each group of 4: {1,2}↔{3,4}, {5,6}↔{7,8}, {9,10}↔{11,12}
 # Level 3 (k=2): within each pair: {1}↔{2}, {3}↔{4}, ...
 
+# Node groupings at each level (0-indexed rank positions)
+# Level 1: 3 children of root node
+node_groups_lv1 = [
+    (0, 3, 'child 1'), (4, 7, 'child 2'), (8, 11, 'child 3'),
+]
+# Level 2: 6 children (2 per level-1 node)
+node_groups_lv2 = [
+    (0, 1, ''), (2, 3, ''), (4, 5, ''), (6, 7, ''), (8, 9, ''), (10, 11, ''),
+]
+# Level 3: 12 leaf nodes (each rank is a leaf)
+node_groups_lv3 = []  # individual ranks are already shown as boxes
+
 # Using 0-indexed rank positions (display as rank+1)
 stages = [
     {
@@ -137,6 +136,7 @@ stages = [
             {'pair': (2, 6), 'color': '#AA4444'},
             {'pair': (3, 7), 'color': '#AA4444'},
         ],
+        'groups': node_groups_lv1,
     },
     {
         'label': 'Level 1, step 2\n'
@@ -157,6 +157,7 @@ stages = [
             ('#BB3333', 'child 1$\\leftrightarrow$3'),
             ('#DD8822', 'child 2$\\leftrightarrow$3'),
         ],
+        'groups': node_groups_lv1,
     },
     {
         'label': 'Level 2\n($k_2{=}2$)',
@@ -168,6 +169,7 @@ stages = [
             {'pair': (8, 10), 'color': '#44AA44'},
             {'pair': (9, 11), 'color': '#44AA44'},
         ],
+        'groups': node_groups_lv2,
     },
     {
         'label': 'Level 3\n($k_3{=}2$)',
@@ -179,6 +181,7 @@ stages = [
             {'pair': (8, 9),   'color': '#4444AA'},
             {'pair': (10, 11), 'color': '#4444AA'},
         ],
+        'groups': node_groups_lv3,
     },
 ]
 
@@ -194,12 +197,12 @@ ylim_ranges = []
 for stage in stages:
     max_dist = max(abs(p['pair'][1] - p['pair'][0]) for p in stage['pairs'])
     max_arc_h = np.sqrt(max_dist) * 0.55 + 0.3
-    ylo, yhi = -0.45, arc_y + max_arc_h + 0.3
+    ylo, yhi = -0.65, arc_y + max_arc_h + 0.3
     ylim_ranges.append((ylo, yhi, max_arc_h))
 
 height_ratios = [yhi - ylo for ylo, yhi, _ in ylim_ranges]
 
-fig, axes = plt.subplots(4, 1, figsize=(10, 10.5),
+fig, axes = plt.subplots(4, 1, figsize=(10, 11.5),
                          gridspec_kw={'hspace': 0.15,
                                       'height_ratios': height_ratios})
 
@@ -215,6 +218,12 @@ for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
     ax.set_ylim(ylo, yhi)
     ax.set_aspect('equal')
     ax.axis('off')
+
+    # Draw node grouping boxes (behind everything)
+    if stage.get('groups'):
+        draw_node_groups(ax, stage['groups'], y0=box_y, box_h=0.5,
+                         pad=0.12, edgecolor='#777777', linestyle='--',
+                         lw=1.2, label_y=-0.50)
 
     # Draw rank boxes
     draw_rank_boxes(ax, colors, y0=box_y)
@@ -243,7 +252,7 @@ for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
 
     # Separator line below (except last)
     if ax_idx < 3:
-        ax.axhline(y=-0.42, color='#dddddd', linewidth=0.5,
+        ax.axhline(y=-0.62, color='#dddddd', linewidth=0.5,
                    xmin=0.02, xmax=0.98)
 
 # Add "Total: N_msg = (3-1) + (2-1) + (2-1) = 4" annotation at bottom
