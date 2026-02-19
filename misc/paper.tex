@@ -88,7 +88,7 @@ software: development
 % ===================================================================
 % 1. INTRODUCTION
 % ===================================================================
-\section{Introduction}
+\section{INTRODUCTION}
 \label{sec:intro}
 
 Cosmological hydrodynamic simulations play a central role in modern
@@ -213,7 +213,7 @@ $\ncpu$ is the total number of MPI ranks.
 % ===================================================================
 % 2. K-SECTION DOMAIN DECOMPOSITION
 % ===================================================================
-\section{Recursive K-Section Domain Decomposition}
+\section{RECURSIVE K-SECTION DOMAIN DECOMPOSITION}
 \label{sec:ksection}
 
 \subsection{Motivation}
@@ -307,7 +307,7 @@ which for practical values ($\ncpu \leq 10^5$) is at most a few
 hundred --- negligible overhead.
 
 
-\subsection{Load-balanced wall placement}
+\subsection{Load-Balanced Wall Placement}
 \label{sec:ksec_loadbal}
 
 When the tree is updated during load balancing (every \code{nremap}
@@ -350,7 +350,7 @@ The procedure operates level by level, top to bottom. At level $l$:
 \end{enumerate}
 
 
-\subsection{Memory-weighted cost function}
+\subsection{Memory-Weighted Cost Function}
 \label{sec:ksec_membal}
 
 The default \ramses\ load balancer weights all cells equally.
@@ -382,7 +382,7 @@ memory-weighted balancing reduces the peak-to-mean memory ratio from
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$ to machine precision).
 
 
-\section{Hierarchical MPI Communication}
+\section{HIERARCHICAL MPI COMMUNICATION}
 \label{sec:ksec_exchange}
 
 The tree structure described in Section~\ref{sec:ksec_tree} enables
@@ -390,7 +390,7 @@ a hierarchical exchange protocol that replaces the global
 \code{MPI\_ALLTOALL} with a sequence of level-by-level correspondent
 exchanges. We implement two variants.
 
-\subsection{Exclusive exchange}
+\subsection{Exclusive Exchange}
 \label{sec:ksec_exclusive}
 
 In the exclusive exchange, each item
@@ -450,7 +450,24 @@ The progressively shorter arcs reflect the hierarchical narrowing of
 communication scope: long-range inter-group exchanges are resolved
 first, and successive levels refine the routing within ever-smaller
 subtrees. Each rank sends a total of $N_{\rm msg} = 2 + 1 + 1 = 4$
-messages per exchange --- independent of $\ncpu$.
+messages per exchange, independent of $\ncpu$.
+
+The pairing structure at each tree level follows directly from the
+branching factor. When a node has $p$ children, data from every child
+must reach every other child. This is accomplished in $p - 1$
+sequential steps. In step~$s$ ($s = 1, \ldots, p-1$), child~$s+1$ is
+paired with each of the children $1, \ldots, s$: each rank in
+child~$s+1$ exchanges data with its correspondent in child~$c$ for
+$c = 1, \ldots, s$, yielding $s$ concurrent point-to-point exchanges.
+After step~$s$, every child $1$ through $s+1$ holds the aggregate of
+all data originating from children $1$ through $s+1$. In particular,
+after all $p - 1$ steps, every child possesses the complete data set
+of the entire subtree. For the $\ncpu = 12$ example in
+Figure~\ref{fig:hier_exchange}, level~1 has $k_1 = 3$, giving
+$3 - 1 = 2$ steps: step~1 pairs child~2 with child~1 ($1 \times 4$
+exchanges), and step~2 pairs child~3 with both children~1 and~2
+($2 \times 4$ exchanges). Levels~2 and~3 each have $k = 2$, requiring
+only $2 - 1 = 1$ step per level.
 
 \begin{figure}
 \centering
@@ -477,30 +494,7 @@ counts, peer lists, MPI request handles) are pre-allocated with
 on repeated calls.
 
 
-\subsection{Overlap exchange}
-\label{sec:ksec_overlap}
-
-The overlap exchange handles items with spatial extent (bounding
-boxes) that may overlap multiple sub-domains. At each tree level, an
-item is replicated to all children whose bounding box intersects the
-item's spatial extent. This is used for operations such as the
-supernova and AGN feedback, where each blast has a finite physical
-radius.
-
-To handle periodic boundary conditions, items near the domain boundary
-are pre-processed: for each wrapping dimension, shifted copies are
-generated using bitmask subset enumeration over the set of wrapping
-dimensions:
-\begin{equation}
-N_{\rm copies} = 2^{n_{\rm wrap}} - 1,
-\label{eq:periodic_copies}
-\end{equation}
-where $n_{\rm wrap}$ is the number of dimensions in which the item's
-extent crosses the periodic boundary. This ensures correct routing
-without modifying the tree walk itself.
-
-
-\subsection{Ghost-zone exchange via k-section}
+\subsection{Ghost-Zone Exchange via K-Section}
 \label{sec:ksec_ghostzone}
 
 The ghost-zone (virtual boundary) exchange is the most
@@ -509,11 +503,12 @@ fine time step for hydro, gravity, and particle updates. We replace
 the standard all-to-all pattern with four \ksec-based variants.
 First, a forward exchange sends data from emission grids to reception
 grids, and a corresponding reverse accumulation adds received values
-back into the emission grids. An integer variant converts integer
-data to double precision for transport and recovers the integer
-values on receipt. Finally, dedicated multigrid variants handle the
-solver's active and emission grid structures with the same
-hierarchical routing.
+back into the emission grids. Because the hierarchical routing
+internally uses double-precision buffers, an integer variant packs
+integer data (e.g.\ \code{cpu\_map}, \code{flag1}) into
+double-precision words before transport and unpacks them on receipt,
+reusing the same tree-walk machinery without a separate integer
+communication path.
 
 The data packing format for each ghost grid is:
 \begin{equation}
@@ -529,10 +524,7 @@ the receiver to place incoming data without maintaining separate
 communication tables.
 
 
-\subsection{Bulk exchange}
-\label{sec:ksec_bulk}
-
-For multi-variable exchanges (e.g., all hydro conserved variables), we
+For multi-variable exchanges (e.g.\ all hydro conserved variables), we
 provide bulk variants that pack all $N_{\rm var}$ columns of a 2D
 array into a single \ksec\ exchange call:
 \begin{equation}
@@ -547,16 +539,12 @@ reduction in the number of exchange calls per time step (from
 $N_{\rm var}$ individual calls to a single bulk call at each of the
 five call sites in \code{amr\_step}).
 
-For MHD simulations (\code{SOLVERmhd}), the bulk exchange handles
-$N_{\rm var} + 3$ columns to include the face-centred magnetic field
-components.
 
-
-\subsection{Communication structure construction}
+\subsection{Communication Structure Construction}
 \label{sec:ksec_buildcomm}
 
-The construction of the communication structure --- which determines
-which grids must be exchanged as ghost zones --- was itself based on
+The construction of the communication structure, which determines
+which grids must be exchanged as ghost zones, was itself based on
 \code{MPI\_ALLTOALL} in the original \ramses. We replace this with a
 \ksec\ exchange: each rank packs its reception grids as triplets
 (sender identifier, reception index, grid address), sends them via
@@ -565,7 +553,7 @@ its emission arrays from the incoming data. This eliminates the last
 remaining all-to-all communication pattern in the AMR infrastructure.
 
 
-\subsection{Complexity analysis}
+\subsection{Complexity Analysis}
 \label{sec:ksec_complexity}
 
 Table~\ref{tab:complexity} summarizes the communication complexity of
@@ -593,10 +581,10 @@ Buffer memory & $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
 % ===================================================================
 % 3. MORTON KEY OCTREE
 % ===================================================================
-\section{Morton Key Octree for Neighbour Lookup}
+\section{MORTON KEY OCTREE FOR NEIGHBOUR LOOKUP}
 \label{sec:morton}
 
-\subsection{The nbor array problem}
+\subsection{The Nbor Array Problem}
 \label{sec:morton_problem}
 
 \ramses\ stores the octree connectivity in several arrays, the largest
@@ -615,7 +603,7 @@ deletion, defragmentation, and inter-rank migration --- a significant
 source of code complexity and a potential source of bugs.
 
 
-\subsection{Morton key encoding}
+\subsection{Morton Key Encoding}
 \label{sec:morton_encoding}
 
 A Morton key (also known as a Z-order key) is a 64-bit integer formed
@@ -644,7 +632,7 @@ i_d = \lfloor x_{g,d} \cdot 2^{l-1} \rfloor, \quad d \in \{x, y, z\},
 where coordinates are in units of the coarse grid spacing.
 
 
-\subsection{Neighbour finding via Morton arithmetic}
+\subsection{Neighbour Finding via Morton Arithmetic}
 \label{sec:morton_neighbor}
 
 The neighbour of a grid in direction $j$ (using the \ramses\ convention
@@ -663,7 +651,7 @@ M \gg 3$. A child key is obtained by a 3-bit left shift plus the
 child index (0--7): $M_{\rm child} = (M \ll 3) \,|\, i_{\rm child}$.
 
 
-\subsection{Per-level hash table}
+\subsection{Per-Level Hash Table}
 \label{sec:morton_hashtable}
 
 We maintain one open-addressing hash table per AMR level, mapping
@@ -697,7 +685,7 @@ A companion array \code{grid\_level(igrid)} stores the AMR level of
 each grid, enabling Morton key computation from the grid index alone.
 
 
-\subsection{Replacement functions}
+\subsection{Replacement Functions}
 \label{sec:morton_replacement}
 
 Two wrapper functions provide drop-in replacements for the original
@@ -722,7 +710,7 @@ The \code{nbor} array is reduced to \code{allocate(nbor(1:1, 1:1))}
 with any remaining references.
 
 
-\subsection{Memory and performance analysis}
+\subsection{Memory and Performance Analysis}
 \label{sec:morton_analysis}
 
 The memory cost of the hash table is
@@ -757,14 +745,14 @@ performance-critical Poisson solver.
 % ===================================================================
 % 4. MEMORY OPTIMIZATIONS
 % ===================================================================
-\section{Memory Optimizations}
+\section{MEMORY OPTIMIZATIONS}
 \label{sec:memory}
 
 Beyond the Morton key hash table, several additional optimizations
 reduce the steady-state memory footprint.
 
 
-\subsection{Hilbert key elimination}
+\subsection{Hilbert Key Elimination}
 \label{sec:mem_hilbert}
 
 When using \ksec\ ordering, the Hilbert key array
@@ -785,7 +773,7 @@ allocated only during the defragmentation pass and immediately
 deallocated.
 
 
-\subsection{On-demand histogram arrays}
+\subsection{On-Demand Histogram Arrays}
 \label{sec:mem_histogram}
 
 The arrays \code{bisec\_ind\_cell} and \code{cell\_level}, each of
@@ -804,7 +792,7 @@ every \code{nremap} coarse steps, these arrays are absent during the
 vast majority of the simulation.
 
 
-\subsection{Memory savings summary}
+\subsection{Memory Savings Summary}
 \label{sec:mem_summary}
 
 Table~\ref{tab:memory} summarizes the memory savings for
@@ -845,7 +833,7 @@ coarse step, providing runtime verification of the memory savings.
 % ===================================================================
 % 5. MULTIGRID SOLVER OPTIMIZATIONS
 % ===================================================================
-\section{Multigrid Poisson Solver Optimizations}
+\section{MULTIGRID POISSON SOLVER OPTIMIZATIONS}
 \label{sec:multigrid}
 
 The multigrid (MG) Poisson solver consumes a large fraction of the
@@ -856,7 +844,7 @@ step. We describe several optimizations that reduce this fraction to
 approximately 39\,per\,cent.
 
 
-\subsection{Neighbour grid precomputation}
+\subsection{Neighbour Grid Precomputation}
 \label{sec:mg_nbor_precompute}
 
 The Gauss--Seidel (GS) smoother and residual computation both require
@@ -880,7 +868,7 @@ array is allocated before the iteration loop and deallocated after,
 so its memory overhead is transient.
 
 
-\subsection{Branch-free neighbour access}
+\subsection{Branch-Free Neighbour Access}
 \label{sec:mg_branchfree}
 
 The original GS kernel contains a branch on \code{igshift == 0} to
@@ -891,7 +879,7 @@ grid itself. All neighbour accesses --- including the self-reference ---
 use the same indexed load, eliminating the branch.
 
 
-\subsection{Merged red-black exchange}
+\subsection{Merged Red-Black Exchange}
 \label{sec:mg_merged_rb}
 
 Standard red-black Gauss--Seidel smoothing in \ramses\ performs a
@@ -928,7 +916,7 @@ The same optimization is applied to the coarse-level solver
 red-black pattern similarly halves the exchange count.
 
 
-\subsection{Fused residual and norm computation}
+\subsection{Fused Residual and Norm Computation}
 \label{sec:mg_fused}
 
 The MG algorithm requires both the residual $r = f - A\phi$ and its
@@ -943,7 +931,7 @@ must include an \code{interface} block to enable the optional-argument
 dispatch.
 
 
-\subsection{Arithmetic optimization}
+\subsection{Arithmetic Optimization}
 \label{sec:mg_arithmetic}
 
 The GS fast-path computation involves a division by
@@ -957,7 +945,7 @@ the precomputed reciprocal \code{* oneoverdtwondim}, which is faster
 on most architectures.
 
 
-\subsection{Performance impact}
+\subsection{Performance Impact}
 \label{sec:mg_performance}
 
 Combining all optimizations, the MG Poisson solver's share of total
@@ -971,10 +959,10 @@ does not degrade convergence.
 % ===================================================================
 % 6. SNII FEEDBACK SPATIAL BINNING
 % ===================================================================
-\section{Feedback Spatial Binning}
+\section{FEEDBACK SPATIAL BINNING}
 \label{sec:feedback}
 
-\subsection{The brute-force bottleneck}
+\subsection{The Brute-Force Bottleneck}
 \label{sec:fb_problem}
 
 The Type~II supernova (SNII) feedback implementation in \ramses\
@@ -997,7 +985,7 @@ these routines consume 66\,s and 11\,s per call respectively,
 dominating the feedback time step.
 
 
-\subsection{Spatial hash binning}
+\subsection{Spatial Hash Binning}
 \label{sec:fb_binning}
 
 We partition the simulation domain into a uniform grid of
@@ -1052,7 +1040,7 @@ each thread independently processes the cells of its assigned grids,
 checking only the 27 neighbouring bins for relevant SNe.
 
 
-\subsection{Performance results}
+\subsection{Performance Results}
 \label{sec:fb_performance}
 
 With approximately 2000 simultaneous SN events:
@@ -1068,7 +1056,7 @@ results for all conservation quantities ($m_{\rm cons}$,
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$, $e_{\rm int}$).
 
 
-\subsection{AGN feedback spatial binning}
+\subsection{AGN Feedback Spatial Binning}
 \label{sec:fb_agn}
 
 The same spatial binning technique is applied to the AGN feedback
@@ -1099,10 +1087,10 @@ diagnostics compared to the original brute-force implementation.
 % ===================================================================
 % 7. VARIABLE-NCPU RESTART AND OTHER IMPROVEMENTS
 % ===================================================================
-\section{Variable-ncpu Restart and Other Improvements}
+\section{VARIABLE-NCPU RESTART AND OTHER IMPROVEMENTS}
 \label{sec:varcpu}
 
-\subsection{HDF5 parallel I/O}
+\subsection{HDF5 Parallel I/O}
 \label{sec:hdf5}
 
 Standard \ramses\ writes one binary file per MPI rank per output.
@@ -1126,7 +1114,7 @@ with datasets organized hierarchically:
 \end{itemize}
 
 
-\subsection{Variable-ncpu restart algorithm}
+\subsection{Variable-Ncpu Restart Algorithm}
 \label{sec:varcpu_algorithm}
 
 When the number of ranks in the output file ($\ncpu^{\rm file}$)
@@ -1157,7 +1145,7 @@ temporary overhead is a few hundred MB --- well within the memory
 budget freed by the optimizations of Sections~\ref{sec:morton}--\ref{sec:memory}.
 
 
-\subsection{Binary distributed I/O restart}
+\subsection{Binary Distributed I/O Restart}
 \label{sec:varcpu_binary}
 
 When HDF5 is unavailable or the native binary format
@@ -1214,7 +1202,7 @@ $e_{\rm cons} = 0$ for both upward ($4 \to 12$) and downward
 ($12 \to 4$) rank-count changes.
 
 
-\subsection{Stream-access IC reading}
+\subsection{Stream-Access IC Reading}
 \label{sec:stream_ic}
 
 The initial condition (IC) files in GRAFIC2 format are Fortran
@@ -1238,7 +1226,7 @@ This is applied to all IC file types: density perturbation
 positions (\code{poscx/y/z}), and temperature.
 
 
-\subsection{Sink particle refinement fix}
+\subsection{Sink Particle Refinement Fix}
 \label{sec:sink_fix}
 
 We identified and fixed a bug in the sink particle refinement
@@ -1261,10 +1249,10 @@ forced to refine regardless of the Poisson criterion.
 % ===================================================================
 % 8. ADDITIONAL IMPLEMENTATION DETAILS
 % ===================================================================
-\section{Additional Implementation Details}
+\section{ADDITIONAL IMPLEMENTATION DETAILS}
 \label{sec:misc}
 
-\subsection{nremap tuning}
+\subsection{Nremap Tuning}
 \label{sec:nremap}
 
 The parameter \code{nremap} controls the frequency of load-rebalancing
@@ -1298,7 +1286,7 @@ but allow imbalance to grow enough to slow other operations, resulting
 in a net increase in total runtime.
 
 
-\subsection{Load-balance profiling}
+\subsection{Load-Balance Profiling}
 \label{sec:lb_profiling}
 
 To identify bottlenecks in the load-balancing procedure, we added
@@ -1323,7 +1311,7 @@ frequency of these expensive global operations has a disproportionate
 impact on total runtime.
 
 
-\subsection{Pre-allocated buffer pools}
+\subsection{Pre-Allocated Buffer Pools}
 \label{sec:buffer_pools}
 
 The \ksec\ exchange routines and virtual boundary functions contain
@@ -1346,7 +1334,7 @@ pairs per exchange call.
 % ===================================================================
 % 9. HYBRID CPU/GPU DISPATCH
 % ===================================================================
-\section{Hybrid CPU/GPU Dispatch}
+\section{HYBRID CPU/GPU DISPATCH}
 \label{sec:hybrid}
 
 Certain compute-intensive routines---the Godunov solver, gravity force
@@ -1356,7 +1344,7 @@ offloading entire time steps to the GPU, \curamses\ adopts a
 \emph{hybrid dispatch} model in which OMP threads dynamically choose
 between CPU and GPU execution at runtime.
 
-\subsection{Dynamic dispatch model}
+\subsection{Dynamic Dispatch Model}
 \label{sec:hybrid_dispatch}
 
 At the start of each parallel region, each OMP thread attempts to
@@ -1372,7 +1360,7 @@ This design requires no code duplication---the CPU path is the
 original Fortran subroutine, and the GPU path is an alternative branch
 within the same \code{!\$omp do} loop.
 
-\subsection{Superbatch buffering and scatter-reduce}
+\subsection{Superbatch Buffering and Scatter-Reduce}
 \label{sec:hybrid_superbatch}
 
 GPU kernel launch latency ($\sim$10--50\,$\mu$s) is amortised by
@@ -1389,7 +1377,7 @@ flush), the kernel reduces fluxes into compact per-grid output arrays,
 reducing the device-to-host transfer to $\sim$5\,MB per flush---a
 $20\times$ reduction in PCIe bandwidth.
 
-\subsection{Lock-free level $L{-}1$ update}
+\subsection{Lock-Free Level $L{-}1$ Update}
 \label{sec:hybrid_scatter}
 
 The Godunov solver updates conservative variables at both the current
@@ -1407,7 +1395,7 @@ a serial merge applies all buffered entries.  The merge cost is
 negligible ($< 0.01$\,s in all tests), and the result is exact---no
 approximation or race condition.
 
-\subsection{Fortran--CUDA interface}
+\subsection{Fortran--CUDA Interface}
 \label{sec:hybrid_interface}
 
 The Fortran--CUDA interface uses a two-layer design: a C binding layer
@@ -1432,10 +1420,10 @@ persistent device-side data structures.
 % ===================================================================
 % 10. PERFORMANCE RESULTS
 % ===================================================================
-\section{Performance Results}
+\section{PERFORMANCE RESULTS}
 \label{sec:performance}
 
-\subsection{Test configuration}
+\subsection{Test Configuration}
 \label{sec:perf_config}
 
 All tests use a cosmological $\Lambda$CDM simulation with
@@ -1448,7 +1436,7 @@ step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC
 7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4 memory.
 
 
-\subsection{Conservation verification}
+\subsection{Conservation Verification}
 \label{sec:perf_conservation}
 
 All modifications are verified to preserve physical consistency by
@@ -1487,7 +1475,7 @@ well within the MG solver's convergence tolerance and does not affect
 the iteration count.
 
 
-\subsection{Strong scaling}
+\subsection{Strong Scaling}
 \label{sec:perf_timing}
 
 We measure strong scaling by restarting a production-grade cosmological
@@ -1591,7 +1579,7 @@ $33.9\times$ at 64 ranks ($53\%$ parallel efficiency).}
 \label{fig:scaling}
 \end{figure*}
 
-\subsection{Memory-weighted load balancing}
+\subsection{Memory-Weighted Load Balancing}
 \label{sec:perf_membal}
 
 The memory-weighted cost function (equation~\ref{eq:cost_function})
@@ -1657,7 +1645,7 @@ modest price for near-perfect memory balance.
 % ===================================================================
 % 10. CONCLUSIONS
 % ===================================================================
-\section{Conclusions}
+\section{CONCLUSIONS}
 \label{sec:conclusions}
 
 We have presented \curamses, a set of algorithmic and implementation
@@ -1847,7 +1835,7 @@ Warren M.~S., Salmon J.~K., 1993, in Proc.\ Supercomputing '93. ACM, New York, p
 % ===================================================================
 \appendix
 
-\section{K-Section Tree Walk Pseudocode}
+\section{K-SECTION TREE WALK PSEUDOCODE}
 \label{app:tree_walk}
 
 Algorithm~\ref{alg:cpumap} gives the pseudocode for mapping a spatial
@@ -1877,7 +1865,7 @@ position to its owning MPI rank by walking the \ksec\ tree.
 \end{algorithm}
 
 
-\section{Morton Key Encoding Details}
+\section{MORTON KEY ENCODING DETAILS}
 \label{app:morton}
 
 The Morton key interleaving for a single coordinate value $v$ with
