@@ -89,7 +89,7 @@ def draw_arc_simple(ax, x1, x2, y_base, arc_color='#555555', lw=1.8):
     x1c = x1 + 0.5
     x2c = x2 + 0.5
     width = abs(x2 - x1)
-    height = width * 0.32 + 0.35
+    height = np.sqrt(width) * 0.55 + 0.3  # sqrt scaling to compress tall arcs
 
     # Parametric semicircle
     theta = np.linspace(0.08, np.pi - 0.08, 80)
@@ -187,8 +187,21 @@ stages = [
 
 colors = assign_colors_12()
 
-fig, axes = plt.subplots(4, 1, figsize=(10, 9.5),
-                         gridspec_kw={'hspace': 0.25})
+# Pre-compute ylim ranges for each stage to set proper height ratios
+box_y = 0.0
+arc_y = 0.30
+ylim_ranges = []
+for stage in stages:
+    max_dist = max(abs(p['pair'][1] - p['pair'][0]) for p in stage['pairs'])
+    max_arc_h = np.sqrt(max_dist) * 0.55 + 0.3
+    ylo, yhi = -0.45, arc_y + max_arc_h + 0.3
+    ylim_ranges.append((ylo, yhi, max_arc_h))
+
+height_ratios = [yhi - ylo for ylo, yhi, _ in ylim_ranges]
+
+fig, axes = plt.subplots(4, 1, figsize=(10, 10.5),
+                         gridspec_kw={'hspace': 0.15,
+                                      'height_ratios': height_ratios})
 
 fig.suptitle(
     'Hierarchical exchange communication pattern for '
@@ -196,16 +209,10 @@ fig.suptitle(
     fontsize=13, y=0.97, fontweight='bold')
 
 for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
-    box_y = 0.0
-    arc_y = 0.30  # arc baseline (just above boxes)
+    ylo, yhi, max_arc_h = ylim_ranges[ax_idx]
 
     ax.set_xlim(-0.3, 12.8)
-
-    # Compute max arc height for this stage
-    max_dist = max(abs(p['pair'][1] - p['pair'][0]) for p in stage['pairs'])
-    max_arc_h = max_dist * 0.32 + 0.35
-    ax.set_ylim(-0.45, arc_y + max_arc_h + 0.3)
-
+    ax.set_ylim(ylo, yhi)
     ax.set_aspect('equal')
     ax.axis('off')
 
