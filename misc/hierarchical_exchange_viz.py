@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""
+Hierarchical exchange communication pattern for N_cpu=12 (=3x2x2).
+Shows the progression of communication through tree levels and stages.
+"""
+
+import colorsys
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patches import FancyArrowPatch, Arc
+
+
+def assign_colors_12():
+    """
+    HSV-based colors for 12 ranks, matching ksection_progressive_viz.py.
+    Ordering: ix(x-slab) -> iy(y-split) -> iz(z-split)
+    ix=0: red, ix=1: green, ix=2: blue
+    """
+    base_hues = [0.0, 0.30, 0.60]
+    nx, ny, nz = 3, 2, 2
+    colors = []
+    for ix in range(nx):
+        hue = base_hues[ix]
+        for iy in range(ny):
+            sat = 0.55 + 0.40 * iy / max(ny - 1, 1)
+            for iz in range(nz):
+                val = 0.65 + 0.30 * iz / max(nz - 1, 1)
+                r, g, b = colorsys.hsv_to_rgb(hue, sat, val)
+                colors.append((r, g, b))
+    return colors
+
+
+def draw_rank_boxes(ax, colors, box_w=0.7, box_h=0.5, y0=0.0):
+    """Draw 12 colored rank boxes at y=y0."""
+    for i in range(12):
+        rect = mpatches.FancyBboxPatch(
+            (i + 0.5 - box_w / 2, y0 - box_h / 2), box_w, box_h,
+            boxstyle="round,pad=0.06",
+            facecolor=colors[i], edgecolor='#333333', linewidth=1.0,
+            zorder=10)
+        ax.add_patch(rect)
+        # Choose text color for readability
+        r, g, b = colors[i]
+        lum = 0.299 * r + 0.587 * g + 0.114 * b
+        tc = 'white' if lum < 0.55 else 'black'
+        ax.text(i + 0.5, y0, str(i + 1), ha='center', va='center',
+                fontsize=9, fontweight='bold', color=tc, zorder=11)
+
+
+def draw_arc_arrow(ax, x1, x2, y_base, arc_color='#555555', lw=1.5):
+    """Draw a semicircular bidirectional arc between positions x1 and x2."""
+    cx = (x1 + x2) / 2 + 0.5  # centre (rank positions are 0-indexed + 0.5)
+    x1c = x1 + 0.5
+    x2c = x2 + 0.5
+    width = abs(x2 - x1)
+    height = width * 0.38 + 0.25  # arc height proportional to distance
+
+    # Draw arc using plot with parametric curve
+    theta = np.linspace(0, np.pi, 60)
+    xs = cx + (width / 2) * np.cos(theta)
+    ys = y_base + height * np.sin(theta)
+    ax.plot(xs, ys, color=arc_color, linewidth=lw, solid_capstyle='round',
+            zorder=5)
+
+    # Arrowheads at both ends
+    arrow_size = 0.12
+    for xend, direction in [(x1c, 1), (x2c, -1)]:
+        # Small triangle arrowhead
+        idx = 0 if direction == 1 else -1
+        dx = xs[1] - xs[0] if direction == 1 else xs[-1] - xs[-2]
+        dy = ys[1] - ys[0] if direction == 1 else ys[-1] - ys[-2]
+        norm = np.sqrt(dx**2 + dy**2)
+        if norm > 0:
+            dx, dy = dx / norm, dy / norm
+        ax.annotate('', xy=(xend, y_base),
+                    xytext=(xend + direction * arrow_size * 1.5,
+                            y_base + arrow_size * 2),
+                    arrowprops=dict(arrowstyle='->', color=arc_color,
+                                   lw=lw, mutation_scale=12),
+                    zorder=5)
+
+
+def draw_arc_simple(ax, x1, x2, y_base, arc_color='#555555', lw=1.8):
+    """Draw a clean arc with small arrow tips."""
+    cx = (x1 + x2) / 2 + 0.5
+    x1c = x1 + 0.5
+    x2c = x2 + 0.5
+    width = abs(x2 - x1)
+    height = width * 0.32 + 0.35
+
+    # Parametric semicircle
+    theta = np.linspace(0.08, np.pi - 0.08, 80)
+    xs = cx + (width / 2) * np.cos(theta)
+    ys = y_base + height * np.sin(theta)
+    ax.plot(xs, ys, color=arc_color, linewidth=lw, solid_capstyle='round',
+            zorder=5)
+
+    # Small filled triangles at endpoints
+    tri_size = 0.13
+    for end_idx, xend in [(0, x1c), (-1, x2c)]:
+        # Direction from arc tip toward the box
+        dx = xs[end_idx] - xs[end_idx + (1 if end_idx == 0 else -1)]
+        dy = ys[end_idx] - ys[end_idx + (1 if end_idx == 0 else -1)]
+        norm = np.sqrt(dx**2 + dy**2)
+        if norm > 0:
+            dx, dy = dx / norm * tri_size, dy / norm * tri_size
+        # Perpendicular for triangle width
+        px, py = -dy * 0.6, dx * 0.6
+        tip_x, tip_y = xs[end_idx] + dx * 0.5, ys[end_idx] + dy * 0.5
+        base_x, base_y = xs[end_idx] - dx * 0.8, ys[end_idx] - dy * 0.8
+        tri = plt.Polygon(
+            [(tip_x, tip_y),
+             (base_x + px, base_y + py),
+             (base_x - px, base_y - py)],
+            closed=True, facecolor=arc_color, edgecolor='none', zorder=6)
+        ax.add_patch(tri)
+
+
+# ── Communication stages ──────────────────────────────────────────────
+
+# N_cpu = 12 = 3 x 2 x 2
+# Level 1 (k=3): children {1-4}, {5-8}, {9-12}
+# Level 2 (k=2): within each group of 4: {1,2}↔{3,4}, {5,6}↔{7,8}, {9,10}↔{11,12}
+# Level 3 (k=2): within each pair: {1}↔{2}, {3}↔{4}, ...
+
+# Using 0-indexed rank positions (display as rank+1)
+stages = [
+    {
+        'label': 'Level 1, step 1\n'
+                 '($k_1{=}3$, siblings 1$\\leftrightarrow$2)',
+        'pairs': [
+            {'pair': (0, 4), 'color': '#AA4444'},
+            {'pair': (1, 5), 'color': '#AA4444'},
+            {'pair': (2, 6), 'color': '#AA4444'},
+            {'pair': (3, 7), 'color': '#AA4444'},
+        ],
+    },
+    {
+        'label': 'Level 1, step 2\n'
+                 '($k_1{=}3$, siblings $\\{$1,2$\\}$$\\leftrightarrow$3)',
+        'pairs': [
+            # Children 1↔3 (solid dark red)
+            {'pair': (0, 8),  'color': '#BB3333'},
+            {'pair': (1, 9),  'color': '#BB3333'},
+            {'pair': (2, 10), 'color': '#BB3333'},
+            {'pair': (3, 11), 'color': '#BB3333'},
+            # Children 2↔3 (orange)
+            {'pair': (4, 8),  'color': '#DD8822'},
+            {'pair': (5, 9),  'color': '#DD8822'},
+            {'pair': (6, 10), 'color': '#DD8822'},
+            {'pair': (7, 11), 'color': '#DD8822'},
+        ],
+        'legend': [
+            ('#BB3333', 'child 1$\\leftrightarrow$3'),
+            ('#DD8822', 'child 2$\\leftrightarrow$3'),
+        ],
+    },
+    {
+        'label': 'Level 2\n($k_2{=}2$)',
+        'pairs': [
+            {'pair': (0, 2),  'color': '#44AA44'},
+            {'pair': (1, 3),  'color': '#44AA44'},
+            {'pair': (4, 6),  'color': '#44AA44'},
+            {'pair': (5, 7),  'color': '#44AA44'},
+            {'pair': (8, 10), 'color': '#44AA44'},
+            {'pair': (9, 11), 'color': '#44AA44'},
+        ],
+    },
+    {
+        'label': 'Level 3\n($k_3{=}2$)',
+        'pairs': [
+            {'pair': (0, 1),   'color': '#4444AA'},
+            {'pair': (2, 3),   'color': '#4444AA'},
+            {'pair': (4, 5),   'color': '#4444AA'},
+            {'pair': (6, 7),   'color': '#4444AA'},
+            {'pair': (8, 9),   'color': '#4444AA'},
+            {'pair': (10, 11), 'color': '#4444AA'},
+        ],
+    },
+]
+
+
+# ── Main figure ───────────────────────────────────────────────────────
+
+colors = assign_colors_12()
+
+fig, axes = plt.subplots(4, 1, figsize=(10, 9.5),
+                         gridspec_kw={'hspace': 0.25})
+
+fig.suptitle(
+    'Hierarchical exchange communication pattern for '
+    '$N_{\\rm cpu}=12\\;(=3\\times 2\\times 2)$',
+    fontsize=13, y=0.97, fontweight='bold')
+
+for ax_idx, (ax, stage) in enumerate(zip(axes, stages)):
+    box_y = 0.0
+    arc_y = 0.30  # arc baseline (just above boxes)
+
+    ax.set_xlim(-0.3, 12.8)
+
+    # Compute max arc height for this stage
+    max_dist = max(abs(p['pair'][1] - p['pair'][0]) for p in stage['pairs'])
+    max_arc_h = max_dist * 0.32 + 0.35
+    ax.set_ylim(-0.45, arc_y + max_arc_h + 0.3)
+
+    ax.set_aspect('equal')
+    ax.axis('off')
+
+    # Draw rank boxes
+    draw_rank_boxes(ax, colors, y0=box_y)
+
+    # Draw arcs (each pair has its own color)
+    for p in stage['pairs']:
+        a, b = p['pair']
+        draw_arc_simple(ax, a, b, y_base=arc_y,
+                        arc_color=p['color'], lw=1.6)
+
+    # Stage label on the left
+    ax.text(-0.2, (arc_y + max_arc_h) * 0.45, stage['label'],
+            ha='right', va='center', fontsize=9,
+            bbox=dict(boxstyle='round,pad=0.3', facecolor='#f0f0f0',
+                      edgecolor='#cccccc', alpha=0.9))
+
+    # Legend for multi-color stages
+    if 'legend' in stage:
+        legend_y = arc_y + max_arc_h + 0.05
+        legend_x = 10.5
+        for li, (lc, ltxt) in enumerate(stage['legend']):
+            ax.plot([legend_x, legend_x + 0.5], [legend_y - li * 0.35] * 2,
+                    color=lc, linewidth=2.5, solid_capstyle='round')
+            ax.text(legend_x + 0.7, legend_y - li * 0.35, ltxt,
+                    ha='left', va='center', fontsize=8)
+
+    # Separator line below (except last)
+    if ax_idx < 3:
+        ax.axhline(y=-0.42, color='#dddddd', linewidth=0.5,
+                   xmin=0.02, xmax=0.98)
+
+# Add "Total: N_msg = (3-1) + (2-1) + (2-1) = 4" annotation at bottom
+fig.text(0.5, 0.02,
+         '$N_{\\rm msg} = (k_1{-}1) + (k_2{-}1) + (k_3{-}1) = 2+1+1 = 4$'
+         '  messages per rank per exchange',
+         ha='center', va='center', fontsize=11,
+         bbox=dict(boxstyle='round,pad=0.4', facecolor='#ffffdd',
+                   edgecolor='#cccc88'))
+
+plt.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/hierarchical_exchange.pdf',
+            bbox_inches='tight', dpi=300)
+plt.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/hierarchical_exchange.png',
+            bbox_inches='tight', dpi=200)
+print("Saved: hierarchical_exchange.pdf / .png")
