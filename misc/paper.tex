@@ -1546,7 +1546,7 @@ while the elapsed time reaches $33.9\times$ at 64 ranks.
 \centering
 \includegraphics[width=\textwidth]{strong_scaling.pdf}
 \caption{Strong scaling of \curamses\ on a dual-socket AMD EPYC 7543
-node (64 cores) with a $136 \times 10^6$ particle cosmological
+node (64 cores) with a $135.7 \times 10^6$ particle cosmological
 simulation including full physics.
 (a)~Elapsed time and per-component wall-clock times versus $\ncpu$;
 the dashed line shows ideal scaling from the single-rank baseline.
@@ -1562,11 +1562,61 @@ $33.9\times$ at 64 ranks ($53\%$ parallel efficiency).}
 The memory-weighted cost function (equation~\ref{eq:cost_function})
 assigns $w_{\rm grid} = 270$ bytes per grid cell and
 $w_{\rm part} = 12$ bytes per particle.
-With standard equal-volume decomposition, the peak-to-mean memory
-ratio can reach $\sim$2.5 in highly clustered particle distributions.
-Memory-weighted balancing reduces this ratio to $\sim$1.3 by
-redistributing grids from particle-heavy ranks, allowing simulations
-to run with $\sim$40\,per\,cent less total allocated memory.
+Table~\ref{tab:membal} quantifies the load balance achieved by this
+scheme across the strong-scaling runs described in the preceding section.
+
+\begin{table}
+\centering
+\caption{Memory load balance for the strong-scaling test
+  ($54 \times 10^6$ grids, $135.7 \times 10^6$ particles).
+  $M_{\min}$ and $M_{\max}$ are the minimum and maximum per-rank
+  resident memory after the final load-balance remap (step 243).
+  The ratio $M_{\max}/M_{\min}$ measures memory imbalance.
+  The level-10 grid counts illustrate the per-rank work imbalance
+  at the most populated refined level ($19.5 \times 10^6$ grids total).}
+\label{tab:membal}
+\begin{tabular}{rrrrrrr}
+\hline
+$\ncpu$ & $M_{\min}$ & $M_{\max}$ & $M_{\max}/M_{\min}$
+  & \multicolumn{3}{c}{Level-10 grids / rank} \\
+  &  (Gb) & (Gb) &  & min & max & max/min \\
+\hline
+  1 & 147.2 & 147.2 & 1.000 & \multicolumn{3}{c}{---} \\
+  2 &  87.0 &  87.4 & 1.005 &  9\,119\,832 & 10\,337\,771 & 1.13 \\
+  4 &  50.1 &  50.5 & 1.008 &  4\,545\,882 &  5\,209\,834 & 1.15 \\
+  8 &  28.0 &  28.6 & 1.021 &  2\,199\,595 &  2\,675\,391 & 1.22 \\
+ 12 &  20.9 &  21.4 & 1.024 &  1\,369\,950 &  1\,827\,914 & 1.33 \\
+ 16 &  16.7 &  17.1 & 1.024 &  1\,021\,171 &  1\,375\,737 & 1.35 \\
+ 24 &  12.5 &  13.1 & 1.048 &    671\,418 &    937\,060 & 1.40 \\
+ 32 &  10.7 &  11.1 & 1.037 &    521\,392 &    710\,999 & 1.36 \\
+ 48 &   8.2 &   8.6 & 1.049 &    306\,342 &    478\,566 & 1.56 \\
+ 64 &   8.2 &   8.6 & 1.049 &    224\,830 &    362\,435 & 1.61 \\
+\hline
+\end{tabular}
+\end{table}
+
+The memory-weighted balancer keeps the per-rank memory imbalance
+remarkably low: $M_{\max}/M_{\min} \le 1.05$ for all rank counts tested,
+from 2 to 64.  This is achieved despite substantial grid-count imbalance
+at the most populated refined level (level~10, containing
+$19.5 \times 10^6$ grids), where the per-rank max/min ratio grows from
+1.13 at 2~ranks to 1.61 at 64~ranks because the \ksec\ sub-domains
+become smaller relative to the AMR clustering scale.
+
+The low memory imbalance is key for production runs because each rank
+must pre-allocate arrays sized to its local $\ngridmax$; a high imbalance
+forces over-allocation on lightly loaded ranks.  With memory-weighted
+balancing, the 64-rank run requires only 8.6\,Gb per rank at peak,
+compared with the 147.2\,Gb needed in a single-rank run --- a factor of
+17.1 reduction, close to the ideal 64$\times$ scaling modulo the
+$\sim$4\,Gb fixed per-rank overhead (MPI buffers, hash tables, coarse
+grid).  The fixed overhead explains why per-rank memory saturates at
+$\sim$8\,Gb for 48 and 64 ranks.
+
+The load-balance remap itself costs 16--26\,s for $\ncpu \ge 8$
+(Table~\ref{tab:scaling}), growing from 2.3 to 5.1\,per\,cent of the
+total runtime as the computation shrinks under strong scaling --- a
+modest price for near-perfect memory balance.
 
 
 % ===================================================================
