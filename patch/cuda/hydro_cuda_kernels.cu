@@ -1359,6 +1359,32 @@ __global__ void hydro_scatter_reduce_kernel(
     #undef LOK
 }
 
+// ====================================================================
+// Kernel 7: GPU-gather ok flags from mesh_son + stencil_idx
+// Computes ok_int for scatter_reduce_kernel from GPU-resident son array.
+// ok = 1 if stencil_idx > 0 (fine cell) AND mesh_son[cell] > 0 (has children)
+// ok = 0 otherwise (interpolated or leaf cell)
+// Layout: ok_arr[g + stride * tid] matches scatter_reduce_kernel's s_ok loading
+// ====================================================================
+__global__ void hydro_gather_ok_kernel(
+    const int* __restrict__ stencil_idx,
+    const int* __restrict__ mesh_son,
+    int* __restrict__ ok_arr,
+    int ngrid, int stride)
+{
+    const int g = blockIdx.x;
+    if (g >= ngrid) return;
+    const int tid = threadIdx.x;
+    if (tid >= NCELLS_PER_GRID) return;
+
+    int sidx = stencil_idx[g + (long)stride * (long)tid];
+    int ok = 0;
+    if (sidx > 0) {
+        ok = (mesh_son[sidx - 1] > 0) ? 1 : 0;
+    }
+    ok_arr[g + (long)stride * (long)tid] = ok;
+}
+
 extern "C" {
 
 void hydro_cuda_init(
@@ -1692,6 +1718,139 @@ void hydro_cuda_unsplit_reduce_sync(int ngrid, int stream_slot)
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "CUDA hydro reduce error (slot %d, ngrid %d): %s\n",
+                stream_slot, ngrid, cudaGetErrorString(err));
+    }
+}
+
+// ====================================================================
+// GPU-gather + scatter-reduce pipeline:
+// H2D stencil idx -> gather kernel -> compute kernels -> scatter_reduce
+// -> D2H compact output.
+// Eliminates 98 MB H2D of uloc/gloc, replaces with ~7 MB stencil indices.
+// Requires cuda_mesh_upload() to have been called first.
+// ====================================================================
+void hydro_cuda_gather_reduce_async(
+    const int* h_stencil_idx, const int* h_stencil_grav,
+    const double* h_interp_vals,
+    double* h_add_unew, double* h_add_lm1,
+    double* h_add_divu_l, double* h_add_enew_l,
+    double* h_add_divu_lm1, double* h_add_enew_lm1,
+    double dx, double dy, double dz, double dt,
+    int ngrid, int stride, int n_interp, int stream_slot)
+{
+    pool_ensure_hydro_buffers(stream_slot, stride);
+    pool_ensure_hydro_inter_buffers(stream_slot, stride);
+    pool_ensure_stencil_buffers(stream_slot, stride, n_interp);
+    pool_ensure_reduce_buffers(stream_slot, stride);
+
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStream_t strm = s->stream;
+    long long ncell = cuda_get_mesh_ncell();
+
+    cudaEvent_t* ev = s->ev_profile;
+
+    // H2D: stencil indices (small: ~7 MB for stride=4096)
+    size_t idx_bytes = (size_t)stride * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
+    cudaEventRecord(ev[0], strm);
+    cudaMemcpyAsync(s->d_stencil_idx,  h_stencil_idx,  idx_bytes, cudaMemcpyHostToDevice, strm);
+    cudaMemcpyAsync(s->d_stencil_grav, h_stencil_grav, idx_bytes, cudaMemcpyHostToDevice, strm);
+
+    // Upload interpolation values (AoS: n_interp * NVAR doubles)
+    if (n_interp > 0 && h_interp_vals) {
+        size_t interp_bytes = (size_t)n_interp * NVAR * sizeof(double);
+        cudaMemcpyAsync(s->d_interp_vals, h_interp_vals, interp_bytes, cudaMemcpyHostToDevice, strm);
+    }
+    cudaEventRecord(ev[1], strm);
+
+    int nblocks  = ngrid;
+    int nthreads = NCELLS_PER_GRID;  // 216
+
+    // Kernel 0a: GPU gather (fills d_uloc and d_gloc from mesh)
+    hydro_gather_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_stencil_idx, s->d_stencil_grav, s->d_interp_vals,
+        cuda_get_mesh_uold(), cuda_get_mesh_f(),
+        s->d_uloc, s->d_gloc,
+        ncell, ngrid, stride);
+
+    // Kernel 0b: Compute ok flags from mesh_son via stencil_idx
+    hydro_gather_ok_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_stencil_idx, cuda_get_mesh_son(),
+        s->d_ok_int,
+        ngrid, stride);
+
+    double dtdx = dt / dx;
+    double dtdy = dt / dy;
+    double dtdz = dt / dz;
+
+    // Kernel 1: ctoprim
+    hydro_ctoprim_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_uloc, s->d_gloc, s->d_q, s->d_c, dt, stride);
+    cudaEventRecord(ev[2], strm);
+
+    // Kernel 2: uslope
+    hydro_uslope_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, stride);
+    cudaEventRecord(ev[3], strm);
+
+    // Kernel 3: trace3d
+    hydro_trace3d_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_q, s->d_dq, s->d_qm, s->d_qp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[4], strm);
+
+    // Zero flux and tmp output arrays
+    size_t flux_bytes = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * NVAR * NDIM * sizeof(double);
+    size_t tmp_bytes  = (size_t)stride * FLUX_NI * FLUX_NJ * FLUX_NK * 2 * NDIM * sizeof(double);
+    cudaMemsetAsync(s->d_flux, 0, flux_bytes, strm);
+    cudaMemsetAsync(s->d_tmp,  0, tmp_bytes,  strm);
+
+    // Kernel 4: Riemann fluxes
+    hydro_flux_kernel<<<nblocks, nthreads, 0, strm>>>(
+        s->d_qm, s->d_qp, s->d_flux, s->d_tmp, dtdx, dtdy, dtdz, stride);
+    cudaEventRecord(ev[5], strm);
+
+    // Kernel 5: difmag
+    hydro_difmag_kernel<<<nblocks, nthreads,
+        FLUX_NI * FLUX_NJ * FLUX_NK * sizeof(double), strm>>>(
+        s->d_q, s->d_uloc, s->d_flux, dx, dy, dz, dt, stride);
+    cudaEventRecord(ev[6], strm);
+
+    // Kernel 6: scatter_reduce (flux+tmp+ok -> add_unew+add_lm1)
+    double oneontwotondim = 0.125;  // 1/8 for 3D
+    hydro_scatter_reduce_kernel<<<nblocks, 256, 0, strm>>>(
+        s->d_flux, s->d_tmp, s->d_ok_int,
+        s->d_add_unew, s->d_add_lm1,
+        s->d_add_divu_l, s->d_add_enew_l,
+        s->d_add_divu_lm1, s->d_add_enew_lm1,
+        oneontwotondim, ngrid, stride);
+
+    // D2H: compact output only (~5 MB vs 98 MB)
+    size_t unew_bytes = (size_t)stride * 8 * NVAR * sizeof(double);
+    size_t lm1_bytes  = (size_t)stride * 6 * NVAR * sizeof(double);
+
+    cudaMemcpyAsync(h_add_unew, s->d_add_unew, unew_bytes, cudaMemcpyDeviceToHost, strm);
+    cudaMemcpyAsync(h_add_lm1,  s->d_add_lm1,  lm1_bytes,  cudaMemcpyDeviceToHost, strm);
+
+    if (h_add_divu_l) {
+        size_t divu_l_bytes   = (size_t)stride * 8 * sizeof(double);
+        size_t enew_l_bytes   = (size_t)stride * 8 * sizeof(double);
+        size_t divu_lm1_bytes = (size_t)stride * 6 * sizeof(double);
+        size_t enew_lm1_bytes = (size_t)stride * 6 * sizeof(double);
+        cudaMemcpyAsync(h_add_divu_l,   s->d_add_divu_l,   divu_l_bytes,   cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_enew_l,   s->d_add_enew_l,   enew_l_bytes,   cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_divu_lm1, s->d_add_divu_lm1, divu_lm1_bytes, cudaMemcpyDeviceToHost, strm);
+        cudaMemcpyAsync(h_add_enew_lm1, s->d_add_enew_lm1, enew_lm1_bytes, cudaMemcpyDeviceToHost, strm);
+    }
+
+    cudaEventRecord(ev[7], strm);
+}
+
+void hydro_cuda_gather_reduce_sync(int ngrid, int stream_slot)
+{
+    StreamSlot* s = &get_pool()[stream_slot];
+    cudaStreamSynchronize(s->stream);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA gather-reduce error (slot %d, ngrid %d): %s\n",
                 stream_slot, ngrid, cudaGetErrorString(err));
     }
 }

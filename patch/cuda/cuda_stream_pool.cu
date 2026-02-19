@@ -293,17 +293,44 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
     if (!pool_initialized) return;
     // Reallocate if size changed
     if (ncell != g_mesh_ncell) {
-        if (d_mesh_uold) cudaFree(d_mesh_uold);
-        if (d_mesh_f)    cudaFree(d_mesh_f);
-        if (d_mesh_son)  cudaFree(d_mesh_son);
-        cudaMalloc(&d_mesh_uold, (size_t)ncell * nvar * sizeof(double));
-        cudaMalloc(&d_mesh_f,    (size_t)ncell * ndim * sizeof(double));
-        cudaMalloc(&d_mesh_son,  (size_t)ncell * sizeof(int));
+        if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
+        if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
+        if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
+
+        double gb = ((double)ncell * (nvar + ndim) * sizeof(double) +
+                     (double)ncell * sizeof(int)) / (1024.0*1024.0*1024.0);
+
+        // Check available GPU memory before allocating
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        size_t need = (size_t)ncell * nvar * sizeof(double)
+                    + (size_t)ncell * ndim * sizeof(double)
+                    + (size_t)ncell * sizeof(int);
+        if (need > free_mem) {
+            fprintf(stderr, "CUDA mesh: SKIP — need %.1f GB but only %.1f GB free (total %.1f GB)\n",
+                    (double)need / (1024.0*1024.0*1024.0),
+                    (double)free_mem / (1024.0*1024.0*1024.0),
+                    (double)total_mem / (1024.0*1024.0*1024.0));
+            g_mesh_ncell = 0;
+            return;
+        }
+
+        cudaError_t e1 = cudaMalloc(&d_mesh_uold, (size_t)ncell * nvar * sizeof(double));
+        cudaError_t e2 = cudaMalloc(&d_mesh_f,    (size_t)ncell * ndim * sizeof(double));
+        cudaError_t e3 = cudaMalloc(&d_mesh_son,  (size_t)ncell * sizeof(int));
+        if (e1 != cudaSuccess || e2 != cudaSuccess || e3 != cudaSuccess) {
+            fprintf(stderr, "CUDA mesh: allocation FAILED (%.1f GB). Falling back to CPU gather.\n", gb);
+            if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
+            if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
+            if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
+            g_mesh_ncell = 0;
+            return;
+        }
         g_mesh_ncell = ncell;
-        printf("CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d)\n",
-               ((double)ncell * (nvar + ndim) * sizeof(double) +
-                (double)ncell * sizeof(int)) / (1024.0*1024.0*1024.0),
-               ncell, nvar);
+        printf("CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d, free=%.1f/%.1f GB)\n",
+               gb, ncell, nvar,
+               (double)(free_mem - need) / (1024.0*1024.0*1024.0),
+               (double)total_mem / (1024.0*1024.0*1024.0));
     }
     cudaMemcpy(d_mesh_uold, uold,
                (size_t)ncell * nvar * sizeof(double), cudaMemcpyHostToDevice);
@@ -460,3 +487,4 @@ double*   cuda_get_mesh_uold()  { return d_mesh_uold; }
 double*   cuda_get_mesh_f()     { return d_mesh_f; }
 int*      cuda_get_mesh_son()   { return d_mesh_son; }
 long long cuda_get_mesh_ncell() { return g_mesh_ncell; }
+int       cuda_mesh_is_ready()  { return (g_mesh_ncell > 0 && d_mesh_uold && d_mesh_son) ? 1 : 0; }

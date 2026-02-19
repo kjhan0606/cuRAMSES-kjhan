@@ -66,12 +66,15 @@ module hydro_hybrid_commons
   implicit none
 
   integer, parameter :: HYBRID_SUPER_SIZE = 4096
+  integer, parameter :: INTERP_INIT_CAP = 131072   ! 128K interpolated cells
 
   type gpu_state_t
-     ! H2D super buffers (uloc/gloc/ok uploaded per flush)
-     real(dp), allocatable :: super_uloc(:,:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2, 1:nvar)
-     real(dp), allocatable :: super_gloc(:,:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2, 1:ndim)
-     integer,  allocatable :: super_ok_int(:,:,:,:)       ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2)
+     ! GPU-gather stencil index buffers (H2D per flush, lightweight)
+     integer,  allocatable :: super_stencil_idx(:,:,:,:)  ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2)
+     integer,  allocatable :: super_stencil_grav(:,:,:,:) ! (SUPER_SIZE, iu1:iu2, ju1:ju2, ku1:ku2)
+     real(dp), allocatable :: super_interp_vals(:,:)      ! (nvar, interp_cap) AoS for GPU
+     integer :: super_n_interp = 0
+     integer :: interp_cap = 0
      ! D2H compact output buffers (scatter-reduce results)
      real(dp), allocatable :: super_add_unew(:,:,:)       ! (SUPER_SIZE, 8, nvar)
      real(dp), allocatable :: super_add_lm1(:,:,:)        ! (SUPER_SIZE, 6, nvar)
@@ -94,14 +97,6 @@ module hydro_hybrid_commons
 
 contains
 
-  subroutine pin_5d_dp(arr)
-    use iso_c_binding, only: c_loc, c_long_long
-    use hydro_cuda_interface, only: cuda_host_register_c
-    real(dp), intent(in), target :: arr(:,:,:,:,:)
-    integer :: irc
-    irc = cuda_host_register_c(c_loc(arr), int(size(arr)*8, c_long_long))
-  end subroutine
-
   subroutine pin_4d_int(arr)
     use iso_c_binding, only: c_loc, c_long_long
     use hydro_cuda_interface, only: cuda_host_register_c
@@ -117,6 +112,18 @@ contains
     integer :: irc
     irc = cuda_host_register_c(c_loc(arr), int(size(arr)*8, c_long_long))
   end subroutine
+
+  subroutine grow_interp_vals(gstate, nvar_in)
+    type(gpu_state_t), intent(inout) :: gstate
+    integer, intent(in) :: nvar_in
+    real(dp), allocatable :: tmp(:,:)
+    integer :: new_cap
+    new_cap = gstate%interp_cap * 2
+    allocate(tmp(nvar_in, new_cap))
+    tmp(:, 1:gstate%interp_cap) = gstate%super_interp_vals(:, 1:gstate%interp_cap)
+    call move_alloc(tmp, gstate%super_interp_vals)
+    gstate%interp_cap = new_cap
+  end subroutine grow_interp_vals
 
 end module hydro_hybrid_commons
 #endif
@@ -1076,15 +1083,14 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
   integer, intent(in) :: ilevel, ncache
   !-------------------------------------------------------------------
   ! Dynamic hybrid CPU/GPU dispatcher for Godunov solver.
-  ! Scatter-reduce: H2D uloc/gloc/ok → 5 kernels + scatter_reduce
-  ! → D2H compact add_unew/add_lm1 (~5 MB vs 98 MB).
-  ! No mesh upload required.
+  ! GPU-gather path: upload mesh once, send stencil indices to GPU,
+  ! GPU does gather + compute + scatter_reduce, D2H compact output.
   !-------------------------------------------------------------------
   integer :: tid, nthreads, stream_slot, igrid, ngrid
   integer :: it, i, ic, ivar, irc
   integer(kind=8) :: t_start, t_now, clock_rate
-  real(dp), pointer :: ptr_dp(:)
-  integer, pointer :: ptr_int(:)
+  integer(c_long_long) :: ncell_total
+  logical :: mesh_on_gpu
 
   call system_clock(count_rate=clock_rate)
 
@@ -1107,17 +1113,27 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      scatter_bufs(it)%count = 0
   end do
 
+  ! Upload mesh arrays to GPU (serial, once per godunov_fine call)
+  ncell_total = int(ncoarse, c_long_long) + int(twotondim, c_long_long) * int(ngridmax, c_long_long)
+  call cuda_mesh_upload_f(uold, f, son, ncell_total, int(nvar, c_int), int(ndim, c_int), poisson)
+  mesh_on_gpu = (cuda_mesh_is_ready_c() == 1)
+
   !$omp parallel private(tid, stream_slot, igrid, ngrid)
   tid = 0
   !$ tid = omp_get_thread_num()
-  stream_slot = int(cuda_acquire_stream_c())
+  if (mesh_on_gpu) then
+     stream_slot = int(cuda_acquire_stream_c())
+  else
+     stream_slot = -1  ! GPU mesh allocation failed, fall back to CPU
+  end if
 
   ! Ensure GPU state allocated (lazy, per-stream-slot)
   if (stream_slot >= 0) then
-     if (.not. allocated(gpu_states(stream_slot)%super_uloc)) then
-        allocate(gpu_states(stream_slot)%super_uloc(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2,1:nvar))
-        allocate(gpu_states(stream_slot)%super_gloc(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2,1:ndim))
-        allocate(gpu_states(stream_slot)%super_ok_int(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2))
+     if (.not. allocated(gpu_states(stream_slot)%super_stencil_idx)) then
+        allocate(gpu_states(stream_slot)%super_stencil_idx(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2))
+        allocate(gpu_states(stream_slot)%super_stencil_grav(1:HYBRID_SUPER_SIZE,iu1:iu2,ju1:ju2,ku1:ku2))
+        allocate(gpu_states(stream_slot)%super_interp_vals(1:nvar,1:INTERP_INIT_CAP))
+        gpu_states(stream_slot)%interp_cap = INTERP_INIT_CAP
         allocate(gpu_states(stream_slot)%super_add_unew(1:HYBRID_SUPER_SIZE,1:8,1:nvar))
         allocate(gpu_states(stream_slot)%super_add_lm1(1:HYBRID_SUPER_SIZE,1:6,1:nvar))
         allocate(gpu_states(stream_slot)%super_add_divu_l(1:HYBRID_SUPER_SIZE,1:8))
@@ -1125,10 +1141,9 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
         allocate(gpu_states(stream_slot)%super_add_divu_lm1(1:HYBRID_SUPER_SIZE,1:6))
         allocate(gpu_states(stream_slot)%super_add_enew_lm1(1:HYBRID_SUPER_SIZE,1:6))
         allocate(gpu_states(stream_slot)%super_ind_grid(1:HYBRID_SUPER_SIZE))
-        ! Pin H2D buffers for fast DMA via cudaHostRegister
-        call pin_5d_dp(gpu_states(stream_slot)%super_uloc)
-        call pin_5d_dp(gpu_states(stream_slot)%super_gloc)
-        call pin_4d_int(gpu_states(stream_slot)%super_ok_int)
+        ! Pin stencil index buffers for fast H2D DMA
+        call pin_4d_int(gpu_states(stream_slot)%super_stencil_idx)
+        call pin_4d_int(gpu_states(stream_slot)%super_stencil_grav)
         ! Pin D2H buffers
         call pin_3d_dp(gpu_states(stream_slot)%super_add_unew)
         call pin_3d_dp(gpu_states(stream_slot)%super_add_lm1)
@@ -1138,13 +1153,14 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
         !$omp end critical (bwtest)
      end if
      gpu_states(stream_slot)%off = 0
+     gpu_states(stream_slot)%super_n_interp = 0
   end if
 
   !$omp do schedule(dynamic)
   do igrid = 1, ncache, nvector
      ngrid = MIN(nvector, ncache - igrid + 1)
      if (stream_slot >= 0) then
-        call hybrid_gpu_gather_batch(gpu_states(stream_slot), ilevel, igrid, ngrid, &
+        call hybrid_gpu_stencil_batch(gpu_states(stream_slot), ilevel, igrid, ngrid, &
              scatter_bufs(tid), stream_slot)
      else
         call hybrid_cpu_process_batch(ilevel, igrid, ngrid, scatter_bufs(tid))
@@ -1155,7 +1171,7 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
   ! GPU threads: flush remaining super buffer
   if (stream_slot >= 0) then
      if (gpu_states(stream_slot)%off > 0) then
-        call hybrid_gpu_flush_scatter(gpu_states(stream_slot), stream_slot, &
+        call hybrid_gpu_gather_flush_scatter(gpu_states(stream_slot), stream_slot, &
              ilevel, scatter_bufs(tid))
      end if
      call cuda_release_stream_c(int(stream_slot, c_int))
@@ -1515,7 +1531,7 @@ end subroutine hybrid_cpu_process_batch
 !###########################################################
 !###########################################################
 !###########################################################
-subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, stream_slot)
+subroutine hybrid_gpu_stencil_batch(gstate, ilevel, igrid_start, ngrid, sbuf, stream_slot)
   use amr_commons
   use hydro_commons
   use hydro_parameters
@@ -1526,8 +1542,10 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
   integer, intent(in) :: ilevel, igrid_start, ngrid, stream_slot
   type(scatter_buf_t), intent(inout) :: sbuf
   !-------------------------------------------------------------------
-  ! GPU path: gather uloc/gloc/ok into super buffer, flush when full.
-  ! Traditional H2D approach (no mesh upload).
+  ! GPU-gather path: store stencil INDICES into super buffer instead
+  ! of copying data. GPU will gather from mesh using these indices.
+  ! For interpolated (coarse) cells, compute interpol_hydro on CPU and
+  ! store result in interp_vals buffer, referenced by negative index.
   !-------------------------------------------------------------------
   integer ,dimension(1:nvector)::ind_grid_loc,igrid_nbor,ind_cell
   integer ,dimension(1:nvector)::ind_exist,ind_nexist,ind_buffer
@@ -1537,8 +1555,8 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
   real(dp),dimension(1:nvector,0:twondim,1:nvar)::u1
   real(dp),dimension(1:nvector,1:twotondim,1:nvar)::u2
 
-  integer :: off, i, j, ivar, idim, ind_son, iskip, ind_father, nbuffer, nexist
-  integer :: i1,j1,k1,i2,j2,k2,i3,j3,k3
+  integer :: off, i, j, ivar, ind_son, iskip, ind_father, nbuffer, nexist
+  integer :: i1,j1,k1,i2,j2,k2,i3,j3,k3, cell_idx, n_interp_slot
   integer :: i1min,i1max,j1min,j1max,k1min,k1max
   integer :: i2min,i2max,j2min,j2max,k2min,k2max
   integer :: i3min,i3max,j3min,j3max,k3min,k3max
@@ -1567,8 +1585,8 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
      ind_grid_loc(i) = active(ilevel)%igrid(igrid_start+i-1)
   end do
 
-  ! Initialize gloc to zero (gravity source term default)
-  gstate%super_gloc(off+1:off+ngrid,iu1:iu2,ju1:ju2,ku1:ku2,1:ndim) = 0.0d0
+  ! Initialize stencil_grav to zero (default: no gravity)
+  gstate%super_stencil_grav(off+1:off+ngrid,iu1:iu2,ju1:ju2,ku1:ku2) = 0
 
   ! Gather father cells
   do i=1,ngrid
@@ -1576,7 +1594,7 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
   end do
   call get3cubefather(ind_cell,nbors_father_cells,nbors_father_grids,ngrid,ilevel)
 
-  ! Gather 6x6x6 stencil into super buffer at offset 'off'
+  ! Build stencil index arrays for 6x6x6 cells
   do k1=k1min,k1max
   do j1=j1min,j1max
   do i1=i1min,i1max
@@ -1595,6 +1613,7 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
         end if
      end do
 
+     ! Interpolate hydro variables for coarse cells (same as before)
      if(nbuffer>0)then
         call getnborfather(ind_buffer,ibuffer_father,nbuffer,ilevel)
         do j=0,twondim
@@ -1612,43 +1631,28 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
      do i2=i2min,i2max
         ind_son=1+i2+2*j2+4*k2
         iskip=ncoarse+(ind_son-1)*ngridmax
-        do i=1,nexist
-           ind_cell(i)=iskip+igrid_nbor(ind_exist(i))
-        end do
 
         i3=1; j3=1; k3=1
         if(ndim>0)i3=1+2*(i1-1)+i2
         if(ndim>1)j3=1+2*(j1-1)+j2
         if(ndim>2)k3=1+2*(k1-1)+k2
 
-        ! Store uloc values
-        do ivar=1,nvar
-           do i=1,nexist
-              gstate%super_uloc(off+ind_exist(i),i3,j3,k3,ivar)=uold(ind_cell(i),ivar)
-           end do
-           do i=1,nbuffer
-              gstate%super_uloc(off+ind_nexist(i),i3,j3,k3,ivar)=u2(i,ind_son,ivar)
-           end do
-        end do
-
-        ! Store gloc values (gravity)
-        if(poisson)then
-           do idim=1,ndim
-              do i=1,nexist
-                 gstate%super_gloc(off+ind_exist(i),i3,j3,k3,idim)=f(ind_cell(i),idim)
-              end do
-              do i=1,nbuffer
-                 gstate%super_gloc(off+ind_nexist(i),i3,j3,k3,idim)=f(ibuffer_father(i,0),idim)
-              end do
-           end do
-        end if
-
-        ! Store ok flags as integer (1=refined, 0=not)
+        ! Existing fine grids: store cell index (positive)
         do i=1,nexist
-           gstate%super_ok_int(off+ind_exist(i),i3,j3,k3) = merge(1,0,son(ind_cell(i))>0)
+           cell_idx = iskip + igrid_nbor(ind_exist(i))
+           gstate%super_stencil_idx(off+ind_exist(i),i3,j3,k3) = cell_idx
+           if(poisson) gstate%super_stencil_grav(off+ind_exist(i),i3,j3,k3) = cell_idx
         end do
+
+        ! Interpolated coarse cells: store interp values, negative index
         do i=1,nbuffer
-           gstate%super_ok_int(off+ind_nexist(i),i3,j3,k3) = 0
+           gstate%super_n_interp = gstate%super_n_interp + 1
+           n_interp_slot = gstate%super_n_interp
+           if (n_interp_slot > gstate%interp_cap) call grow_interp_vals(gstate, nvar)
+           gstate%super_interp_vals(1:nvar, n_interp_slot) = u2(i, ind_son, 1:nvar)
+           gstate%super_stencil_idx(off+ind_nexist(i),i3,j3,k3) = -n_interp_slot
+           ! Gravity: straight injection from father cell
+           if(poisson) gstate%super_stencil_grav(off+ind_nexist(i),i3,j3,k3) = ibuffer_father(i,0)
         end do
 
      end do
@@ -1668,15 +1672,15 @@ subroutine hybrid_gpu_gather_batch(gstate, ilevel, igrid_start, ngrid, sbuf, str
 
   ! Flush if buffer full
   if (gstate%off + nvector > HYBRID_SUPER_SIZE) then
-     call hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
+     call hybrid_gpu_gather_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   end if
 
-end subroutine hybrid_gpu_gather_batch
+end subroutine hybrid_gpu_stencil_batch
 !###########################################################
 !###########################################################
 !###########################################################
 !###########################################################
-subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
+subroutine hybrid_gpu_gather_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   use amr_commons
   use hydro_commons
   use hydro_parameters
@@ -1690,9 +1694,10 @@ subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   integer, intent(in) :: stream_slot, ilevel
   type(scatter_buf_t), intent(inout) :: sbuf
   !-------------------------------------------------------------------
-  ! GPU compute + scatter for accumulated super buffer.
-  ! Scatter-reduce: GPU does 5 kernels + scatter_reduce kernel.
-  ! D2H: only compact add_unew/add_lm1 (~5 MB vs 98 MB).
+  ! GPU-gather + scatter-reduce pipeline for accumulated super buffer.
+  ! H2D: stencil indices (~7 MB) + interp_vals (tiny)
+  ! GPU: gather from mesh → compute → scatter_reduce
+  ! D2H: compact add_unew/add_lm1 (~5 MB)
   ! CPU applies results to unew/sbuf.
   !-------------------------------------------------------------------
   integer :: super_total, g, ig, ic, igridn_tmp, icell_nbor, idx
@@ -1710,18 +1715,19 @@ subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   scale = boxlen/dble(nx_loc)
   dx = 0.5D0**ilevel*scale
 
-  ! GPU compute: H2D uloc/gloc/ok → 5 kernels + scatter_reduce → D2H compact
+  ! GPU compute: H2D stencil idx → gather → 5 kernels + scatter_reduce → D2H compact
   call system_clock(t_start)
-  call hydro_cuda_unsplit_reduce_async_f( &
-       gstate%super_uloc, gstate%super_gloc, gstate%super_ok_int, &
+  call hydro_cuda_gather_reduce_async_f( &
+       gstate%super_stencil_idx, gstate%super_stencil_grav, &
+       gstate%super_interp_vals, &
        gstate%super_add_unew, gstate%super_add_lm1, &
        gstate%super_add_divu_l, gstate%super_add_enew_l, &
        gstate%super_add_divu_lm1, gstate%super_add_enew_lm1, &
        real(dx, c_double), real(dx, c_double), real(dx, c_double), &
        real(dtnew(ilevel), c_double), &
        int(super_total, c_int), int(HYBRID_SUPER_SIZE, c_int), &
-       int(stream_slot, c_int), pressure_fix)
-  call hydro_cuda_unsplit_reduce_sync_f( &
+       int(gstate%super_n_interp, c_int), int(stream_slot, c_int), pressure_fix)
+  call hydro_cuda_gather_reduce_sync_f( &
        int(super_total, c_int), int(stream_slot, c_int))
   call hydro_cuda_profile_accumulate_c(int(stream_slot, c_int), int(super_total, c_int))
   call system_clock(t_now)
@@ -1779,6 +1785,7 @@ subroutine hybrid_gpu_flush_scatter(gstate, stream_slot, ilevel, sbuf)
   n_gpu_flushes = n_gpu_flushes + 1
 
   gstate%off = 0
+  gstate%super_n_interp = 0
 
-end subroutine hybrid_gpu_flush_scatter
+end subroutine hybrid_gpu_gather_flush_scatter
 #endif

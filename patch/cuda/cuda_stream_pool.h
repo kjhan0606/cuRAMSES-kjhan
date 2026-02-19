@@ -19,7 +19,9 @@
 #define NVECTOR 32
 #endif
 
+#ifndef N_STREAMS
 #define N_STREAMS 1
+#endif
 
 // Stencil ranges (matches hydro_parameters.f90: iu1:iu2 = -1:4)
 #define IU1 (-1)
@@ -119,6 +121,7 @@ extern "C" {
     void cuda_mesh_upload(const double* uold, const double* f_grav,
                           const int* son, long long ncell, int nvar, int ndim);
     void cuda_mesh_free(void);
+    int  cuda_mesh_is_ready(void);  // returns 1 if mesh uploaded successfully
 
     // Scatter-reduce: 5 kernels + scatter_reduce kernel, D2H compact output
     void hydro_cuda_unsplit_reduce_async(
@@ -129,6 +132,17 @@ extern "C" {
         double dx, double dy, double dz, double dt,
         int ngrid, int stride, int stream_slot);
     void hydro_cuda_unsplit_reduce_sync(int ngrid, int stream_slot);
+
+    // GPU-gather + scatter-reduce: stencil idx -> GPU gather -> compute -> scatter_reduce -> compact D2H
+    void hydro_cuda_gather_reduce_async(
+        const int* h_stencil_idx, const int* h_stencil_grav,
+        const double* h_interp_vals,
+        double* h_add_unew, double* h_add_lm1,
+        double* h_add_divu_l, double* h_add_enew_l,
+        double* h_add_divu_lm1, double* h_add_enew_lm1,
+        double dx, double dy, double dz, double dt,
+        int ngrid, int stride, int n_interp, int stream_slot);
+    void hydro_cuda_gather_reduce_sync(int ngrid, int stream_slot);
 #ifdef __cplusplus
 }
 #endif

@@ -60,6 +60,11 @@ module hydro_cuda_interface
      subroutine cuda_mesh_free_c() bind(C, name='cuda_mesh_free')
      end subroutine
 
+     integer(c_int) function cuda_mesh_is_ready_c() &
+          bind(C, name='cuda_mesh_is_ready')
+       import :: c_int
+     end function
+
      subroutine hydro_cuda_gather_unsplit_async_c( &
           h_stencil_idx, h_stencil_grav, h_interp_vals, &
           h_flux, h_tmp, &
@@ -77,6 +82,29 @@ module hydro_cuda_interface
           bind(C, name='hydro_cuda_gather_unsplit_sync')
        import :: c_double, c_int, c_ptr
        type(c_ptr), value :: h_flux, h_tmp
+       integer(c_int), value :: ngrid, stream_slot
+     end subroutine
+
+     ! GPU-gather + scatter-reduce: stencil idx -> gather -> compute -> scatter_reduce -> compact D2H
+     subroutine hydro_cuda_gather_reduce_async_c( &
+          h_stencil_idx, h_stencil_grav, h_interp_vals, &
+          h_add_unew, h_add_lm1, &
+          h_add_divu_l, h_add_enew_l, &
+          h_add_divu_lm1, h_add_enew_lm1, &
+          dx, dy, dz, dt, ngrid, stride, n_interp, stream_slot) &
+          bind(C, name='hydro_cuda_gather_reduce_async')
+       import :: c_double, c_int, c_ptr
+       type(c_ptr), value :: h_stencil_idx, h_stencil_grav, h_interp_vals
+       type(c_ptr), value :: h_add_unew, h_add_lm1
+       type(c_ptr), value :: h_add_divu_l, h_add_enew_l
+       type(c_ptr), value :: h_add_divu_lm1, h_add_enew_lm1
+       real(c_double), value :: dx, dy, dz, dt
+       integer(c_int), value :: ngrid, stride, n_interp, stream_slot
+     end subroutine
+
+     subroutine hydro_cuda_gather_reduce_sync_c(ngrid, stream_slot) &
+          bind(C, name='hydro_cuda_gather_reduce_sync')
+       import :: c_int
        integer(c_int), value :: ngrid, stream_slot
      end subroutine
 
@@ -387,6 +415,60 @@ contains
     call hydro_cuda_gather_unsplit_sync_c( &
          c_loc(flux(1)), c_loc(tmp(1)), ngrid, stream_slot)
   end subroutine hydro_cuda_gather_unsplit_sync_f
+
+  !-----------------------------------------------------------
+  ! GPU-gather + scatter-reduce async: stencil indices -> GPU gather+compute+scatter -> compact D2H
+  !-----------------------------------------------------------
+  subroutine hydro_cuda_gather_reduce_async_f( &
+       stencil_idx, stencil_grav, interp_vals, &
+       add_unew, add_lm1, &
+       add_divu_l, add_enew_l, add_divu_lm1, add_enew_lm1, &
+       dx, dy, dz, dt, ngrid, stride, n_interp, stream_slot, has_pfix)
+    implicit none
+    integer(c_int), intent(in), target :: stencil_idx(*), stencil_grav(*)
+    real(c_double), intent(in), target :: interp_vals(*)
+    real(c_double), intent(inout), target :: add_unew(*), add_lm1(*)
+    real(c_double), intent(inout), target :: add_divu_l(*), add_enew_l(*)
+    real(c_double), intent(inout), target :: add_divu_lm1(*), add_enew_lm1(*)
+    real(c_double), intent(in) :: dx, dy, dz, dt
+    integer(c_int), intent(in) :: ngrid, stride, n_interp, stream_slot
+    logical, intent(in) :: has_pfix
+    type(c_ptr) :: pfix_ptr_dl, pfix_ptr_el, pfix_ptr_dlm1, pfix_ptr_elm1
+    type(c_ptr) :: interp_ptr
+
+    if (n_interp > 0) then
+       interp_ptr = c_loc(interp_vals(1))
+    else
+       interp_ptr = c_null_ptr
+    end if
+
+    if (has_pfix) then
+       pfix_ptr_dl   = c_loc(add_divu_l(1))
+       pfix_ptr_el   = c_loc(add_enew_l(1))
+       pfix_ptr_dlm1 = c_loc(add_divu_lm1(1))
+       pfix_ptr_elm1 = c_loc(add_enew_lm1(1))
+    else
+       pfix_ptr_dl   = c_null_ptr
+       pfix_ptr_el   = c_null_ptr
+       pfix_ptr_dlm1 = c_null_ptr
+       pfix_ptr_elm1 = c_null_ptr
+    end if
+
+    call hydro_cuda_gather_reduce_async_c( &
+         c_loc(stencil_idx(1)), c_loc(stencil_grav(1)), interp_ptr, &
+         c_loc(add_unew(1)), c_loc(add_lm1(1)), &
+         pfix_ptr_dl, pfix_ptr_el, pfix_ptr_dlm1, pfix_ptr_elm1, &
+         dx, dy, dz, dt, ngrid, stride, n_interp, stream_slot)
+  end subroutine hydro_cuda_gather_reduce_async_f
+
+  !-----------------------------------------------------------
+  ! GPU-gather + scatter-reduce sync: wait for completion
+  !-----------------------------------------------------------
+  subroutine hydro_cuda_gather_reduce_sync_f(ngrid, stream_slot)
+    implicit none
+    integer(c_int), intent(in) :: ngrid, stream_slot
+    call hydro_cuda_gather_reduce_sync_c(ngrid, stream_slot)
+  end subroutine hydro_cuda_gather_reduce_sync_f
 
   !-----------------------------------------------------------
   ! gradient_phi CUDA: async launch
