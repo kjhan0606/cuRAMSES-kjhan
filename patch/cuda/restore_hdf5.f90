@@ -115,8 +115,11 @@ subroutine restore_amr_hdf5()
   !=====================================================
   ! Step 2: Check ncpu_file vs ncpu
   !=====================================================
-  if(ncpu_file /= ncpu) then
-     if(ordering /= 'ksection') then
+  if(ncpu_file /= ncpu .or. ordering == 'ksection') then
+     ! For ksection ordering, always use the distributed varcpu path
+     ! (the same-ncpu path replicates ALL grids on every rank, requiring
+     !  ngridmax >= total_grids, which is prohibitively expensive)
+     if(ncpu_file /= ncpu .and. ordering /= 'ksection') then
         if(myid==1) then
            write(*,*) 'ERROR: Variable-ncpu restart only supported with ksection ordering.'
            write(*,*) '       File ncpu=', ncpu_file, ', current ncpu=', ncpu
