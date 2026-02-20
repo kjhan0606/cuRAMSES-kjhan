@@ -35,7 +35,6 @@ docs/manual/*.toc
 docs/manual/missfont.log
 
 # personal job
-misc/
 docs/src/
 docs/license.txt
 
