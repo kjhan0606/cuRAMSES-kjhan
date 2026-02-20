@@ -27,6 +27,11 @@ subroutine multigrid_fine(ilevel,icount)
    use amr_commons
    use poisson_commons
    use poisson_parameters
+#ifdef HYDRO_CUDA
+   use poisson_cuda_interface
+   use iso_c_binding
+   use cuda_commons, only: cuda_pool_is_initialized_c
+#endif
 
    implicit none
 #ifndef WITHOUTMPI
@@ -52,6 +57,15 @@ subroutine multigrid_fine(ilevel,icount)
    real(kind=8) :: err, last_err
 
    logical :: allmasked, allmasked_tot
+
+   ! GPU Poisson MG variables
+   logical :: use_mg_gpu
+#ifdef HYDRO_CUDA
+   integer(c_long_long) :: ncell_tot_c
+   integer :: ncell_tot, safe_int
+   real(kind=8) :: dx_mg, dx2_mg, oneoverdx2_mg, dx2_norm_mg
+   real(kind=8) :: gpu_norm2, dummy_norm2
+#endif
 
    if(gravity_type>0)return
    if(numbtot(1,ilevel)==0)return
@@ -182,29 +196,96 @@ subroutine multigrid_fine(ilevel,icount)
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
 
+   ! GPU setup: upload MG arrays to GPU if CUDA available
+   use_mg_gpu = .false.
+#ifdef HYDRO_CUDA
+   if(cuda_pool_is_initialized_c() /= 0) then
+      ncell_tot = ncoarse + twotondim*ngridmax
+      ncell_tot_c = int(ncell_tot, c_long_long)
+      dx_mg  = 0.5d0**ilevel
+      dx2_mg = dx_mg*dx_mg
+      oneoverdx2_mg = 1.0d0/dx2_mg
+      dx2_norm_mg = dx_mg**(ndim)
+      call cuda_mg_upload_c( &
+           phi, f, flag2, ncell_tot_c, &
+           nbor_grid_fine, active(ilevel)%igrid, &
+           int(active(ilevel)%ngrid, c_int))
+      use_mg_gpu = (cuda_mg_is_ready_c() /= 0)
+      if(use_mg_gpu .and. myid==1) then
+         write(*,'(A,I2,A,I8,A)') ' CUDA MG: GPU mode ON for level ', &
+              ilevel,' (',active(ilevel)%ngrid,' grids)'
+      end if
+   end if
+#endif
+
    iter = 0
    err = 1.0d0
    main_iteration_loop: do
       iter=iter+1
+
       ! Pre-smoothing
       do i=1,ngs_fine
-         call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-         call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            safe_int = 0
+            if(safe_mode(ilevel)) safe_int = 1
+            call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
+            call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
+            call cuda_mg_download_phi_c(phi, ncell_tot_c)
+         else
+#endif
+            call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
+            call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+#ifdef HYDRO_CUDA
+         end if
+#endif
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
+         end if
+#endif
       end do
 
       ! Compute residual and restrict into upper level RHS
       ! Fuse residual + norm computation on first iteration
-      if(iter==1) then
-         call cmp_residual_mg_fine(ilevel, i_res_norm2)
+#ifdef HYDRO_CUDA
+      if(use_mg_gpu) then
+         if(iter==1) then
+            call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), &
+                 oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
+                 gpu_norm2, 1)
+            i_res_norm2 = gpu_norm2
 #ifndef WITHOUTMPI
-         call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
-                 & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-         i_res_norm2=i_res_norm2_tot
+            call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
+                    & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+            i_res_norm2=i_res_norm2_tot
 #endif
+         else
+            call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), &
+                 oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
+                 dummy_norm2, 0)
+         end if
+         call cuda_mg_download_f1_c(f, ncell_tot_c)
       else
-         call cmp_residual_mg_fine(ilevel)
+#endif
+         if(iter==1) then
+            call cmp_residual_mg_fine(ilevel, i_res_norm2)
+#ifndef WITHOUTMPI
+            call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
+                    & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+            i_res_norm2=i_res_norm2_tot
+#endif
+         else
+            call cmp_residual_mg_fine(ilevel)
+         end if
+#ifdef HYDRO_CUDA
       end if
+#endif
 
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
@@ -228,17 +309,53 @@ subroutine multigrid_fine(ilevel,icount)
          ! Interpolate coarse solution and correct fine solution
          call interpolate_and_correct_fine(ilevel)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
+         end if
+#endif
       end if
 
       ! Post-smoothing
       do i=1,ngs_fine
-         call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
-         call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            safe_int = 0
+            if(safe_mode(ilevel)) safe_int = 1
+            call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
+            call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
+            call cuda_mg_download_phi_c(phi, ncell_tot_c)
+         else
+#endif
+            call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
+            call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+#ifdef HYDRO_CUDA
+         end if
+#endif
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
+         end if
+#endif
       end do
 
       ! Update fine residual (fused with norm computation)
-      call cmp_residual_mg_fine(ilevel, res_norm2)
+#ifdef HYDRO_CUDA
+      if(use_mg_gpu) then
+         call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
+              int(ngridmax,c_int), int(ncoarse,c_int), &
+              oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
+              gpu_norm2, 1)
+         res_norm2 = gpu_norm2
+      else
+#endif
+         call cmp_residual_mg_fine(ilevel, res_norm2)
+#ifdef HYDRO_CUDA
+      end if
+#endif
 #ifndef WITHOUTMPI
       call MPI_ALLREDUCE(res_norm2,res_norm2_tot,1, &
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
@@ -262,6 +379,11 @@ subroutine multigrid_fine(ilevel,icount)
       end if
 
    end do main_iteration_loop
+
+   ! Cleanup GPU MG state
+#ifdef HYDRO_CUDA
+   if(use_mg_gpu) call cuda_mg_free_c()
+#endif
 
    ! Free pre-computed neighbor grids
    if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)

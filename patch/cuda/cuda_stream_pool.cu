@@ -166,10 +166,11 @@ void cuda_pool_init(int local_rank) {
 
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, g_device_id);
-    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d)\n",
+    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d, PCIe %04x:%02x)\n",
            local_rank, g_device_id, prop.name,
            prop.totalGlobalMem / 1073741824.0,
-           prop.major, prop.minor);
+           prop.major, prop.minor,
+           prop.pciBusID, prop.pciDeviceID);
 
     for (int s = 0; s < N_STREAMS; s++) {
         cudaStreamCreateWithFlags(&g_pool[s].stream, cudaStreamNonBlocking);
@@ -285,6 +286,8 @@ void cuda_pool_finalize(void) {
     if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
     if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
     g_mesh_ncell = 0;
+    // Free Poisson MG GPU arrays
+    cuda_mg_finalize();
     pool_initialized = false;
     printf("CUDA pool: finalized.\n");
 }

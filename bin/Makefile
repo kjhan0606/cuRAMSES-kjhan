@@ -66,8 +66,8 @@ ifdef USE_CUDA
   NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR) -DN_STREAMS=$(N_CUDA_STREAMS)
   FFLAGS += -DHYDRO_CUDA
   LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
-  CUDA_MODOBJ = cuda_commons.o hydro_cuda_interface.o
-  CUDA_OBJS = cuda_stream_pool.o hydro_cuda_kernels.o
+  CUDA_MODOBJ = cuda_commons.o hydro_cuda_interface.o poisson_cuda_interface.o
+  CUDA_OBJS = cuda_stream_pool.o hydro_cuda_kernels.o poisson_cuda_kernels.o
 else
   LIBS_CUDA =
   CUDA_MODOBJ =
@@ -146,7 +146,9 @@ ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
 hydro_cuda_kernels.o: cuda_stream_pool.o
+poisson_cuda_kernels.o: cuda_stream_pool.o
 hydro_cuda_interface.o: cuda_commons.o
+poisson_cuda_interface.o: cuda_commons.o
 cuda_commons.o: amr_commons.kjhan.o
 endif
 FORCE:

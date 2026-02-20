@@ -144,6 +144,22 @@ extern "C" {
         double dx, double dy, double dz, double dt,
         int ngrid, int stride, int n_interp, int stream_slot);
     void hydro_cuda_gather_reduce_sync(int ngrid, int stream_slot);
+
+    // GPU-accelerated Poisson MG
+    void cuda_mg_upload(const double* phi, const double* f,
+                        const int* flag2, long long ncell,
+                        const int* nbor_grid, const int* igrid, int ngrid);
+    void cuda_mg_download_phi(double* phi, long long ncell);
+    void cuda_mg_upload_phi(const double* phi, long long ncell);
+    void cuda_mg_download_f1(double* f1, long long ncell);
+    void cuda_mg_gauss_seidel(int ngrid, int ngridmax, int ncoarse,
+                              double dx2, int color, int safe_mode);
+    void cuda_mg_residual(int ngrid, int ngridmax, int ncoarse,
+                          double oneoverdx2, double dtwondim, double dx2_norm,
+                          double* norm2, int compute_norm);
+    void cuda_mg_free(void);
+    void cuda_mg_finalize(void);
+    int  cuda_mg_is_ready(void);
 #ifdef __cplusplus
 }
 #endif
