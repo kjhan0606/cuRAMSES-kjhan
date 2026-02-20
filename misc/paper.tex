@@ -188,18 +188,16 @@ introduce a recursive \ksec\ domain decomposition
 (Section~\ref{sec:ksection}) that replaces Hilbert ordering with a
 hierarchical multi-way spatial partitioning, enabling MPI exchange with
 $\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table \citep{Morton1966}
-(Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely,
-saving $\sim$240\,MB per rank, and on-demand allocation of redundant
-large arrays (Section~\ref{sec:memory}) yields over 1\,GB of
-additional savings. Algorithmic optimizations to the multigrid Poisson
+(Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely
+and, together with on-demand allocation of redundant large arrays,
+saves over 1\,GB of memory per rank. Algorithmic optimizations to the multigrid Poisson
 solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
 from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
 scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
 AGN feedback by orders of magnitude. We also implement variable-$\ncpu$
-restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}), along with
-miscellaneous improvements described in Section~\ref{sec:misc}.
-A hybrid CPU/GPU dispatch model
-(Section~\ref{sec:hybrid}) dynamically offloads compute-intensive
+restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}).
+GPU-accelerated solvers
+(Section~\ref{sec:hybrid}) dynamically offload compute-intensive
 routines to GPU streams at runtime.
 Performance benchmarks are presented in
 Section~\ref{sec:performance}, and we conclude in
@@ -304,14 +302,10 @@ Every node also carries the minimum and maximum rank indices of all
 leaves in its subtree, enabling rapid range queries during the
 hierarchical exchange.
 
-The total number of tree nodes is
-\begin{equation}
-N_{\rm nodes} = 1 + \sum_{l=1}^{L} \prod_{i=1}^{l} k_i \leq
-1 + L \cdot k_{\rm max}^L,
-\label{eq:tree_nodes}
-\end{equation}
-which for practical values ($\ncpu \leq 10^5$) is at most a few
-hundred, negligible overhead.
+The total number of tree nodes,
+$N_{\rm nodes} = 1 + \sum_{l=1}^{L} \prod_{i=1}^{l} k_i$,
+is at most a few hundred for practical values of $\ncpu$
+($\ncpu \leq 10^5$), representing negligible overhead.
 
 
 \subsection{Load-Balanced Wall Placement}
@@ -319,7 +313,7 @@ hundred, negligible overhead.
 
 When the tree is updated during load balancing (every \code{nremap}
 coarse steps), the wall positions are adjusted by iterative
-dichotomy so that each partition receives a load proportional to the
+binary search so that each partition receives a load proportional to the
 number of ranks it contains.
 
 The procedure operates level by level, top to bottom. At level $l$:
@@ -331,7 +325,7 @@ The procedure operates level by level, top to bottom. At level $l$:
   resolution $\Delta x_{\rm hist}$.
 
 \item For each of the $k_l - 1$ walls within each node, a binary
-  search (dichotomy) adjusts the wall position until the cumulative
+  search adjusts the wall position until the cumulative
   load on the left side matches the target fraction. The target
   cumulative fraction for wall $j$ in a node spanning ranks
   $[i_{\rm min}, i_{\rm max}]$ with total count
@@ -350,7 +344,7 @@ The procedure operates level by level, top to bottom. At level $l$:
 
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
   all $\ncpu$ ranks to obtain the global cumulative load at each wall
-  position. The dichotomy converges when the relative load imbalance
+  position. The binary search converges when the relative load imbalance
   $|\hat{L}_j - L_j^{\rm target}| / L_j^{\rm target}$ falls below a
   tolerance $\epsilon_{\rm tol}$ (typically 1\,per\,cent), or when the
   wall position can no longer be resolved at the histogram resolution.
@@ -391,6 +385,54 @@ Our tests with $200\,\mathrm{M}$ particles on 12 ranks show that
 memory-weighted balancing reduces the peak-to-mean memory ratio from
 2.5 to 1.3 without affecting physics results (identical
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$ to machine precision).
+
+The parameter \code{nremap} controls the frequency of load-rebalancing
+operations (every \code{nremap} coarse steps). We changed the default
+from \code{nremap = 0} (rebalance every step) to \code{nremap = 5}
+based on systematic tests with $200\,\mathrm{M}$ particles on 12 ranks over
+10 coarse steps:
+
+\begin{table}
+\centering
+\caption{Effect of \code{nremap} on total runtime and load-balance
+overhead. All configurations produce identical physics results
+($e_{\rm cons} = 3.77 \times 10^{-3}$ at step 10).}
+\label{tab:nremap}
+\begin{tabular}{cccc}
+\toprule
+\code{nremap} & Total (s) & LB time (s) & LB fraction \\
+\midrule
+1  & 303.8 & 64.4 & 21.2\% \\
+3  & 269.9 & 24.7 &  9.1\% \\
+5  & 249.8 & 15.7 &  6.3\% \\
+10 & 258.6 & 11.6 &  4.5\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The optimal value \code{nremap = 5} balances the cost of rebalancing
+against the growing imbalance that accumulates between rebalancing
+steps. Higher values ($\code{nremap} = 10$) reduce LB overhead further
+but allow imbalance to grow enough to slow other operations, resulting
+in a net increase in total runtime.
+
+To identify bottlenecks in the load-balancing procedure, we added
+internal timing instrumentation that reports the wall-clock time of
+each phase:
+(i) \code{numbp\_sync} (MPI synchronization of particle counts for
+virtual grids),
+(ii) \code{cmp\_new\_cpu\_map} (histogram construction and wall
+finding),
+(iii) \code{expand\_pass} (ghost-zone expansion after grid migration),
+(iv) \code{grid\_migration} (actual grid transfer between ranks),
+(v) \code{allreduce+cpumap\_update} (global reduction and CPU map
+reconstruction), and
+(vi) \code{shrink\_pass} (removal of migrated grids from source rank).
+Profiling reveals that \code{allreduce+cpumap\_update} dominates,
+consuming approximately 50\,per\,cent of the total load-balance time.
+This motivates the \code{nremap = 5} default, as reducing the
+frequency of these expensive global operations has a disproportionate
+impact on total runtime.
 
 
 \section{HIERARCHICAL MPI COMMUNICATION}
@@ -586,6 +628,18 @@ the exclusive hierarchical exchange, and the receiver reconstructs
 its emission arrays from the incoming data. This eliminates the last
 remaining all-to-all communication pattern in the AMR infrastructure.
 
+The \ksec\ exchange routines and virtual boundary functions contain
+numerous small arrays (child counts, peer lists, MPI request handles,
+receive buffers) that are allocated and deallocated on every call. At
+100+ calls per time step, the cumulative allocation overhead becomes
+non-negligible. We convert these to \code{save} variables with
+grow-only semantics: the buffer is allocated on first use and grown
+(but never shrunk) when a larger size is needed. The receive buffer's
+first dimension must match the \code{nprops} parameter exactly (for
+correct MPI stride), so reallocation is triggered when either the
+capacity or the property count changes. This optimization eliminates
+approximately 100 allocation/deallocation pairs per exchange call.
+
 
 \subsection{Complexity Analysis}
 \label{sec:ksec_complexity}
@@ -613,9 +667,9 @@ Buffer memory & $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
 
 
 % ===================================================================
-% 3. MORTON KEY OCTREE
+% 4. MORTON KEY HASH TABLE AND MEMORY OPTIMIZATIONS
 % ===================================================================
-\section{MORTON KEY OCTREE FOR NEIGHBOUR LOOKUP}
+\section{MORTON KEY HASH TABLE AND MEMORY OPTIMIZATIONS}
 \label{sec:morton}
 
 \subsection{The Nbor Array Problem}
@@ -626,19 +680,14 @@ of which is \code{nbor(1:ngridmax, 1:twondim)} --- a six-column
 integer array that records, for each grid, the cell index of its
 neighbour in each of the six Cartesian directions ($\pm x$, $\pm y$,
 $\pm z$). Each entry is a 64-bit integer occupying 8\,bytes, so this
-array consumes
-\begin{equation}
-M_{\rm nbor} = 6 \times \ngridmax \times 8\,\text{bytes}
-= 48\,\ngridmax\,\text{bytes}.
-\label{eq:nbor_memory}
-\end{equation}
-For $\ngridmax = 5\,\mathrm{M}$, this is 240\,MB per rank. Moreover,
-the \code{nbor} array must be maintained during grid creation,
+array consumes $48\,\ngridmax$ bytes --- 240\,MB for
+$\ngridmax = 5\,\mathrm{M}$.
+Moreover, the \code{nbor} array must be maintained during grid creation,
 deletion, defragmentation, and inter-rank migration --- a significant
 source of code complexity and a potential source of bugs.
 
 
-\subsection{Morton Key Encoding}
+\subsection{Morton Key Encoding and Neighbour Arithmetic}
 \label{sec:morton_encoding}
 
 A Morton key (also known as a Z-order key) is a 64-bit integer formed
@@ -680,39 +729,29 @@ stores only the grids that are actually allocated, making the
 look-up cost independent of the total number of potential grid
 positions at that level.
 
-
-\subsection{Neighbour Finding via Morton Arithmetic}
-\label{sec:morton_neighbor}
-
 The neighbour of a grid in direction $j$ (using the \ramses\ convention
 $1 = -x$, $2 = +x$, $3 = -y$, $4 = +y$, $5 = -z$, $6 = +z$) is
 obtained by:
-\begin{enumerate}
-\item Decoding the Morton key via the inverse map
-  $(i_x, i_y, i_z) = M^{-1}(\text{key})$.
-\item Incrementing or decrementing the appropriate coordinate.
-\item Applying periodic wrapping if the coordinate exceeds
-  $[0, n_d \cdot 2^{l-1})$.
-\item Re-encoding to obtain the neighbour's Morton key.
-\end{enumerate}
-
+(i) decoding the Morton key via the inverse map
+  $(i_x, i_y, i_z) = M^{-1}(\text{key})$;
+(ii) incrementing or decrementing the appropriate coordinate;
+(iii) applying periodic wrapping if the coordinate exceeds
+  $[0, n_d \cdot 2^{l-1})$;
+(iv) re-encoding to obtain the neighbour's Morton key.
 The parent key is obtained by a 3-bit right shift: $M_{\rm parent} =
 M \gg 3$. A child key is obtained by a 3-bit left shift plus the
 child index (0--7): $M_{\rm child} = (M \ll 3) \,|\, i_{\rm child}$.
 
 
-\subsection{Per-Level Hash Table}
+\subsection{Per-Level Hash Table and Replacement Functions}
 \label{sec:morton_hashtable}
 
-We maintain one open-addressing hash table per AMR level, mapping
-Morton keys to grid indices:
-\begin{equation}
-\text{mort\_table}(l) : M \mapsto \text{igrid}.
-\label{eq:hash_table}
-\end{equation}
+We maintain one open-addressing hash table (probing consecutive slots
+on collision) per AMR level, mapping Morton keys $M$ to grid indices
+\code{igrid}.
 
-The hash function uses multiplicative hashing with Knuth's golden
-ratio constant and an additional mixing step:
+The hash function uses multiplicative hashing
+with an additional mixing step:
 \begin{equation}
 h(M) = \bigl[\bigl((M \times \phi_1) \oplus (M \gg 16)\bigr) \times
 \phi_2\bigr] \oplus (h \gg 13),
@@ -733,10 +772,6 @@ The hash table is maintained incrementally:
 
 A companion array \code{grid\_level(igrid)} stores the AMR level of
 each grid, enabling Morton key computation from the grid index alone.
-
-
-\subsection{Replacement Functions}
-\label{sec:morton_replacement}
 
 Two wrapper functions provide drop-in replacements for the original
 \code{nbor}-based access patterns:
@@ -760,8 +795,34 @@ The \code{nbor} array is reduced to \code{allocate(nbor(1:1, 1:1))}
 with any remaining references.
 
 
-\subsection{Memory and Performance Analysis}
-\label{sec:morton_analysis}
+\subsection{Hilbert Key and Histogram Array Elimination}
+\label{sec:mem_hilbert}
+
+When using \ksec\ ordering, the Hilbert key array
+\code{hilbert\_key(1:ncell)} is no longer needed for domain
+decomposition. We replace it with \code{allocate(hilbert\_key(1:1))},
+saving $16 \times \ngridmax \times \twotondim$ bytes
+under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
+For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
+
+The defragmentation routine, which previously required Hilbert keys
+for reordering, uses a local scratch array (\code{defrag\_dp})
+allocated only during the defragmentation pass and immediately
+deallocated.
+
+Similarly, the arrays \code{bisec\_ind\_cell} and \code{cell\_level},
+each of size $\ngridmax \times \twotondim$ integers (8 bytes), are used
+exclusively during load balancing to build the bisection histogram.
+We allocate them on entry to \code{init\_bisection\_histogram} and
+deallocate them after \code{cmp\_new\_cpu\_map} returns, saving
+$2 \times 8 \times \ngridmax \times \twotondim \approx 320$\,MB
+for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
+every \code{nremap} coarse steps, these arrays are absent during the
+vast majority of the simulation.
+
+
+\subsection{Memory Savings Summary}
+\label{sec:mem_summary}
 
 The memory cost of the hash table is
 \begin{equation}
@@ -775,12 +836,8 @@ a load factor of 0.7 accounts for empty slots. The
 \code{grid\_level} array adds $4 \times \ngridmax$ bytes.
 
 Compared to the original \code{nbor} cost of $48 \times \ngridmax$
-bytes, the net savings are
-\begin{equation}
-\Delta M = 48\,\ngridmax - 4\,\ngridmax - 17\,N_{\rm grids}
-\approx 44\,\ngridmax - 17\,N_{\rm grids}.
-\label{eq:morton_savings}
-\end{equation}
+bytes, the net savings are approximately
+$44\,\ngridmax - 17\,N_{\rm grids}$.
 Since $N_{\rm grids} \ll \ngridmax$ in practice (typical occupancy is
 30--60\,per\,cent), the savings are substantial: $\sim$176\,MB for
 $\ngridmax = 5\,\mathrm{M}$ at 50\,per\,cent occupancy.
@@ -791,61 +848,7 @@ practice, the precomputed neighbour caches described in
 Section~\ref{sec:multigrid} amortize any per-lookup overhead in the
 performance-critical Poisson solver.
 
-
-% ===================================================================
-% 4. MEMORY OPTIMIZATIONS
-% ===================================================================
-\section{MEMORY OPTIMIZATIONS}
-\label{sec:memory}
-
-Beyond the Morton key hash table, several additional optimizations
-reduce the steady-state memory footprint.
-
-
-\subsection{Hilbert Key Elimination}
-\label{sec:mem_hilbert}
-
-When using \ksec\ ordering, the Hilbert key array
-\code{hilbert\_key(1:ncell)} is no longer needed for domain
-decomposition. We replace it with \code{allocate(hilbert\_key(1:1))},
-saving
-\begin{equation}
-\Delta M_{\rm hilbert} = 16 \times \ngridmax \times \twotondim
-\text{ bytes}
-\label{eq:hilbert_savings}
-\end{equation}
-under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
-For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
-
-The defragmentation routine, which previously required Hilbert keys
-for reordering, uses a local scratch array (\code{defrag\_dp})
-allocated only during the defragmentation pass and immediately
-deallocated.
-
-
-\subsection{On-Demand Histogram Arrays}
-\label{sec:mem_histogram}
-
-The arrays \code{bisec\_ind\_cell} and \code{cell\_level}, each of
-size $\ngridmax \times \twotondim$ integers (8 bytes), are used
-exclusively during load balancing to build the bisection histogram.
-We allocate them on entry to \code{init\_bisection\_histogram} and
-deallocate them after \code{cmp\_new\_cpu\_map} returns. The savings
-are
-\begin{equation}
-\Delta M_{\rm hist} = 2 \times 8 \times \ngridmax \times \twotondim
-\approx 320\,\text{MB}
-\label{eq:hist_savings}
-\end{equation}
-for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
-every \code{nremap} coarse steps, these arrays are absent during the
-vast majority of the simulation.
-
-
-\subsection{Memory Savings Summary}
-\label{sec:mem_summary}
-
-Table~\ref{tab:memory} summarizes the memory savings for
+Table~\ref{tab:memory} summarizes the combined memory savings for
 $\ngridmax = 5\,\mathrm{M}$.
 
 \begin{table}
@@ -917,41 +920,30 @@ index \code{igrid\_amr}) and $i = 1, \ldots, N_{\rm grid}$. This
 array is allocated before the iteration loop and deallocated after,
 so its memory overhead is transient.
 
-
-\subsection{Branch-Free Neighbour Access}
-\label{sec:mg_branchfree}
-
-The original GS kernel contains a branch on \code{igshift == 0} to
-distinguish between the current grid and its neighbours. We unify the
-access pattern with a cache array
+The original GS kernel also contains a branch on \code{igshift == 0}
+to distinguish between the current grid and its neighbours. We unify
+the access pattern with a cache array
 \code{nbor\_grids\_cache(0:twondim)}, where index 0 references the
 grid itself. All neighbour accesses --- including the self-reference ---
 use the same indexed load, eliminating the branch.
 
 
-\subsection{Merged Red-Black Exchange}
+\subsection{Merged Red-Black Exchange and Fused Kernels}
 \label{sec:mg_merged_rb}
 
 Standard red-black Gauss--Seidel smoothing in \ramses\ performs a
 ghost-zone exchange of the potential $\phi$ between the red and black
 sweeps:
-\begin{equation}
-\text{Red} \rightarrow \text{Exchange}(\phi) \rightarrow
-\text{Black} \rightarrow \text{Exchange}(\phi).
-\label{eq:standard_rb}
-\end{equation}
+Red $\to$ Exchange($\phi$) $\to$ Black $\to$ Exchange($\phi$).
 Each iteration thus requires two exchanges for the smoother alone,
 plus additional exchanges for the residual and restriction/prolongation
 steps --- a total of 9 exchange calls per iteration.
 
 We merge the red and black sweeps by removing the inter-sweep exchange:
-\begin{equation}
-\text{Red} \rightarrow \text{Black} \rightarrow \text{Exchange}(\phi).
-\label{eq:merged_rb}
-\end{equation}
-This is a form of \emph{chaotic relaxation}: boundary cells in the
-black sweep use slightly stale ghost values from the previous
-iteration rather than freshly exchanged red-sweep values. For the MG
+Red $\to$ Black $\to$ Exchange($\phi$).
+This is a form of relaxed synchronisation: boundary cells in the
+black sweep use values from the previous iteration rather than
+freshly exchanged red-sweep values. For the MG
 preconditioner, this does not affect convergence in practice --- the
 MG solve is itself an approximate preconditioner for the conjugate
 gradient outer iteration, and the stale-ghost error is well within
@@ -965,24 +957,15 @@ The same optimization is applied to the coarse-level solver
 (direct solve, pre-smoothing, post-smoothing), where the merged
 red-black pattern similarly halves the exchange count.
 
-
-\subsection{Fused Residual and Norm Computation}
-\label{sec:mg_fused}
-
 The MG algorithm requires both the residual $r = f - A\phi$ and its
 $L^2$ norm $\|r\|_2^2$ at specific points in the V-cycle. In the
 original code, these are computed in separate passes. We add an
 optional \code{norm2} argument to \code{cmp\_residual\_mg\_fine}:
 when present, the norm is accumulated during the same loop that
 computes the residual, saving one full grid traversal.
-
 Since the subroutine is \code{external} (not module-contained), callers
 must include an \code{interface} block to enable the optional-argument
 dispatch.
-
-
-\subsection{Arithmetic Optimization}
-\label{sec:mg_arithmetic}
 
 The GS fast-path computation involves a division by
 $2 N_{\rm dim} = 6$:
@@ -1007,7 +990,7 @@ does not degrade convergence.
 
 
 % ===================================================================
-% 6. SNII FEEDBACK SPATIAL BINNING
+% 6. FEEDBACK SPATIAL BINNING
 % ===================================================================
 \section{FEEDBACK SPATIAL BINNING}
 \label{sec:feedback}
@@ -1040,38 +1023,27 @@ dominating the feedback time step.
 
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
-\begin{equation}
-n_{\rm bin} = \max\bigl(1,\, \min(128,\, \lfloor L_{\rm box} /
-r_{\rm max} \rfloor)\bigr),
-\label{eq:nbin}
-\end{equation}
+$n_{\rm bin} = \max(1,\, \min(128,\, \lfloor L_{\rm box} /
+r_{\rm max} \rfloor))$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
 threads the events within each bin:
-\begin{equation}
-\text{bin\_head}(i_x, i_y, i_z) \rightarrow \text{SN}_1 \rightarrow
-\text{SN}_2 \rightarrow \cdots
-\label{eq:linked_list}
-\end{equation}
+$\text{bin\_head}(i_x, i_y, i_z) \to \text{SN}_1 \to
+\text{SN}_2 \to \cdots$
 
 For each cell, we compute its bin index and check only the 27
 neighbouring bins (the cell's own bin plus its 26 face-, edge-, and
 corner-adjacent bins). Since $r_{\rm max}$ is at most the bin size by
 construction, this 27-bin neighbourhood is guaranteed to contain all
 SNe that could influence the cell. The complexity becomes
-\begin{equation}
-\Olog{N_{\rm cells} \times \bar{n}_{\rm SN/bin} \times 27},
-\label{eq:binned_complexity}
-\end{equation}
+$\Olog{N_{\rm cells} \times \bar{n}_{\rm SN/bin} \times 27}$,
 where $\bar{n}_{\rm SN/bin} = N_{\rm SN} / n_{\rm bin}^3$ is the
 average number of SNe per bin.
 
 
-\subsection{Parallelization}
-\label{sec:fb_parallel}
-
-\subsubsection{Cell-parallel average\_SN}
+\subsection{Performance Results}
+\label{sec:fb_performance}
 
 The binned \code{average\_SN} uses cell-parallel OpenMP threading:
 the outer loop is over grids (with \code{!\$omp parallel do}), and
@@ -1081,17 +1053,10 @@ an SN blast radius, the thread accumulates its contribution using
 (\code{vol\_gas}, \code{dq}, \code{ekBlast}, etc.). The atomic
 overhead is minimal because collisions are rare --- most bins contain
 zero or one SN, so contention is low.
-
-\subsubsection{Grid-parallel Sedov\_blast}
-
 The \code{Sedov\_blast} routine writes only to cells owned by each
 grid, so no atomics are needed. The outer loop is over grids, and
 each thread independently processes the cells of its assigned grids,
 checking only the 27 neighbouring bins for relevant SNe.
-
-
-\subsection{Performance Results}
-\label{sec:fb_performance}
 
 With approximately 2000 simultaneous SN events:
 \begin{itemize}
@@ -1104,10 +1069,6 @@ With approximately 2000 simultaneous SN events:
 Verification by restarting at the same snapshot confirms bit-identical
 results for all conservation quantities ($m_{\rm cons}$,
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$, $e_{\rm int}$).
-
-
-\subsection{AGN Feedback Spatial Binning}
-\label{sec:fb_agn}
 
 The same spatial binning technique is applied to the AGN feedback
 routines (\code{average\_AGN} and \code{AGN\_blast}), which suffer
@@ -1135,12 +1096,12 @@ diagnostics compared to the original brute-force implementation.
 
 
 % ===================================================================
-% 7. VARIABLE-NCPU RESTART AND OTHER IMPROVEMENTS
+% 7. VARIABLE-NCPU RESTART
 % ===================================================================
-\section{VARIABLE-NCPU RESTART AND OTHER IMPROVEMENTS}
+\section{VARIABLE-NCPU RESTART}
 \label{sec:varcpu}
 
-\subsection{HDF5 Parallel I/O}
+\subsection{HDF5 Parallel I/O and Restart}
 \label{sec:hdf5}
 
 Standard \ramses\ writes one binary file per MPI rank per output.
@@ -1162,10 +1123,6 @@ with datasets organized hierarchically:
   formation times, metallicities.
 \item \code{/sinks/}: sink particle properties.
 \end{itemize}
-
-
-\subsection{Variable-Ncpu Restart Algorithm}
-\label{sec:varcpu_algorithm}
 
 When the number of ranks in the output file ($\ncpu^{\rm file}$)
 differs from the current run ($\ncpu$), the following procedure
@@ -1192,7 +1149,7 @@ This approach requires that all ranks temporarily hold the full grid
 metadata (positions and son flags) during the reconstruction phase.
 For typical production outputs (${\sim}10\,\mathrm{M}$ total grids), this
 temporary overhead is a few hundred MB --- well within the memory
-budget freed by the optimizations of Sections~\ref{sec:morton}--\ref{sec:memory}.
+budget freed by the optimizations of Section~\ref{sec:morton}.
 
 
 \subsection{Binary Distributed I/O Restart}
@@ -1252,7 +1209,7 @@ $e_{\rm cons} = 0$ for both upward ($4 \to 12$) and downward
 ($12 \to 4$) rank-count changes.
 
 
-\subsection{Stream-Access IC Reading}
+\subsection{Stream-Access IC Reading and Sink Refinement Fix}
 \label{sec:stream_ic}
 
 The initial condition (IC) files in GRAFIC2 format are Fortran
@@ -1266,20 +1223,12 @@ We replace sequential access with Fortran 2003 stream access
 The byte offset for plane $i$ in a file with header size $H = 52$
 bytes (GRAFIC2 44-byte header plus record markers) and plane size
 $P = n_1 n_2 \times 4 + 8$ bytes (data plus two 4-byte record
-markers) is
-\begin{equation}
-\text{offset} = H + (i - 1) \times P + 5.
-\label{eq:stream_offset}
-\end{equation}
+markers) is $\text{offset} = H + (i - 1) \times P + 5$.
 This is applied to all IC file types: density perturbation
 (\code{deltab}), velocity components (\code{velcx/y/z}), particle
 positions (\code{poscx/y/z}), and temperature.
 
-
-\subsection{Sink Particle Refinement Fix}
-\label{sec:sink_fix}
-
-We identified and fixed a bug in the sink particle refinement
+We also identified and fixed a bug in the sink particle refinement
 criterion. The original implementation in \code{cic\_amr} added
 the refinement mass threshold \code{m\_refine} to the gravitational
 potential array \code{phi}. However, the Poisson solver subsequently
@@ -1297,94 +1246,9 @@ forced to refine regardless of the Poisson criterion.
 
 
 % ===================================================================
-% 8. ADDITIONAL IMPLEMENTATION DETAILS
+% 8. GPU-ACCELERATED SOLVERS
 % ===================================================================
-\section{ADDITIONAL IMPLEMENTATION DETAILS}
-\label{sec:misc}
-
-\subsection{Nremap Tuning}
-\label{sec:nremap}
-
-The parameter \code{nremap} controls the frequency of load-rebalancing
-operations (every \code{nremap} coarse steps). We changed the default
-from \code{nremap = 0} (rebalance every step) to \code{nremap = 5}
-based on systematic tests with $200\,\mathrm{M}$ particles on 12 ranks over
-10 coarse steps:
-
-\begin{table}
-\centering
-\caption{Effect of \code{nremap} on total runtime and load-balance
-overhead. All configurations produce identical physics results
-($e_{\rm cons} = 3.77 \times 10^{-3}$ at step 10).}
-\label{tab:nremap}
-\begin{tabular}{cccc}
-\toprule
-\code{nremap} & Total (s) & LB time (s) & LB fraction \\
-\midrule
-1  & 303.8 & 64.4 & 21.2\% \\
-3  & 269.9 & 24.7 &  9.1\% \\
-5  & 249.8 & 15.7 &  6.3\% \\
-10 & 258.6 & 11.6 &  4.5\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The optimal value \code{nremap = 5} balances the cost of rebalancing
-against the growing imbalance that accumulates between rebalancing
-steps. Higher values ($\code{nremap} = 10$) reduce LB overhead further
-but allow imbalance to grow enough to slow other operations, resulting
-in a net increase in total runtime.
-
-
-\subsection{Load-Balance Profiling}
-\label{sec:lb_profiling}
-
-To identify bottlenecks in the load-balancing procedure, we added
-internal timing instrumentation that reports the wall-clock time of
-each phase:
-\begin{enumerate}
-\item \code{numbp\_sync}: MPI synchronization of particle counts for
-  virtual grids.
-\item \code{cmp\_new\_cpu\_map}: histogram construction and wall
-  finding.
-\item \code{expand\_pass}: ghost-zone expansion after grid migration.
-\item \code{grid\_migration}: actual grid transfer between ranks.
-\item \code{allreduce+cpumap\_update}: global reduction and CPU map
-  reconstruction.
-\item \code{shrink\_pass}: removal of migrated grids from source rank.
-\end{enumerate}
-
-Profiling reveals that \code{allreduce+cpumap\_update} dominates,
-consuming approximately 50\,per\,cent of the total load-balance time.
-This motivates the \code{nremap = 5} default, as reducing the
-frequency of these expensive global operations has a disproportionate
-impact on total runtime.
-
-
-\subsection{Pre-Allocated Buffer Pools}
-\label{sec:buffer_pools}
-
-The \ksec\ exchange routines and virtual boundary functions contain
-numerous small arrays (child counts, peer lists, MPI request handles,
-receive buffers) that are allocated and deallocated on every call. At
-100+ calls per time step, the cumulative allocation overhead becomes
-non-negligible.
-
-We convert these to \code{save} variables with grow-only semantics:
-the buffer is allocated on first use and grown (but never shrunk) when
-a larger size is needed. The receive buffer's first dimension must
-match the \code{nprops} parameter exactly (for correct MPI stride),
-so reallocation is triggered when either the capacity or the property
-count changes.
-
-This optimization eliminates approximately 100 allocation/deallocation
-pairs per exchange call.
-
-
-% ===================================================================
-% 9. HYBRID CPU/GPU DISPATCH
-% ===================================================================
-\section{HYBRID CPU/GPU DISPATCH}
+\section{GPU-ACCELERATED SOLVERS}
 \label{sec:hybrid}
 
 Certain compute-intensive routines---the Godunov solver, gravity force
@@ -1399,7 +1263,7 @@ between CPU and GPU execution at runtime.
 
 At the start of each parallel region, each OMP thread attempts to
 acquire a GPU stream slot via an atomic counter.  Threads that succeed
-accumulate grid data into a \textbf{superbatch buffer} of configurable
+accumulate grid data into a \textbf{batched grid buffer} of configurable
 size (typically 4096 grids) and launch GPU kernels asynchronously when
 the buffer is full.  Threads that do not acquire a slot execute the
 standard CPU code path.  The \code{schedule(dynamic)} clause ensures
@@ -1410,7 +1274,7 @@ This design requires no code duplication---the CPU path is the
 original Fortran subroutine, and the GPU path is an alternative branch
 within the same \code{!\$omp do} loop.
 
-\subsection{Superbatch Buffering and Scatter-Reduce}
+\subsection{Batched Grid Buffering}
 \label{sec:hybrid_superbatch}
 
 GPU kernel launch latency ($\sim$10--50\,$\mu$s) is amortised by
@@ -1420,15 +1284,12 @@ For the Godunov solver, the GPU pipeline executes five kernels in
 sequence: primitive variable conversion, slope computation, Riemann
 tracing, flux computation, and artificial diffusion.
 
-A key optimisation is the on-device \textbf{scatter-reduce} kernel
+A key optimisation is the \textbf{on-device flux reduction}
 that computes the conservative update entirely on the GPU.  Instead of
 transferring the full flux array back to the host ($\sim$98\,MB per
 flush), the kernel reduces fluxes into compact per-grid output arrays,
 reducing the device-to-host transfer to $\sim$5\,MB per flush---a
 $20\times$ reduction in PCIe bandwidth.
-
-\subsection{Lock-Free Level $L{-}1$ Update}
-\label{sec:hybrid_scatter}
 
 The Godunov solver updates conservative variables at both the current
 level~$L$ and the coarser level~$L{-}1$.  Level~$L$ writes are
@@ -1468,7 +1329,7 @@ persistent device-side data structures.
 
 
 % ===================================================================
-% 10. PERFORMANCE RESULTS
+% 9. PERFORMANCE RESULTS
 % ===================================================================
 \section{PERFORMANCE RESULTS}
 \label{sec:performance}
@@ -1519,7 +1380,7 @@ MG optimizations & $3.79 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
 
 The slight change in $e_{\rm cons}$ for the MG-optimized version
 ($3.79 \times 10^{-3}$ versus $3.77 \times 10^{-3}$) is attributable
-to the chaotic relaxation in the merged red-black GS sweep, where
+to the relaxed synchronisation in the merged red-black GS sweep, where
 boundary cells use ghost values from the previous iteration. This is
 well within the MG solver's convergence tolerance and does not affect
 the iteration count.
@@ -1682,7 +1543,7 @@ of Table~\ref{tab:scaling}:
   threading: $1085 \to 121$\,s at 16 threads ($8.9\times$), with
   continued gains beyond 16 threads reaching $10.5\times$ at 30 threads.
   The precomputed neighbour arrays and fused residual loops
-  (Section~\ref{sec:mg_opt}) expose substantial loop-level
+  (Section~\ref{sec:multigrid}) expose substantial loop-level
   parallelism.
 
 \item \emph{Godunov solver} scales $11.4\times$ from 1 to 16 threads
@@ -1842,10 +1703,10 @@ are:
   shared facilities.  The binary path uses round-robin file assignment
   and per-level \code{MPI\_ALLTOALLV} with reusable exchange metadata.
 
-\item \textbf{Hybrid CPU/GPU dispatch.} A dynamic dispatch model in
+\item \textbf{GPU-accelerated solvers.} A dynamic dispatch model in
   which OMP threads acquire GPU stream slots at runtime, with fallback
-  to CPU execution.  Superbatch buffering amortises kernel launch
-  latency, and an on-device scatter-reduce kernel reduces PCIe
+  to CPU execution.  Batched grid buffering amortises kernel launch
+  latency, and an on-device flux reduction reduces PCIe
   transfer volume by $20\times$.  The Godunov solver achieves a
   16\,per\,cent speedup on an RTX~5000 Ada GPU while producing
   bit-identical results.
