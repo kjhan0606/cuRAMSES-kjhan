@@ -211,10 +211,10 @@ subroutine multigrid_fine(ilevel,icount)
            nbor_grid_fine, active(ilevel)%igrid, &
            int(active(ilevel)%ngrid, c_int))
       use_mg_gpu = (cuda_mg_is_ready_c() /= 0)
-      if(use_mg_gpu .and. myid==1) then
-         write(*,'(A,I2,A,I8,A)') ' CUDA MG: GPU mode ON for level ', &
-              ilevel,' (',active(ilevel)%ngrid,' grids)'
-      end if
+      if(use_mg_gpu) call build_mg_halo_indices(ilevel)
+      if(myid==1) write(*,'(A,I3,A,L1,A,I12,A,I10)') &
+           ' MG GPU: level=',ilevel,' ready=',use_mg_gpu, &
+           ' ncell=',ncell_tot,' ngrid=',active(ilevel)%ngrid
    end if
 #endif
 
@@ -233,24 +233,18 @@ subroutine multigrid_fine(ilevel,icount)
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
-            call cuda_mg_download_phi_c(phi, ncell_tot_c)
+            call make_virtual_fine_dp_gpu(ilevel)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
 #ifdef HYDRO_CUDA
-         end if
-#endif
-         call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
-#ifdef HYDRO_CUDA
-         if(use_mg_gpu) then
-            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
          end if
 #endif
       end do
 
       ! Compute residual and restrict into upper level RHS
-      ! Fuse residual + norm computation on first iteration
 #ifdef HYDRO_CUDA
       if(use_mg_gpu) then
          if(iter==1) then
@@ -307,6 +301,12 @@ subroutine multigrid_fine(ilevel,icount)
          call recursive_multigrid_coarse(ilevel-1, safe_mode(ilevel))
 
          ! Interpolate coarse solution and correct fine solution
+#ifdef HYDRO_CUDA
+         if(use_mg_gpu) then
+            ! Download current GPU phi → host (needed by interpolation)
+            call cuda_mg_download_phi_c(phi, ncell_tot_c)
+         end if
+#endif
          call interpolate_and_correct_fine(ilevel)
          call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
 #ifdef HYDRO_CUDA
@@ -326,18 +326,13 @@ subroutine multigrid_fine(ilevel,icount)
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 0, safe_int)
             call cuda_mg_gauss_seidel_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), dx2_mg, 1, safe_int)
-            call cuda_mg_download_phi_c(phi, ncell_tot_c)
+            call make_virtual_fine_dp_gpu(ilevel)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
 #ifdef HYDRO_CUDA
-         end if
-#endif
-         call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
-#ifdef HYDRO_CUDA
-         if(use_mg_gpu) then
-            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
          end if
 #endif
       end do
@@ -366,8 +361,11 @@ subroutine multigrid_fine(ilevel,icount)
       err = sqrt(res_norm2/(i_res_norm2+1d-20*rho_tot**2))
 
       ! Verbosity
-      if(verbose) print '(A,I5,A,1pE10.3)','   ==> Step=', &
-         & iter,' Error=',err
+      if(verbose .or. use_mg_gpu) then
+         if(myid==1) print '(A,I5,A,1pE10.3,A,I3,A,L1)', &
+              '   ==> Step=',iter,' Error=',err, &
+              ' level=',ilevel,' gpu=',use_mg_gpu
+      end if
 
       ! Converged?
       if(err<epsilon .or. iter>=MAXITER) exit
@@ -382,7 +380,16 @@ subroutine multigrid_fine(ilevel,icount)
 
    ! Cleanup GPU MG state
 #ifdef HYDRO_CUDA
-   if(use_mg_gpu) call cuda_mg_free_c()
+   if(use_mg_gpu) then
+      call cuda_mg_halo_free_c()
+      call cuda_mg_free_c()
+   end if
+   if(allocated(mg_halo_emit_cells)) deallocate(mg_halo_emit_cells)
+   if(allocated(mg_halo_recv_cells)) deallocate(mg_halo_recv_cells)
+   if(allocated(mg_halo_emit_buf))   deallocate(mg_halo_emit_buf)
+   if(allocated(mg_halo_recv_buf))   deallocate(mg_halo_recv_buf)
+   mg_halo_n_emit = 0
+   mg_halo_n_recv = 0
 #endif
 
    ! Free pre-computed neighbor grids
@@ -406,6 +413,132 @@ subroutine multigrid_fine(ilevel,icount)
    end do
 
 end subroutine multigrid_fine
+
+
+! ########################################################################
+! ########################################################################
+! ########################################################################
+! ########################################################################
+
+! ------------------------------------------------------------------------
+! Build flat halo cell index arrays for GPU MG phi exchange
+! Enumerates emission and reception cell indices in the same order
+! as make_virtual_fine_dp packing.
+! ------------------------------------------------------------------------
+#ifdef HYDRO_CUDA
+subroutine build_mg_halo_indices(ilevel)
+   use amr_commons
+   use poisson_commons
+   use poisson_cuda_interface
+   use iso_c_binding
+   implicit none
+
+   integer, intent(in) :: ilevel
+
+   integer :: icpu, i, j, idx, iskip
+
+   ! Count total emission and reception cells
+   mg_halo_n_emit = 0
+   mg_halo_n_recv = 0
+   do icpu = 1, ncpu
+      mg_halo_n_emit = mg_halo_n_emit + emission(icpu,ilevel)%ngrid * twotondim
+      mg_halo_n_recv = mg_halo_n_recv + reception(icpu,ilevel)%ngrid * twotondim
+   end do
+
+   ! Allocate flat arrays
+   if(allocated(mg_halo_emit_cells)) deallocate(mg_halo_emit_cells)
+   if(allocated(mg_halo_recv_cells)) deallocate(mg_halo_recv_cells)
+   if(allocated(mg_halo_emit_buf))   deallocate(mg_halo_emit_buf)
+   if(allocated(mg_halo_recv_buf))   deallocate(mg_halo_recv_buf)
+
+   allocate(mg_halo_emit_cells(1:max(mg_halo_n_emit,1)))
+   allocate(mg_halo_recv_cells(1:max(mg_halo_n_recv,1)))
+   allocate(mg_halo_emit_buf(1:max(mg_halo_n_emit,1)))
+   allocate(mg_halo_recv_buf(1:max(mg_halo_n_recv,1)))
+
+   ! Build emission cell indices
+   ! Order: for each CPU, for each child cell j, for each grid i
+   ! This matches the packing order in make_virtual_fine_dp
+   idx = 0
+   do icpu = 1, ncpu
+      if(emission(icpu,ilevel)%ngrid > 0) then
+         do j = 1, twotondim
+            iskip = ncoarse + (j-1)*ngridmax
+            do i = 1, emission(icpu,ilevel)%ngrid
+               idx = idx + 1
+               mg_halo_emit_cells(idx) = emission(icpu,ilevel)%igrid(i) + iskip
+            end do
+         end do
+      end if
+   end do
+
+   ! Build reception cell indices (same order)
+   idx = 0
+   do icpu = 1, ncpu
+      if(reception(icpu,ilevel)%ngrid > 0) then
+         do j = 1, twotondim
+            iskip = ncoarse + (j-1)*ngridmax
+            do i = 1, reception(icpu,ilevel)%ngrid
+               idx = idx + 1
+               mg_halo_recv_cells(idx) = reception(icpu,ilevel)%igrid(i) + iskip
+            end do
+         end do
+      end if
+   end do
+
+   if(myid==1) write(*,'(A,I3,A,I8,A,I8)') &
+        ' MG halo indices: level=',ilevel, &
+        ' n_emit=',mg_halo_n_emit,' n_recv=',mg_halo_n_recv
+
+   ! Upload cell indices to GPU
+   call cuda_mg_halo_setup_c( &
+        mg_halo_emit_cells, int(mg_halo_n_emit, c_int), &
+        mg_halo_recv_cells, int(mg_halo_n_recv, c_int))
+
+end subroutine build_mg_halo_indices
+#endif
+
+
+! ------------------------------------------------------------------------
+! GPU phi exchange for MG smoothing
+! Full D2H → MPI exchange → full H2D
+! ------------------------------------------------------------------------
+#ifdef HYDRO_CUDA
+subroutine make_virtual_fine_dp_gpu(ilevel)
+   use amr_commons
+   use poisson_commons
+   use poisson_cuda_interface
+   use iso_c_binding
+   implicit none
+
+   integer, intent(in) :: ilevel
+   integer :: i
+
+   if(mg_halo_n_emit == 0 .and. mg_halo_n_recv == 0) return
+
+   ! Step 1: GPU gather — emission cell values from GPU phi → flat host buffer
+   if(mg_halo_n_emit > 0) then
+      call cuda_mg_halo_gather_c(mg_halo_emit_buf, int(mg_halo_n_emit, c_int))
+      ! Step 2: Scatter flat buffer → host phi at emission positions
+      do i = 1, mg_halo_n_emit
+         phi(mg_halo_emit_cells(i)) = mg_halo_emit_buf(i)
+      end do
+   end if
+
+   ! Step 3: MPI exchange (packs phi at emission cells, unpacks to reception cells)
+   call make_virtual_fine_dp(phi(1), ilevel)
+
+   ! Step 4: Gather host phi at reception positions → flat buffer
+   if(mg_halo_n_recv > 0) then
+      do i = 1, mg_halo_n_recv
+         mg_halo_recv_buf(i) = phi(mg_halo_recv_cells(i))
+      end do
+      ! Step 5: GPU scatter — flat host buffer → GPU phi at reception positions
+      call cuda_mg_halo_scatter_c(mg_halo_recv_buf, int(mg_halo_n_recv, c_int))
+   end if
+
+end subroutine make_virtual_fine_dp_gpu
+#endif
 
 
 ! ########################################################################
