@@ -70,11 +70,11 @@ exchange and eliminating all \code{MPI\_ALLTOALL} calls. A Morton key
 hash table for octree neighbour lookup removes one of the largest
 per-rank arrays in the original code, while on-demand allocation
 strategies for auxiliary arrays further reduce the memory footprint.
-A hybrid CPU/GPU dispatch model allows OMP threads to dynamically
-offload compute-intensive routines --- including the Godunov solver,
-gravity force computation, and radiative cooling --- to GPU streams at
-runtime, with automatic fallback to CPU execution when streams are
-unavailable. We also implement variable-$\ncpu$ restart for both HDF5 and
+A hybrid CPU/GPU dispatch model offloads the Godunov solver and
+multigrid Poisson solver to CUDA streams at runtime, using
+GPU-resident mesh data and halo-only PCIe transfers to minimise
+host--device overhead; automatic fallback to CPU execution is provided
+when GPU memory is insufficient. We also implement variable-$\ncpu$ restart for both HDF5 and
 native binary output formats, removing the constraint that
 output files must be read with the same number of MPI ranks as
 were used to write them. All modifications preserve
@@ -1391,16 +1391,113 @@ wrapper layer that converts assumed-size arrays to C pointers via
 descriptors, which can produce incorrect addresses with certain
 compilers (notably Intel ifx).
 
-\subsection{Performance}
+\subsection{GPU-Resident Mesh Data}
+\label{sec:hybrid_gather}
+
+The initial GPU implementation gathers the stencil data for each batch
+of grids on the CPU, copies it to the device, and copies the results
+back after the kernel finishes.  Profiling reveals that this
+host-to-device (H2D) transfer accounts for 51\,per\,cent of the total
+GPU time, completely negating the kernel speedup.
+
+We therefore adopt a \emph{GPU-resident mesh} strategy: the full AMR
+mesh arrays (\code{uold}, \code{unew}, \code{phi}, \code{f},
+\code{son}) are uploaded to the device once at the beginning of each
+level update.  The gather phase, which formerly assembled the stencil
+on the host, is moved to a GPU kernel that reads directly from
+device-resident arrays.  After the Godunov sweep the scatter kernel
+writes updated fluxes back to \code{unew} on the device, and only the
+modified portion is copied back to the host.
+
+This reorganisation reduces the H2D fraction from 51\,per\,cent to
+5.7\,per\,cent.  The CPU-side gather time drops from 70.7\,s to
+2.1\,s ($34\times$) and the H2D transfer from 6.6\,s to 0.24\,s
+($27\times$).  The approach requires one MPI rank per GPU because
+the mesh upload consumes 4--9\,GB of device memory per rank; when the
+device memory is insufficient the code falls back automatically to
+CPU execution.
+
+\subsection{GPU Multigrid Solver}
+\label{sec:hybrid_mg}
+
+We extend the GPU acceleration to the multigrid (MG) Poisson solver.
+The Gauss--Seidel red-black smoother and the residual computation are
+ported to CUDA kernels executing on a dedicated MG stream
+(\code{cudaStreamNonBlocking}).  Each cell in the $2^3$ oct is
+classified as red $\{1,4,6,7\}$ or black $\{2,3,5,8\}$ using the
+\code{iii}/\code{jjj} lookup tables stored in \code{\_\_constant\_\_}
+memory.  The device-side data comprises \code{phi}, \code{f(1:3)},
+\code{flag2}, the neighbour index array, and the grid pointer array,
+totalling approximately 6.4\,GB.
+
+A key challenge is the halo exchange between smoothing sweeps.  We
+implement a \emph{halo-only} exchange: a GPU gather kernel packs
+boundary cells into a small pinned-host buffer (${\sim}6$\,MB),
+\code{cudaMemcpyAsync} transfers it to the host, MPI exchanges the
+halos, and a GPU scatter kernel unpacks the received data.  This
+reduces the per-exchange PCIe volume from ${\sim}2.4$\,GB (full
+\code{phi} round-trip) to ${\sim}6$\,MB.  However, the
+\emph{interpolation} step between AMR levels still requires the full
+\code{phi} array on the host, necessitating a complete device-to-host
+transfer at each MG V-cycle.
+
+\subsection{GPU Performance Assessment}
 \label{sec:hybrid_perf}
 
-The GPU-accelerated code produces bit-identical physics results
-compared to the CPU-only build.  On an RTX~5000 Ada GPU with 4 MPI
-ranks $\times$ 2 OMP threads, the Godunov solver is accelerated by
-16\,per\,cent (22.0\,s $\to$ 18.4\,s).  The overall speedup is modest
-because the host-to-device transfer currently dominates (50\,per\,cent
-of GPU time), leaving significant room for future optimisation via
-persistent device-side data structures.
+Table~\ref{tab:gpu_perf} summarises the GPU performance on an NVIDIA
+H100~NVL system (93.1\,GB HBM3 per device, PCIe Gen5) using 2~MPI
+ranks $\times$ 4~OMP threads, running 2 coarse steps of the
+production test problem (Section~\ref{sec:perf_config}).
+
+\begin{table}
+\centering
+\caption{GPU performance comparison on H100~NVL (2~ranks $\times$
+4~threads, 2 coarse steps).  ``MG base'' is the base-level multigrid
+solve; ``MG AMR'' is the fine-level AMR correction.  ``Full D2H/H2D''
+transfers the entire \code{phi} array every MG iteration; ``Halo-only''
+transfers only boundary cells during smoothing but still requires
+a full transfer for interpolation.}
+\label{tab:gpu_perf}
+\footnotesize
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Mode & Total & MG base & MG AMR & Godunov \\
+     & (s)   & (s)     & (s)    & (s)     \\
+\midrule
+CPU-only         & 45.9 & 10.2 & (incl.) & 9.5 \\
+GPU full D2H/H2D & 66.6 & 23.1 & 11.5    & 7.4 \\
+GPU halo-only     & 82.0 & 30.5 & 17.6    & 8.4 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The Godunov solver benefits modestly from GPU offloading (9.5\,s
+$\to$ 7.4--8.4\,s), but the multigrid solver is consistently
+\emph{slower} on the GPU: the base-level solve degrades from 10.2\,s
+to 30.5\,s ($3\times$ slower).  The root cause is the PCIe bandwidth
+bottleneck.  Even on the H100~NVL with PCIe Gen5, pageable memory
+throughput is 9.2\,GB/s and pinned memory reaches only
+13.6--22.4\,GB/s.  The MG solver's coarse-level solve and the
+interpolation/restriction operators remain on the CPU, forcing a full
+\code{phi} device-to-host and host-to-device transfer at every
+V-cycle iteration.  This synchronisation cost overwhelms the
+computational savings from the GPU kernels.
+
+The fundamental difficulty is that AMR multigrid solvers are
+characterised by irregular data access patterns, frequent
+MPI synchronisation points, and tightly interleaved CPU/GPU execution
+phases.  Unlike structured-grid solvers where the GPU can operate on
+large, contiguous data blocks for many iterations before
+communicating, the AMR hierarchy requires level-by-level processing
+with inter-level transfers that break the GPU's data residency.
+
+We conclude that for the current AMR code structure, CPU-only
+optimisation (Section~\ref{sec:mg_opt}) is more effective than GPU
+offloading.  Achieving a net GPU speedup would require porting the
+\emph{entire} multigrid V-cycle --- including coarse solves,
+interpolation, and restriction --- to the device, eliminating
+per-iteration PCIe transfers.  This amounts to a GPU-native AMR
+redesign and is left as future work.
 
 
 % ===================================================================
@@ -1793,13 +1890,18 @@ are:
   shared facilities.  The binary path uses round-robin file assignment
   and per-level \code{MPI\_ALLTOALLV} with reusable exchange metadata.
 
-\item \textbf{GPU-accelerated solvers.} A dynamic dispatch model in
-  which OMP threads acquire GPU stream slots at runtime, with fallback
-  to CPU execution.  Batched grid buffering amortises kernel launch
-  latency, and an on-device flux reduction reduces PCIe
-  transfer volume by $20\times$.  The Godunov solver achieves a
-  16\,per\,cent speedup on an RTX~5000 Ada GPU while producing
-  bit-identical results.
+\item \textbf{GPU acceleration and its limits.}  We implement a
+  comprehensive GPU pipeline covering the Godunov hydrodynamic solver
+  and the multigrid Poisson solver, with GPU-resident mesh data that
+  reduces host-to-device transfer from 51\,per\,cent to 5.7\,per\,cent
+  of GPU time.  Halo-only PCIe exchanges minimise communication during
+  smoothing sweeps.  However, benchmarks on NVIDIA H100~NVL hardware
+  show that the multigrid solver is $3\times$ slower on GPU than on CPU
+  due to the PCIe bottleneck: coarse-level solves and inter-level
+  interpolation remain on the host, forcing full array transfers at
+  every V-cycle iteration.  We conclude that for the current AMR code
+  structure, CPU-only optimisation is more effective; a net GPU
+  speedup would require porting the entire V-cycle to the device.
 \end{enumerate}
 
 All modifications preserve physical consistency, as verified by
@@ -1813,20 +1915,25 @@ hash table, in particular, is a drop-in replacement for any
 neighbour-pointer array in an octree code, requiring only that grid
 positions be available at each level. The \ksec\ decomposition can be
 adopted by any code whose domain decomposition is currently based on
-one-dimensional space-filling curve ordering. The hybrid CPU/GPU
-dispatch model demonstrates that GPU acceleration can be integrated
-into a legacy Fortran codebase without sacrificing portability: the
-same source compiles and runs correctly in CPU-only mode when CUDA is
-unavailable, making it practical for heterogeneous computing
-environments where not all nodes are equipped with GPUs.
+one-dimensional space-filling curve ordering. The GPU experience is also instructive: while the hybrid CPU/GPU
+dispatch model demonstrates that GPU acceleration \emph{can} be
+integrated into a legacy Fortran codebase without sacrificing
+portability (the same source compiles and runs correctly in CPU-only
+mode), our benchmarks on H100~NVL hardware show that the
+PCIe bottleneck between host and device dominates whenever AMR
+level-by-level processing forces frequent data transfers.  For
+structured-grid or particle-mesh codes with long on-device residency,
+the same dispatch framework would likely yield substantial speedups;
+for AMR multigrid, a GPU-native redesign that keeps the entire V-cycle
+on the device is needed.
 
-Looking ahead, the three-level MPI+OpenMP+CUDA parallelism
-positions \curamses\ well for exascale platforms such as Frontier,
-Aurora, and LUMI, where the majority of floating-point throughput
-resides in GPU accelerators. Further optimisation of the host-to-device
-data transfer --- currently the dominant cost in the GPU pipeline ---
-through persistent device-side data structures and asynchronous
-prefetching will be a key focus of future work.
+Looking ahead, the algorithmic improvements presented here ---
+\ksec\ decomposition, Morton neighbour lookup, memory-aware load
+balancing, and spatial-binning feedback --- position \curamses\ well
+for petascale and exascale platforms.  Achieving efficient GPU
+utilisation for AMR multigrid remains an open challenge and will be
+a key focus of future work, likely requiring a fundamentally different
+data layout that avoids per-iteration host--device synchronisation.
 
 \curamses\ is being used in production for the Horizon Run~5
 cosmological simulation project and will be made publicly available
