@@ -208,13 +208,13 @@ for stage in stages:
     max_width = max(abs(rx(p['pair'][1]) - rx(p['pair'][0]))
                     for p in stage['pairs'])
     max_arc_h = np.sqrt(max_width) * 0.45 + 0.3
-    ylo, yhi = -0.65, arc_y + max_arc_h + 0.3
+    ylo, yhi = -0.50, arc_y + max_arc_h + 0.15
     ylim_ranges.append((ylo, yhi, max_arc_h))
 
 height_ratios = [yhi - ylo for ylo, yhi, _ in ylim_ranges]
 
-fig, axes = plt.subplots(4, 1, figsize=(10, 11.5),
-                         gridspec_kw={'hspace': 0.15,
+fig, axes = plt.subplots(4, 1, figsize=(10, 9.0),
+                         gridspec_kw={'hspace': 0.05,
                                       'height_ratios': height_ratios})
 
 fig.suptitle(
