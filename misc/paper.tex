@@ -794,6 +794,20 @@ The \code{nbor} array is reduced to \code{allocate(nbor(1:1, 1:1))}
 --- effectively eliminated while maintaining compilation compatibility
 with any remaining references.
 
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_morton_hash.pdf}
+\caption{Schematic of the Morton key hash table that replaces the
+  original \code{nbor} array.  Left: the eliminated
+  \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5$\,M).
+  Right: the replacement workflow --- grid cell coordinates
+  $(i_x, i_y, i_z)$ are bit-interleaved into a 64-bit Morton key $M$,
+  which is mapped to a grid index \code{igrid} via a per-level
+  open-addressing hash table with multiplicative hashing.  The hash
+  table memory footprint is $\approx 17\,N_{\rm grids}$ bytes
+  (typically $<$50\,MB), yielding a net saving of $>$190\,MB per rank.}
+\label{fig:morton_hash}
+\end{figure*}
 
 \subsection{Hilbert Key and Histogram Array Elimination}
 \label{sec:mem_hilbert}
@@ -856,14 +870,15 @@ $\ngridmax = 5\,\mathrm{M}$.
 \caption{Memory savings per MPI rank for $\ngridmax = 5\,\mathrm{M}$.
 Savings marked with ${}^*$ are conditional on using \ksec\ ordering.}
 \label{tab:memory}
+\small
 \begin{tabular}{lrl}
 \toprule
-Optimization & Savings (MB) & Availability \\
+Optimization & MB & Availability \\
 \midrule
-\code{nbor} elimination (Morton hash) & 240 & Always \\
-\code{hilbert\_key} elimination${}^*$ & 640 & Steady state \\
-On-demand \code{bisec\_ind\_cell}${}^*$ & 160 & Between LB steps \\
-On-demand \code{cell\_level}${}^*$ & 160 & Between LB steps \\
+\code{nbor} removal (Morton hash) & 240 & Always \\
+\code{hilbert\_key} removal${}^*$ & 640 & Steady state \\
+On-demand \code{bisec\_ind\_cell}${}^*$ & 160 & Between LB \\
+On-demand \code{cell\_level}${}^*$ & 160 & Between LB \\
 Defrag scratch (local) & 40 & Between defrag \\
 \midrule
 \textbf{Total} & \textbf{$>$1200} & \\
@@ -876,7 +891,20 @@ the eliminated array ($48\,\ngridmax = 240$\,MB) and the hash table
 overhead ($\sim$17\,$N_{\rm grids}$, typically $<$50\,MB). Net savings
 are at least 190\,MB. The Hilbert key savings of 640\,MB assume
 \code{QUADHILBERT}; for standard 64-bit keys the savings would be
-320\,MB.
+320\,MB. Figure~\ref{fig:memory_savings} visualizes the individual
+contributions.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_memory_savings.pdf}
+\caption{Per-rank memory savings breakdown for $\ngridmax = 5$\,M.
+  Solid bars denote unconditional savings (always available); hatched
+  bars denote savings available only between load-balance steps or
+  defragmentation passes.  The red segment shows the hash table
+  overhead ($\sim$40--50\,MB), yielding a net saving of $>$1190\,MB
+  per MPI rank.}
+\label{fig:memory_savings}
+\end{figure*}
 
 We implement a diagnostic routine \code{writemem\_minmax} that reports
 the minimum and maximum resident set size across all ranks at each
@@ -977,6 +1005,21 @@ We replace the division \code{/ dtwondim} with a multiplication by
 the precomputed reciprocal \code{* oneoverdtwondim}, which is faster
 on most architectures.
 
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_mg_redblack.pdf}
+\caption{Multigrid V-cycle exchange optimization.
+  (a)~Original: each smoothing iteration requires 9 ghost-zone
+  exchanges --- two for the red-black sweeps (exchanging $\phi$), one
+  each for the residual and norm (exchanging $r$), and additional
+  exchanges for restriction and prolongation.
+  (b)~Optimized: the inter-sweep red-black exchange is removed
+  (relaxed synchronisation), and the separate residual and norm
+  exchanges are fused, reducing the total to 5 exchanges per iteration
+  ($-44$\,per\,cent).  Orange diamonds marked ``E'' denote active
+  exchanges; crossed-out diamonds indicate eliminated exchanges.}
+\label{fig:mg_redblack}
+\end{figure*}
 
 \subsection{Performance Impact}
 \label{sec:mg_performance}
@@ -1039,8 +1082,23 @@ construction, this 27-bin neighbourhood is guaranteed to contain all
 SNe that could influence the cell. The complexity becomes
 $\Olog{N_{\rm cells} \times \bar{n}_{\rm SN/bin} \times 27}$,
 where $\bar{n}_{\rm SN/bin} = N_{\rm SN} / n_{\rm bin}^3$ is the
-average number of SNe per bin.
+average number of SNe per bin. Figure~\ref{fig:spatial_binning}
+contrasts the two approaches.
 
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_spatial_binning.pdf}
+\caption{Feedback spatial binning concept (shown in 2D for clarity).
+  (a)~Brute force: every cell (blue square) must check all SN events
+  (orange stars), resulting in $\Olog{N_{\rm cells} \times N_{\rm SN}}$
+  complexity.
+  (b)~Spatial hash binning: the domain is partitioned into a uniform
+  grid of bins.  Each cell checks only the 27 neighbouring bins (9 in
+  2D), shown as shaded regions, reducing the complexity to
+  $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm SN/bin}}$.  Distant SN
+  events (grey) are never examined.}
+\label{fig:spatial_binning}
+\end{figure*}
 
 \subsection{Performance Results}
 \label{sec:fb_performance}
@@ -1207,7 +1265,24 @@ per level has cost proportional to the number of grids exchanged
 rather than the total number of ranks.  Verification tests confirm
 $e_{\rm cons} = 0$ for both upward ($4 \to 12$) and downward
 ($12 \to 4$) rank-count changes.
+Figure~\ref{fig:varcpu_flow} summarizes the three-stage pipeline.
 
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_varcpu_flow.pdf}
+\caption{Three-stage distributed I/O pipeline for binary
+  variable-$\ncpu$ restart.
+  Stage~1 (blue): the header is probed to detect a rank-count mismatch,
+  and the $\ncpu^{\rm file}$ files are assigned to $\ncpu$ ranks by
+  round-robin mapping.
+  Stage~2 (green): AMR grid positions are read, ownership is determined
+  via \code{cmp\_ksection\_cpumap}, and grids are exchanged via
+  \code{MPI\_ALLTOALLV}; the exchange metadata is stored for reuse.
+  Stage~3 (purple): hydro and gravity files are read and scattered using
+  the stored metadata, including a primitive-to-conservative conversion
+  on the receiving side.}
+\label{fig:varcpu_flow}
+\end{figure*}
 
 \subsection{Stream-Access IC Reading and Sink Refinement Fix}
 \label{sec:stream_ic}
@@ -1360,20 +1435,16 @@ reference run:
 configurations. All values are identical to the reference
 within machine precision.}
 \label{tab:conservation}
-\begin{tabular}{lccc}
+\footnotesize
+\begin{tabular}{@{}lccc@{}}
 \toprule
 Configuration & $e_{\rm cons}$ & $e_{\rm pot}$ & $e_{\rm kin}$ \\
 \midrule
-Reference (Hilbert) & $3.77 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
-  & $1.23 \times 10^{-6}$ \\
-K-section (no membal) & $3.77 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
-  & $1.23 \times 10^{-6}$ \\
-K-section (membal) & $3.77 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
-  & $1.23 \times 10^{-6}$ \\
-Morton hash + ksection & $3.77 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
-  & $1.23 \times 10^{-6}$ \\
-MG optimizations & $3.79 \times 10^{-3}$ & $-1.88 \times 10^{-6}$
-  & $1.23 \times 10^{-6}$ \\
+Hilbert (reference) & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
+K-sec (no membal)   & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
+K-sec (membal)      & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
+Morton + k-sec      & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
+MG optimized        & $3.79\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1603,22 +1674,23 @@ scheme across the strong-scaling runs described in the preceding section.
   The level-10 grid counts illustrate the per-rank work imbalance
   at the most populated refined level ($19.5\,\mathrm{M}$ grids total).}
 \label{tab:membal}
-\begin{tabular}{rrrrrrr}
+\small
+\begin{tabular}{rrrrcrrr}
 \hline
-$\ncpu$ & $M_{\min}$ & $M_{\max}$ & $M_{\max}/M_{\min}$
-  & \multicolumn{3}{c}{Level-10 grids / rank} \\
-  &  (Gb) & (Gb) &  & min & max & max/min \\
+$\ncpu$ & $M_{\min}$ & $M_{\max}$ & $\frac{M_{\max}}{M_{\min}}$
+  & & \multicolumn{3}{c}{Lv-10 grids/rank ($\times 10^3$)} \\
+  &  (Gb) & (Gb) &  & & min & max & ratio \\
 \hline
-  1 & 147.2 & 147.2 & 1.000 & \multicolumn{3}{c}{---} \\
-  2 &  87.0 &  87.4 & 1.005 &  9\,119\,832 & 10\,337\,771 & 1.13 \\
-  4 &  50.1 &  50.5 & 1.008 &  4\,545\,882 &  5\,209\,834 & 1.15 \\
-  8 &  28.0 &  28.6 & 1.021 &  2\,199\,595 &  2\,675\,391 & 1.22 \\
- 12 &  20.9 &  21.4 & 1.024 &  1\,369\,950 &  1\,827\,914 & 1.33 \\
- 16 &  16.7 &  17.1 & 1.024 &  1\,021\,171 &  1\,375\,737 & 1.35 \\
- 24 &  12.5 &  13.1 & 1.048 &    671\,418 &    937\,060 & 1.40 \\
- 32 &  10.7 &  11.1 & 1.037 &    521\,392 &    710\,999 & 1.36 \\
- 48 &   8.2 &   8.6 & 1.049 &    306\,342 &    478\,566 & 1.56 \\
- 64 &   8.2 &   8.6 & 1.049 &    224\,830 &    362\,435 & 1.61 \\
+  1 & 147.2 & 147.2 & 1.000 & &\multicolumn{3}{c}{---} \\
+  2 &  87.0 &  87.4 & 1.005 & & 9120 & 10338 & 1.13 \\
+  4 &  50.1 &  50.5 & 1.008 & & 4546 &  5210 & 1.15 \\
+  8 &  28.0 &  28.6 & 1.021 & & 2200 &  2675 & 1.22 \\
+ 12 &  20.9 &  21.4 & 1.024 & & 1370 &  1828 & 1.33 \\
+ 16 &  16.7 &  17.1 & 1.024 & & 1021 &  1376 & 1.35 \\
+ 24 &  12.5 &  13.1 & 1.048 & &  671 &   937 & 1.40 \\
+ 32 &  10.7 &  11.1 & 1.037 & &  521 &   711 & 1.36 \\
+ 48 &   8.2 &   8.6 & 1.049 & &  306 &   479 & 1.56 \\
+ 64 &   8.2 &   8.6 & 1.049 & &  225 &   362 & 1.61 \\
 \hline
 \end{tabular}
 \end{table}
@@ -1645,6 +1717,24 @@ The load-balance remap itself costs 16--26\,s for $\ncpu \ge 8$
 (Table~\ref{tab:scaling}), growing from 2.3 to 5.1\,per\,cent of the
 total runtime as the computation shrinks under strong scaling --- a
 modest price for near-perfect memory balance.
+Figure~\ref{fig:memory_balance} visualizes these trends.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_memory_balance.pdf}
+\caption{Memory-weighted load balance across the strong-scaling test
+  suite.
+  (a)~Per-rank memory: $M_{\min}$ and $M_{\max}$ follow the ideal
+  $1/\ncpu$ scaling (dashed grey) until a fixed per-rank overhead of
+  $\sim$4\,Gb dominates at high rank counts.
+  (b)~Load balance quality: the memory imbalance ratio
+  $M_{\max}/M_{\min}$ (blue, left axis) remains below 5\,per\,cent
+  for all rank counts tested ($2$--$64$), while the level-10 grid
+  count imbalance (red, right axis) grows to 1.61 at 64 ranks ---
+  demonstrating that the memory-weighted cost function successfully
+  decouples memory balance from grid-count balance.}
+\label{fig:memory_balance}
+\end{figure*}
 
 
 % ===================================================================
