@@ -59,12 +59,15 @@ subroutine multigrid_fine(ilevel,icount)
    logical :: allmasked, allmasked_tot
 
    ! GPU Poisson MG variables
-   logical :: use_mg_gpu
+   logical :: use_mg_gpu, use_ri_gpu
 #ifdef HYDRO_CUDA
    integer(c_long_long) :: ncell_tot_c
-   integer :: ncell_tot, safe_int
+   integer :: ncell_tot, safe_int, ri_flag
    real(kind=8) :: dx_mg, dx2_mg, oneoverdx2_mg, dx2_norm_mg
    real(kind=8) :: gpu_norm2, dummy_norm2
+   ! cuFFT variables
+   logical :: is_uniform_fft
+   integer(i8b) :: expected_grids
 #endif
 
    if(gravity_type>0)return
@@ -198,6 +201,7 @@ subroutine multigrid_fine(ilevel,icount)
 
    ! GPU setup: upload MG arrays to GPU if CUDA available
    use_mg_gpu = .false.
+   use_ri_gpu = .false.
 #ifdef HYDRO_CUDA
    if(cuda_pool_is_initialized_c() /= 0) then
       ncell_tot = ncoarse + twotondim*ngridmax
@@ -212,9 +216,65 @@ subroutine multigrid_fine(ilevel,icount)
            int(active(ilevel)%ngrid, c_int))
       use_mg_gpu = (cuda_mg_is_ready_c() /= 0)
       if(use_mg_gpu) call build_mg_halo_indices(ilevel)
-      if(myid==1) write(*,'(A,I3,A,L1,A,I12,A,I10)') &
+      ! Setup GPU restrict/interp if MG GPU is ready and coarse levels exist
+      if(use_mg_gpu .and. ilevel > 1) then
+         call precompute_mg_gpu_restrict_interp(ilevel)
+         use_ri_gpu = (cuda_mg_ri_is_ready_c() /= 0)
+      end if
+      ! Synchronize use_ri_gpu across all ranks (MPI collective paths must match)
+#ifndef WITHOUTMPI
+      ri_flag = 0; if(use_ri_gpu) ri_flag = 1
+      call MPI_ALLREDUCE(MPI_IN_PLACE, ri_flag, 1, &
+           MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, info)
+      use_ri_gpu = (ri_flag == 1)
+#endif
+      if(myid==1) write(*,'(A,I3,A,L1,A,L1,A,I12,A,I10)') &
            ' MG GPU: level=',ilevel,' ready=',use_mg_gpu, &
+           ' ri=',use_ri_gpu, &
            ' ncell=',ncell_tot,' ngrid=',active(ilevel)%ngrid
+   end if
+
+   ! -----------------------------------------------------------------
+   ! cuFFT direct solve for fully uniform level (periodic BC)
+   ! -----------------------------------------------------------------
+   is_uniform_fft = .false.
+   if(use_mg_gpu) then
+      expected_grids = int(nx,i8b)*int(ny,i8b)*int(nz,i8b) &
+                     * 8_i8b**(ilevel-1)
+      if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
+   end if
+
+   if(is_uniform_fft) then
+      call fft_poisson_solve_uniform(ilevel, icount)
+      ! Download phi from GPU
+      call cuda_mg_download_phi_c(phi, ncell_tot_c)
+      call make_virtual_fine_dp(phi(1), ilevel)
+      ! Cleanup GPU state
+      call cuda_mg_halo_free_c()
+      call cuda_mg_free_c()
+      if(allocated(mg_halo_emit_cells)) deallocate(mg_halo_emit_cells)
+      if(allocated(mg_halo_recv_cells)) deallocate(mg_halo_recv_cells)
+      if(allocated(mg_halo_emit_buf))   deallocate(mg_halo_emit_buf)
+      if(allocated(mg_halo_recv_buf))   deallocate(mg_halo_recv_buf)
+      mg_halo_n_emit = 0
+      mg_halo_n_recv = 0
+      if(use_ri_gpu) call cuda_mg_ri_free_c()
+      if(allocated(mg_ri_flat_offset)) deallocate(mg_ri_flat_offset)
+      if(allocated(mg_ri_coarse_rhs))  deallocate(mg_ri_coarse_rhs)
+      if(allocated(mg_ri_coarse_phi))  deallocate(mg_ri_coarse_phi)
+      mg_ri_total_coarse = 0
+      ! Free precomputed neighbors
+      if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
+      if(ilevel>1 .and. levelmin_mg < ilevel) then
+         call cleanup_nbor_grid_coarse(levelmin_mg, ilevel-1)
+      end if
+      ! Cleanup MG levels
+      do ifine=1,ilevel-1
+         call cleanup_mg_level(ifine)
+      end do
+      if(myid==1) write(*,'(A,I5,A)') &
+           '   ==> Level=',ilevel,' cuFFT direct solve DONE'
+      return
    end if
 #endif
 
@@ -247,6 +307,7 @@ subroutine multigrid_fine(ilevel,icount)
       ! Compute residual and restrict into upper level RHS
 #ifdef HYDRO_CUDA
       if(use_mg_gpu) then
+         gpu_norm2 = 0.0d0
          if(iter==1) then
             call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
                  int(ngridmax,c_int), int(ncoarse,c_int), &
@@ -264,7 +325,7 @@ subroutine multigrid_fine(ilevel,icount)
                  oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
                  dummy_norm2, 0)
          end if
-         call cuda_mg_download_f1_c(f, ncell_tot_c)
+         if(.not. use_ri_gpu) call cuda_mg_download_f1_c(f, ncell_tot_c)
       else
 #endif
          if(iter==1) then
@@ -281,13 +342,27 @@ subroutine multigrid_fine(ilevel,icount)
       end if
 #endif
 
-      ! First clear the rhs in coarser reception comms
-      do icpu=1,ncpu
-         if(active_mg(icpu,ilevel-1)%ngrid==0) cycle
-         active_mg(icpu,ilevel-1)%u(:,2)=0.0d0
-      end do
-      ! Restrict and do reverse-comm
-      call restrict_residual_fine_reverse(ilevel)
+      ! Restrict residual into upper level RHS
+#ifdef HYDRO_CUDA
+      if(use_ri_gpu) then
+         ! GPU restriction: d_mg_f1 → d_coarse_rhs_flat → host → active_mg
+         call cuda_mg_restrict_execute_c(int(active(ilevel)%ngrid,c_int), &
+              int(ngridmax,c_int), int(ncoarse,c_int))
+         call cuda_mg_restrict_download_c(mg_ri_coarse_rhs, &
+              int(mg_ri_total_coarse,c_int))
+         call scatter_coarse_rhs_from_flat(ilevel)
+      else
+#endif
+         ! First clear the rhs in coarser reception comms
+         do icpu=1,ncpu
+            if(active_mg(icpu,ilevel-1)%ngrid==0) cycle
+            active_mg(icpu,ilevel-1)%u(:,2)=0.0d0
+         end do
+         ! Restrict
+         call restrict_residual_fine_reverse(ilevel)
+#ifdef HYDRO_CUDA
+      end if
+#endif
       call make_reverse_mg_dp(2,ilevel-1) ! communicate rhs
 
       if(ilevel>1) then
@@ -302,16 +377,27 @@ subroutine multigrid_fine(ilevel,icount)
 
          ! Interpolate coarse solution and correct fine solution
 #ifdef HYDRO_CUDA
-         if(use_mg_gpu) then
-            ! Download current GPU phi → host (needed by interpolation)
-            call cuda_mg_download_phi_c(phi, ncell_tot_c)
-         end if
+         if(use_ri_gpu) then
+            ! GPU interpolation: active_mg → flat → GPU → correct d_mg_phi
+            call gather_coarse_phi_to_flat(ilevel)
+            call cuda_mg_interp_upload_c(mg_ri_coarse_phi, &
+                 int(mg_ri_total_coarse,c_int))
+            call cuda_mg_interp_execute_c(int(active(ilevel)%ngrid,c_int), &
+                 int(ngridmax,c_int), int(ncoarse,c_int))
+            call make_virtual_fine_dp_gpu(ilevel)
+         else
 #endif
-         call interpolate_and_correct_fine(ilevel)
-         call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
 #ifdef HYDRO_CUDA
-         if(use_mg_gpu) then
-            call cuda_mg_upload_phi_c(phi, ncell_tot_c)
+            if(use_mg_gpu) then
+               call cuda_mg_download_phi_c(phi, ncell_tot_c)
+            end if
+#endif
+            call interpolate_and_correct_fine(ilevel)
+            call make_virtual_fine_dp(phi(1),ilevel)
+#ifdef HYDRO_CUDA
+            if(use_mg_gpu) then
+               call cuda_mg_upload_phi_c(phi, ncell_tot_c)
+            end if
          end if
 #endif
       end if
@@ -340,6 +426,7 @@ subroutine multigrid_fine(ilevel,icount)
       ! Update fine residual (fused with norm computation)
 #ifdef HYDRO_CUDA
       if(use_mg_gpu) then
+         gpu_norm2 = 0.0d0
          call cuda_mg_residual_c(int(active(ilevel)%ngrid,c_int), &
               int(ngridmax,c_int), int(ncoarse,c_int), &
               oneoverdx2_mg, dble(twondim), dx2_norm_mg, &
@@ -378,8 +465,22 @@ subroutine multigrid_fine(ilevel,icount)
 
    end do main_iteration_loop
 
+   ! Download final phi from GPU to CPU before cleanup
+#ifdef HYDRO_CUDA
+   if(use_mg_gpu) then
+      call cuda_mg_download_phi_c(phi, ncell_tot_c)
+   end if
+#endif
+
    ! Cleanup GPU MG state
 #ifdef HYDRO_CUDA
+   if(use_ri_gpu) then
+      call cuda_mg_ri_free_c()
+   end if
+   if(allocated(mg_ri_flat_offset))  deallocate(mg_ri_flat_offset)
+   if(allocated(mg_ri_coarse_rhs))   deallocate(mg_ri_coarse_rhs)
+   if(allocated(mg_ri_coarse_phi))   deallocate(mg_ri_coarse_phi)
+   mg_ri_total_coarse = 0
    if(use_mg_gpu) then
       call cuda_mg_halo_free_c()
       call cuda_mg_free_c()
@@ -538,6 +639,228 @@ subroutine make_virtual_fine_dp_gpu(ilevel)
    end if
 
 end subroutine make_virtual_fine_dp_gpu
+#endif
+
+
+! ########################################################################
+! ########################################################################
+! ########################################################################
+! ########################################################################
+
+! ------------------------------------------------------------------------
+! Precompute GPU restrict/interp mapping arrays for V-cycle
+! Builds restrict_target and interp_nbor_flat, then uploads to GPU.
+! Also allocates flat host buffers for coarse data transfer.
+! ------------------------------------------------------------------------
+#ifdef HYDRO_CUDA
+subroutine precompute_mg_gpu_restrict_interp(ilevel)
+   use amr_commons
+   use poisson_commons
+   use poisson_cuda_interface
+   use iso_c_binding
+   implicit none
+
+   integer, intent(in) :: ilevel
+
+   integer :: icoarselevel, ngrid_fine
+   integer :: igrid_f_mg, igrid_f_amr, icell_c_amr, ind_c_cell
+   integer :: igrid_c_amr, igrid_c_mg, cpu_amr, icell_c_mg
+   integer :: i, j, istart, nbatch, icpu, ngrid_c
+
+   integer, allocatable :: h_restrict_target(:)
+   integer, allocatable :: h_interp_nbor_flat(:,:)
+
+   real(dp) :: a, b, c, d
+   real(dp) :: bbb(8)
+   integer :: ccc(8,8), ccc_gpu(8,8)
+
+   ! Work arrays for get3cubefather
+   integer :: ind_cell_father_loc(1:nvector)
+   integer :: nbors_father_cells_loc(1:nvector, 1:threetondim)
+   integer :: nbors_father_grids_loc(1:nvector, 1:twotondim)
+
+   icoarselevel = ilevel - 1
+   ngrid_fine = active(ilevel)%ngrid
+
+   if(ngrid_fine == 0 .or. icoarselevel < 1) return
+
+   ! Compute flat_offset for all CPUs
+   if(allocated(mg_ri_flat_offset)) deallocate(mg_ri_flat_offset)
+   allocate(mg_ri_flat_offset(1:ncpu))
+   mg_ri_flat_offset(1) = 0
+   do icpu = 2, ncpu
+      mg_ri_flat_offset(icpu) = mg_ri_flat_offset(icpu-1) + &
+           active_mg(icpu-1,icoarselevel)%ngrid * twotondim
+   end do
+   mg_ri_total_coarse = mg_ri_flat_offset(ncpu) + &
+        active_mg(ncpu,icoarselevel)%ngrid * twotondim
+
+   if(mg_ri_total_coarse == 0) return
+
+   ! Allocate host flat buffers for coarse data
+   if(allocated(mg_ri_coarse_rhs)) deallocate(mg_ri_coarse_rhs)
+   if(allocated(mg_ri_coarse_phi)) deallocate(mg_ri_coarse_phi)
+   allocate(mg_ri_coarse_rhs(1:mg_ri_total_coarse))
+   allocate(mg_ri_coarse_phi(1:mg_ri_total_coarse))
+
+   ! Set interpolation coefficients (from interpolate_and_correct_fine)
+   a = 1.0D0/4.0D0**ndim
+   b = 3.0D0*a
+   c = 9.0D0*a
+   d = 27.0D0*a
+   bbb(:) = (/a, b, b, c, b, c, c, d/)
+
+   ccc(:,1)=(/1 ,2 ,4 ,5 ,10,11,13,14/)
+   ccc(:,2)=(/3 ,2 ,6 ,5 ,12,11,15,14/)
+   ccc(:,3)=(/7 ,8 ,4 ,5 ,16,17,13,14/)
+   ccc(:,4)=(/9 ,8 ,6 ,5 ,18,17,15,14/)
+   ccc(:,5)=(/19,20,22,23,10,11,13,14/)
+   ccc(:,6)=(/21,20,24,23,12,11,15,14/)
+   ccc(:,7)=(/25,26,22,23,16,17,13,14/)
+   ccc(:,8)=(/27,26,24,23,18,17,15,14/)
+
+   ! Transpose ccc for GPU C row-major layout:
+   ! Fortran ccc_gpu(f,a) stored at offset (a-1)*8+(f-1) matches C d_ccc[a-1][f-1]
+   do i = 1, 8
+      do j = 1, 8
+         ccc_gpu(j, i) = ccc(i, j)
+      end do
+   end do
+
+   ! === Compute restrict_target ===
+   allocate(h_restrict_target(1:ngrid_fine))
+
+   do igrid_f_mg = 1, ngrid_fine
+      igrid_f_amr = active(ilevel)%igrid(igrid_f_mg)
+      icell_c_amr = father(igrid_f_amr)
+      ind_c_cell  = (icell_c_amr - ncoarse - 1) / ngridmax + 1
+      igrid_c_amr = icell_c_amr - ncoarse - (ind_c_cell - 1) * ngridmax
+      cpu_amr     = cpu_map(father(igrid_c_amr))
+      igrid_c_mg  = lookup_mg(igrid_c_amr)
+
+      if(igrid_c_mg <= 0) then
+         h_restrict_target(igrid_f_mg) = -1
+      else
+         ngrid_c = active_mg(cpu_amr,icoarselevel)%ngrid
+         icell_c_mg = (ind_c_cell - 1) * ngrid_c + igrid_c_mg
+         ! Check coarse mask
+         if(active_mg(cpu_amr,icoarselevel)%u(icell_c_mg,4) <= 0d0) then
+            h_restrict_target(igrid_f_mg) = -1
+         else
+            h_restrict_target(igrid_f_mg) = mg_ri_flat_offset(cpu_amr) + &
+                 icell_c_mg - 1  ! 0-based for C
+         end if
+      end if
+   end do
+
+   ! === Compute interp_nbor_flat ===
+   allocate(h_interp_nbor_flat(1:27, 1:ngrid_fine))
+
+   do istart = 1, ngrid_fine, nvector
+      nbatch = min(nvector, ngrid_fine - istart + 1)
+
+      ! Get father cells
+      do i = 1, nbatch
+         ind_cell_father_loc(i) = father(active(ilevel)%igrid(istart+i-1))
+      end do
+
+      ! Get 3x3x3 neighbor cells
+      call get3cubefather(ind_cell_father_loc, nbors_father_cells_loc, &
+           nbors_father_grids_loc, nbatch, ilevel)
+
+      ! Convert to flat indices
+      do j = 1, threetondim  ! 27
+         do i = 1, nbatch
+            igrid_f_mg  = istart + i - 1
+            icell_c_amr = nbors_father_cells_loc(i, j)
+            ind_c_cell  = (icell_c_amr - ncoarse - 1) / ngridmax + 1
+            igrid_c_amr = icell_c_amr - ncoarse - (ind_c_cell - 1) * ngridmax
+            cpu_amr     = cpu_map(father(igrid_c_amr))
+            igrid_c_mg  = lookup_mg(igrid_c_amr)
+
+            if(igrid_c_mg <= 0) then
+               h_interp_nbor_flat(j, igrid_f_mg) = -1
+            else
+               ngrid_c = active_mg(cpu_amr,icoarselevel)%ngrid
+               icell_c_mg = (ind_c_cell - 1) * ngrid_c + igrid_c_mg
+               h_interp_nbor_flat(j, igrid_f_mg) = &
+                    mg_ri_flat_offset(cpu_amr) + icell_c_mg - 1  ! 0-based
+            end if
+         end do
+      end do
+   end do
+
+   ! Upload to GPU
+   call cuda_mg_ri_setup_c(h_restrict_target, h_interp_nbor_flat, &
+        int(ngrid_fine, c_int), int(mg_ri_total_coarse, c_int), &
+        bbb, ccc_gpu)
+
+   deallocate(h_restrict_target, h_interp_nbor_flat)
+
+   if(myid==1) write(*,'(A,I3,A,I10,A,I10)') &
+        ' MG RI precompute: level=',ilevel, &
+        ' ngrid_fine=',ngrid_fine,' total_coarse=',mg_ri_total_coarse
+
+end subroutine precompute_mg_gpu_restrict_interp
+#endif
+
+
+! ------------------------------------------------------------------------
+! Scatter coarse RHS from flat array into active_mg structure
+! Called after GPU restrict download
+! ------------------------------------------------------------------------
+#ifdef HYDRO_CUDA
+subroutine scatter_coarse_rhs_from_flat(ilevel)
+   use amr_commons
+   use poisson_commons
+   implicit none
+
+   integer, intent(in) :: ilevel
+   integer :: icoarselevel, icpu, ngrid_c, ncells_c, offset
+
+   icoarselevel = ilevel - 1
+
+   ! Scatter flat data into active_mg%u(:,2)
+   ! The flat buffer replaces (not accumulates) since it was zeroed on GPU
+   do icpu = 1, ncpu
+      ngrid_c = active_mg(icpu,icoarselevel)%ngrid
+      if(ngrid_c == 0) cycle
+      ncells_c = ngrid_c * twotondim
+      offset = mg_ri_flat_offset(icpu)
+      active_mg(icpu,icoarselevel)%u(1:ncells_c,2) = &
+           mg_ri_coarse_rhs(offset+1:offset+ncells_c)
+   end do
+
+end subroutine scatter_coarse_rhs_from_flat
+#endif
+
+
+! ------------------------------------------------------------------------
+! Gather coarse phi from active_mg structure into flat array
+! Called before GPU interp upload
+! ------------------------------------------------------------------------
+#ifdef HYDRO_CUDA
+subroutine gather_coarse_phi_to_flat(ilevel)
+   use amr_commons
+   use poisson_commons
+   implicit none
+
+   integer, intent(in) :: ilevel
+   integer :: icoarselevel, icpu, ngrid_c, ncells_c, offset
+
+   icoarselevel = ilevel - 1
+
+   ! Gather active_mg%u(:,1) into flat array
+   do icpu = 1, ncpu
+      ngrid_c = active_mg(icpu,icoarselevel)%ngrid
+      if(ngrid_c == 0) cycle
+      ncells_c = ngrid_c * twotondim
+      offset = mg_ri_flat_offset(icpu)
+      mg_ri_coarse_phi(offset+1:offset+ncells_c) = &
+           active_mg(icpu,icoarselevel)%u(1:ncells_c,1)
+   end do
+
+end subroutine gather_coarse_phi_to_flat
 #endif
 
 
@@ -2023,6 +2346,137 @@ subroutine dump_mg_levels(ilevel,idout)
 #endif
 
 end subroutine dump_mg_levels
+
+
+#ifdef HYDRO_CUDA
+! ########################################################################
+! cuFFT direct Poisson solver for fully uniform levels (periodic BC)
+! Replaces MG V-cycle iteration with single FFT solve: O(N log N) vs O(N * niter)
+! ########################################################################
+
+subroutine fft_poisson_solve_uniform(ilevel, icount)
+   use amr_commons
+   use poisson_commons
+   use poisson_parameters
+   use poisson_cuda_interface
+   use iso_c_binding
+
+   implicit none
+#ifndef WITHOUTMPI
+   include "mpif.h"
+#endif
+
+   integer, intent(in) :: ilevel, icount
+
+   ! Grid dimensions
+   integer :: fft_Nx, fft_Ny, fft_Nz
+   integer(i8b) :: N_total
+   real(dp) :: dx_fft, dx2_fft
+
+   ! Persistent arrays (saved across calls to avoid reallocation)
+   integer,  allocatable, save :: fft_map(:)
+   real(dp), allocatable, save :: rhs_3d(:), rhs_local(:)
+   integer(i8b), save :: saved_N_total = 0
+
+   ! Loop variables
+   integer :: igrid, ngrid_loc, ind, iskip
+   integer :: icell_amr, igrid_amr
+   integer :: ix, iy, iz, idx_3d
+   integer :: Kx, Ky, Kz
+   integer :: info
+
+   ! Grid dimensions for this level (cell grid, not oct grid)
+   fft_Nx = nx * 2**ilevel
+   fft_Ny = ny * 2**ilevel
+   fft_Nz = nz * 2**ilevel
+   N_total = int(fft_Nx, i8b) * int(fft_Ny, i8b) * int(fft_Nz, i8b)
+
+   dx_fft  = 0.5d0**ilevel
+   dx2_fft = dx_fft * dx_fft
+
+   if(myid==1) write(*,'(A,I3,A,I5,A,I5,A,I5,A,I15)') &
+        ' cuFFT Poisson: level=', ilevel, &
+        ' grid=', fft_Nx, 'x', fft_Ny, 'x', fft_Nz, &
+        ' N=', N_total
+
+   ! ------------------------------------------------------------------
+   ! Persistent allocation (only allocate on first call or size change)
+   ! ------------------------------------------------------------------
+   if(N_total /= saved_N_total) then
+      if(allocated(fft_map))   deallocate(fft_map)
+      if(allocated(rhs_local)) deallocate(rhs_local)
+      if(allocated(rhs_3d))    deallocate(rhs_3d)
+      allocate(fft_map(0:N_total-1))
+      allocate(rhs_local(0:N_total-1))
+      allocate(rhs_3d(0:N_total-1))
+      saved_N_total = N_total
+   end if
+
+   ! ------------------------------------------------------------------
+   ! Step 1: Build fft_map and gather local RHS
+   ! fft_map(idx_3d) = icell_amr (1-based), idx_3d is 0-based C index
+   ! ------------------------------------------------------------------
+   fft_map   = 0
+   rhs_local = 0.0d0
+
+   ngrid_loc = active(ilevel)%ngrid
+   do igrid = 1, ngrid_loc
+      igrid_amr = active(ilevel)%igrid(igrid)
+
+      ! Grid center coordinates -> integer cell coords
+      Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+      Ky = nint(xg(igrid_amr, 2) * dble(fft_Ny))
+      Kz = nint(xg(igrid_amr, 3) * dble(fft_Nz))
+
+      do ind = 1, twotondim
+         ! Child cell offset within oct (0-based)
+         ix = Kx - 1 + mod(ind-1, 2)
+         iy = Ky - 1 + mod((ind-1)/2, 2)
+         iz = Kz - 1 + (ind-1)/4
+
+         ! Periodic wrapping
+         ix = modulo(ix, fft_Nx)
+         iy = modulo(iy, fft_Ny)
+         iz = modulo(iz, fft_Nz)
+
+         ! C row-major index: idx = ix * Ny * Nz + iy * Nz + iz
+         idx_3d = ix * fft_Ny * fft_Nz + iy * fft_Nz + iz
+
+         ! RAMSES cell index
+         iskip = ncoarse + (ind - 1) * ngridmax
+         icell_amr = iskip + igrid_amr
+
+         fft_map(idx_3d) = icell_amr
+         rhs_local(idx_3d) = f(icell_amr, 2)
+      end do
+   end do
+
+   ! ------------------------------------------------------------------
+   ! Step 2: MPI_Allreduce to get global RHS (all ranks contribute local parts)
+   ! ------------------------------------------------------------------
+#ifndef WITHOUTMPI
+   call MPI_ALLREDUCE(rhs_local, rhs_3d, int(N_total), &
+        MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+#else
+   rhs_3d = rhs_local
+#endif
+
+   ! Note: fft_map stays LOCAL (each rank's own cell indices)
+   ! The scatter kernel uses local fft_map to write to local d_mg_phi
+
+   ! ------------------------------------------------------------------
+   ! Step 3: cuFFT setup (plans + Green's function, only on first call or grid change)
+   ! ------------------------------------------------------------------
+   call cuda_fft_poisson_setup_c(fft_map, &
+        int(fft_Nx, c_int), int(fft_Ny, c_int), int(fft_Nz, c_int), dx2_fft)
+
+   ! ------------------------------------------------------------------
+   ! Step 4: cuFFT solve (upload RHS, FFT, Green, IFFT, scatter to d_mg_phi)
+   ! ------------------------------------------------------------------
+   call cuda_fft_poisson_solve_c(rhs_3d, int(N_total, c_int))
+
+end subroutine fft_poisson_solve_uniform
+#endif
 
 ! ########################################################################
 ! ########################################################################

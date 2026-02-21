@@ -4,9 +4,11 @@
 // ==========================================================================
 
 #include "cuda_stream_pool.h"
+#include <cufft.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
+#include <cmath>
 
 // ==========================================================================
 // Lookup tables in constant memory
@@ -58,6 +60,24 @@ static int     h_mg_partial_cap   = 0;
 // Dedicated stream for MG operations
 static cudaStream_t g_mg_stream = nullptr;
 
+// Forward declarations for restrict/interp arrays (used by cuda_mg_finalize)
+// Constant memory for interpolation coefficients
+__constant__ double d_bbb_interp[8];
+__constant__ int d_ccc_interp[8][8];  // [ind_average][ind_f], 1-based values
+
+// Device arrays for restrict/interp mappings
+static int*    d_restrict_target    = nullptr;
+static int*    d_interp_nbor_flat   = nullptr;
+static double* d_coarse_rhs_flat    = nullptr;
+static double* d_coarse_phi_flat    = nullptr;
+
+// Pinned host buffers for coarse data transfer
+static double* h_coarse_rhs_pinned  = nullptr;
+static double* h_coarse_phi_pinned  = nullptr;
+
+static int     g_ri_ngrid  = 0;
+static int     g_ri_ncells = 0;
+
 // ==========================================================================
 // GPU-resident halo exchange arrays for MG phi
 // ==========================================================================
@@ -69,6 +89,17 @@ static double* h_halo_emit_buf   = nullptr;  // pinned host staging for gather
 static double* h_halo_recv_buf   = nullptr;  // pinned host staging for scatter
 static int     g_halo_n_emit = 0;
 static int     g_halo_n_recv = 0;
+
+// ==========================================================================
+// cuFFT Poisson solver state (forward declarations for cuda_mg_finalize)
+// ==========================================================================
+static cufftHandle g_fft_plan_d2z = 0;
+static cufftHandle g_fft_plan_z2d = 0;
+static cufftDoubleReal*    d_fft_real    = nullptr;
+static cufftDoubleComplex* d_fft_complex = nullptr;
+static double*             d_fft_green   = nullptr;
+static int*                d_fft_map     = nullptr;
+static int g_fft_Nx = 0, g_fft_Ny = 0, g_fft_Nz = 0;
 
 // ==========================================================================
 // Gauss-Seidel kernel: one thread per active grid, processes 4 cells
@@ -484,7 +515,7 @@ void cuda_mg_free(void)
 
 void cuda_mg_finalize(void)
 {
-    // Free halo exchange arrays (inline to avoid forward declaration)
+    // Free halo exchange arrays
     if (d_halo_emit_cells) { cudaFree(d_halo_emit_cells); d_halo_emit_cells = nullptr; }
     if (d_halo_recv_cells) { cudaFree(d_halo_recv_cells); d_halo_recv_cells = nullptr; }
     if (d_halo_emit_buf)   { cudaFree(d_halo_emit_buf);   d_halo_emit_buf   = nullptr; }
@@ -493,6 +524,25 @@ void cuda_mg_finalize(void)
     if (h_halo_recv_buf)   { cudaFreeHost(h_halo_recv_buf); h_halo_recv_buf = nullptr; }
     g_halo_n_emit = 0;
     g_halo_n_recv = 0;
+
+    // Free restrict/interp arrays
+    if (d_restrict_target)   { cudaFree(d_restrict_target);   d_restrict_target   = nullptr; }
+    if (d_interp_nbor_flat)  { cudaFree(d_interp_nbor_flat);  d_interp_nbor_flat  = nullptr; }
+    if (d_coarse_rhs_flat)   { cudaFree(d_coarse_rhs_flat);   d_coarse_rhs_flat   = nullptr; }
+    if (d_coarse_phi_flat)   { cudaFree(d_coarse_phi_flat);   d_coarse_phi_flat   = nullptr; }
+    if (h_coarse_rhs_pinned) { cudaFreeHost(h_coarse_rhs_pinned); h_coarse_rhs_pinned = nullptr; }
+    if (h_coarse_phi_pinned) { cudaFreeHost(h_coarse_phi_pinned); h_coarse_phi_pinned = nullptr; }
+    g_ri_ngrid  = 0;
+    g_ri_ncells = 0;
+
+    // Free cuFFT arrays
+    if (g_fft_plan_d2z) { cufftDestroy(g_fft_plan_d2z); g_fft_plan_d2z = 0; }
+    if (g_fft_plan_z2d) { cufftDestroy(g_fft_plan_z2d); g_fft_plan_z2d = 0; }
+    if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
+    if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
+    if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+    if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
+    g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
 
     if (d_mg_phi)   { cudaFree(d_mg_phi);   d_mg_phi   = nullptr; }
     if (d_mg_f1)    { cudaFree(d_mg_f1);    d_mg_f1    = nullptr; }
@@ -607,3 +657,501 @@ void cuda_mg_halo_free(void)
 }
 
 } // extern "C"
+
+// ==========================================================================
+// GPU Restriction + Interpolation for MG V-cycle
+// Eliminates full phi/f1 D2H/H2D transfers by doing restrict/interp on GPU
+// Only small coarse-level data (~20 MB) transferred via PCIe
+// ==========================================================================
+
+// Static arrays d_restrict_target, d_interp_nbor_flat, d_coarse_rhs_flat,
+// d_coarse_phi_flat, h_coarse_rhs_pinned, h_coarse_phi_pinned,
+// g_ri_ngrid, g_ri_ncells declared at top of file (before cuda_mg_finalize).
+
+// ==========================================================================
+// Restriction kernel: accumulate fine residual into coarse RHS
+// 1 thread per fine grid. Each fine grid has a unique father → no atomics.
+// ==========================================================================
+__global__ void restrict_residual_fine_kernel(
+    const double* __restrict__ f1,
+    const double* __restrict__ f3,
+    const int* __restrict__ igrid_arr,
+    const int* __restrict__ restrict_target,
+    double* __restrict__ coarse_rhs_flat,
+    int ngrid, int ngridmax, int ncoarse)
+{
+    int igrid_f_mg = blockIdx.x * blockDim.x + threadIdx.x;
+    if (igrid_f_mg >= ngrid) return;
+
+    int target = restrict_target[igrid_f_mg];
+    if (target < 0) return;  // coarse cell masked or not in MG
+
+    int igrid_amr = igrid_arr[igrid_f_mg]; // 1-based Fortran grid index
+
+    double sum = 0.0;
+    for (int ind_f = 0; ind_f < 8; ind_f++) {
+        int icell_f = ncoarse + ind_f * ngridmax + igrid_amr; // 1-based
+        if (f3[icell_f - 1] > 0.0) {
+            sum += f1[icell_f - 1];
+        }
+    }
+
+    coarse_rhs_flat[target] = sum / 8.0;
+}
+
+// ==========================================================================
+// Interpolation kernel: correct fine phi from coarse solution
+// 1 thread per fine grid. Loads 27 coarse phi values, applies bbb/ccc weights.
+// ==========================================================================
+__global__ void interpolate_correct_fine_kernel(
+    double* __restrict__ phi,
+    const double* __restrict__ f3,
+    const int* __restrict__ igrid_arr,
+    const int* __restrict__ interp_nbor_flat,
+    const double* __restrict__ coarse_phi_flat,
+    int ngrid, int ngridmax, int ncoarse)
+{
+    int igrid_f_mg = blockIdx.x * blockDim.x + threadIdx.x;
+    if (igrid_f_mg >= ngrid) return;
+
+    int igrid_amr = igrid_arr[igrid_f_mg]; // 1-based
+
+    // Load 27 coarse phi values from flat array
+    double coarse_vals[27];
+    for (int j = 0; j < 27; j++) {
+        int idx = interp_nbor_flat[igrid_f_mg * 27 + j];
+        coarse_vals[j] = (idx >= 0) ? coarse_phi_flat[idx] : 0.0;
+    }
+
+    // Process 8 children
+    for (int ind_f = 0; ind_f < 8; ind_f++) {
+        int icell_f = ncoarse + ind_f * ngridmax + igrid_amr; // 1-based
+        if (f3[icell_f - 1] <= 0.0) continue;  // fine cell masked
+
+        double corr = 0.0;
+        for (int ind_avg = 0; ind_avg < 8; ind_avg++) {
+            int j = d_ccc_interp[ind_avg][ind_f] - 1;  // 0-based index into 27
+            corr += d_bbb_interp[ind_avg] * coarse_vals[j];
+        }
+        phi[icell_f - 1] += corr;
+    }
+}
+
+// ==========================================================================
+// C API for restrict/interp
+// ==========================================================================
+
+extern "C" {
+
+void cuda_mg_ri_setup(const int* restrict_target, const int* interp_nbor_flat,
+                      int ngrid_fine, int total_coarse_cells,
+                      const double* bbb, const int* ccc)
+{
+    if (!g_mg_stream || !g_mg_ready) return;
+
+    // Free previous allocations
+    if (d_restrict_target)   { cudaFree(d_restrict_target);   d_restrict_target   = nullptr; }
+    if (d_interp_nbor_flat)  { cudaFree(d_interp_nbor_flat);  d_interp_nbor_flat  = nullptr; }
+    if (d_coarse_rhs_flat)   { cudaFree(d_coarse_rhs_flat);   d_coarse_rhs_flat   = nullptr; }
+    if (d_coarse_phi_flat)   { cudaFree(d_coarse_phi_flat);   d_coarse_phi_flat   = nullptr; }
+    if (h_coarse_rhs_pinned) { cudaFreeHost(h_coarse_rhs_pinned); h_coarse_rhs_pinned = nullptr; }
+    if (h_coarse_phi_pinned) { cudaFreeHost(h_coarse_phi_pinned); h_coarse_phi_pinned = nullptr; }
+
+    g_ri_ngrid  = ngrid_fine;
+    g_ri_ncells = total_coarse_cells;
+
+    if (ngrid_fine <= 0 || total_coarse_cells <= 0) {
+        g_ri_ngrid = 0;
+        return;
+    }
+
+    // Check GPU memory
+    size_t free_mem = 0, total_mem = 0;
+    cudaMemGetInfo(&free_mem, &total_mem);
+    size_t need = (size_t)ngrid_fine * sizeof(int)                   // restrict_target
+                + (size_t)ngrid_fine * 27 * sizeof(int)              // interp_nbor_flat
+                + (size_t)total_coarse_cells * 2 * sizeof(double);   // rhs + phi
+
+    if (need > free_mem * 9 / 10) {
+        fprintf(stderr, "CUDA MG RI: need %.1f MB but only %.1f MB free — SKIP\n",
+                (double)need / (1024.0*1024.0), (double)free_mem / (1024.0*1024.0));
+        g_ri_ngrid = 0;
+        return;
+    }
+
+    // Allocate device arrays
+    cudaError_t e1 = cudaMalloc(&d_restrict_target,  (size_t)ngrid_fine * sizeof(int));
+    cudaError_t e2 = cudaMalloc(&d_interp_nbor_flat, (size_t)ngrid_fine * 27 * sizeof(int));
+    cudaError_t e3 = cudaMalloc(&d_coarse_rhs_flat,  (size_t)total_coarse_cells * sizeof(double));
+    cudaError_t e4 = cudaMalloc(&d_coarse_phi_flat,  (size_t)total_coarse_cells * sizeof(double));
+
+    if (e1 || e2 || e3 || e4) {
+        fprintf(stderr, "CUDA MG RI: device allocation FAILED (%.1f MB)\n",
+                (double)need / (1024.0*1024.0));
+        if (d_restrict_target)  { cudaFree(d_restrict_target);  d_restrict_target  = nullptr; }
+        if (d_interp_nbor_flat) { cudaFree(d_interp_nbor_flat); d_interp_nbor_flat = nullptr; }
+        if (d_coarse_rhs_flat)  { cudaFree(d_coarse_rhs_flat);  d_coarse_rhs_flat  = nullptr; }
+        if (d_coarse_phi_flat)  { cudaFree(d_coarse_phi_flat);  d_coarse_phi_flat  = nullptr; }
+        g_ri_ngrid = 0;
+        return;
+    }
+
+    // Allocate pinned host buffers
+    cudaMallocHost(&h_coarse_rhs_pinned, (size_t)total_coarse_cells * sizeof(double));
+    cudaMallocHost(&h_coarse_phi_pinned, (size_t)total_coarse_cells * sizeof(double));
+
+    // Upload mappings
+    cudaMemcpy(d_restrict_target, restrict_target,
+               (size_t)ngrid_fine * sizeof(int), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_interp_nbor_flat, interp_nbor_flat,
+               (size_t)ngrid_fine * 27 * sizeof(int), cudaMemcpyHostToDevice);
+
+    // Upload interpolation coefficients to constant memory
+    cudaMemcpyToSymbol(d_bbb_interp, bbb, 8 * sizeof(double));
+    cudaMemcpyToSymbol(d_ccc_interp, ccc, 64 * sizeof(int));
+
+    cudaDeviceSynchronize();
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "CUDA MG RI setup error: %s\n", cudaGetErrorString(err));
+        g_ri_ngrid = 0;
+        return;
+    }
+
+    printf("MG RI setup: ngrid_fine=%d total_coarse=%d (%.1f MB)\n",
+           ngrid_fine, total_coarse_cells, (double)need / (1024.0*1024.0));
+    fflush(stdout);
+}
+
+void cuda_mg_restrict_execute(int ngrid, int ngridmax, int ncoarse)
+{
+    if (g_ri_ngrid <= 0 || !g_mg_ready || !d_coarse_rhs_flat) return;
+
+    // Clear coarse RHS
+    cudaMemsetAsync(d_coarse_rhs_flat, 0,
+                    (size_t)g_ri_ncells * sizeof(double), g_mg_stream);
+
+    int block = 256;
+    int grid = (ngrid + block - 1) / block;
+
+    restrict_residual_fine_kernel<<<grid, block, 0, g_mg_stream>>>(
+        d_mg_f1, d_mg_f3, d_mg_igrid, d_restrict_target,
+        d_coarse_rhs_flat,
+        ngrid, ngridmax, ncoarse);
+
+    cudaStreamSynchronize(g_mg_stream);
+}
+
+void cuda_mg_restrict_download(double* h_coarse_rhs, int total_cells)
+{
+    if (g_ri_ngrid <= 0 || !d_coarse_rhs_flat || total_cells <= 0) return;
+
+    cudaMemcpyAsync(h_coarse_rhs_pinned, d_coarse_rhs_flat,
+                    (size_t)total_cells * sizeof(double),
+                    cudaMemcpyDeviceToHost, g_mg_stream);
+    cudaStreamSynchronize(g_mg_stream);
+
+    memcpy(h_coarse_rhs, h_coarse_rhs_pinned, (size_t)total_cells * sizeof(double));
+}
+
+void cuda_mg_interp_upload(const double* h_coarse_phi, int total_cells)
+{
+    if (g_ri_ngrid <= 0 || !d_coarse_phi_flat || total_cells <= 0) return;
+
+    memcpy(h_coarse_phi_pinned, h_coarse_phi, (size_t)total_cells * sizeof(double));
+
+    cudaMemcpyAsync(d_coarse_phi_flat, h_coarse_phi_pinned,
+                    (size_t)total_cells * sizeof(double),
+                    cudaMemcpyHostToDevice, g_mg_stream);
+    cudaStreamSynchronize(g_mg_stream);
+}
+
+void cuda_mg_interp_execute(int ngrid, int ngridmax, int ncoarse)
+{
+    if (g_ri_ngrid <= 0 || !g_mg_ready || !d_coarse_phi_flat) return;
+
+    int block = 256;
+    int grid = (ngrid + block - 1) / block;
+
+    interpolate_correct_fine_kernel<<<grid, block, 0, g_mg_stream>>>(
+        d_mg_phi, d_mg_f3, d_mg_igrid, d_interp_nbor_flat,
+        d_coarse_phi_flat,
+        ngrid, ngridmax, ncoarse);
+
+    cudaStreamSynchronize(g_mg_stream);
+}
+
+int cuda_mg_ri_is_ready(void)
+{
+    return (g_ri_ngrid > 0) ? 1 : 0;
+}
+
+void cuda_mg_ri_free(void)
+{
+    if (d_restrict_target)   { cudaFree(d_restrict_target);   d_restrict_target   = nullptr; }
+    if (d_interp_nbor_flat)  { cudaFree(d_interp_nbor_flat);  d_interp_nbor_flat  = nullptr; }
+    if (d_coarse_rhs_flat)   { cudaFree(d_coarse_rhs_flat);   d_coarse_rhs_flat   = nullptr; }
+    if (d_coarse_phi_flat)   { cudaFree(d_coarse_phi_flat);   d_coarse_phi_flat   = nullptr; }
+    if (h_coarse_rhs_pinned) { cudaFreeHost(h_coarse_rhs_pinned); h_coarse_rhs_pinned = nullptr; }
+    if (h_coarse_phi_pinned) { cudaFreeHost(h_coarse_phi_pinned); h_coarse_phi_pinned = nullptr; }
+    g_ri_ngrid  = 0;
+    g_ri_ncells = 0;
+}
+
+} // extern "C" — restrict/interp
+
+// ==========================================================================
+// cuFFT Poisson solver for uniform base level
+// Direct spectral solve: FFT → Green's function multiply → IFFT
+// Replaces iterative MG V-cycle for fully uniform levels with periodic BC.
+// ==========================================================================
+
+// (Static cuFFT state declared at top of file with other statics)
+
+// ==========================================================================
+// Kernel: gather RHS from RAMSES cells via fft_map into 3D real array
+// d_fft_real[idx_3d] = d_rhs[fft_map[idx_3d] - 1]  (fft_map is 1-based)
+// ==========================================================================
+__global__ void fft_gather_kernel(
+    cufftDoubleReal* __restrict__ d_real,
+    const double* __restrict__ d_rhs,
+    const int* __restrict__ fft_map,
+    int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    int icell = fft_map[idx];  // 1-based Fortran index
+    d_real[idx] = (icell > 0) ? d_rhs[icell - 1] : 0.0;
+}
+
+// ==========================================================================
+// Kernel: multiply complex spectrum by real Green's function
+// d_complex[i] *= d_green[i]  (element-wise complex × real)
+// ==========================================================================
+__global__ void fft_green_kernel(
+    cufftDoubleComplex* __restrict__ d_cplx,
+    const double* __restrict__ d_green,
+    int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    double g = d_green[idx];
+    d_cplx[idx].x *= g;
+    d_cplx[idx].y *= g;
+}
+
+// ==========================================================================
+// Kernel: scatter solved phi from 3D real array back to RAMSES cells
+// d_phi[fft_map[idx_3d] - 1] = d_fft_real[idx_3d]
+// ==========================================================================
+__global__ void fft_scatter_kernel(
+    double* __restrict__ d_phi,
+    const cufftDoubleReal* __restrict__ d_real,
+    const int* __restrict__ fft_map,
+    int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    int icell = fft_map[idx];  // 1-based Fortran index
+    if (icell > 0) d_phi[icell - 1] = d_real[idx];
+}
+
+// ==========================================================================
+// Host helper: compute scaled Green's function on CPU, upload to GPU
+// G_scaled[kx,ky,kz] = dx2 / (N^3 * L_k)
+// where L_k = 2cos(2pi*kx/Nx) + 2cos(2pi*ky/Ny) + 2cos(2pi*kz/Nz) - 6
+// k=0: G_scaled = 0 (zero-mean)
+// ==========================================================================
+static void compute_green_function(int Nx, int Ny, int Nz, double dx2)
+{
+    int Nz_complex = Nz / 2 + 1;
+    long long N_complex = (long long)Nx * Ny * Nz_complex;
+    double N3 = (double)Nx * (double)Ny * (double)Nz;
+    double twopi_x = 2.0 * M_PI / (double)Nx;
+    double twopi_y = 2.0 * M_PI / (double)Ny;
+    double twopi_z = 2.0 * M_PI / (double)Nz;
+
+    double* h_green = (double*)malloc((size_t)N_complex * sizeof(double));
+    if (!h_green) {
+        fprintf(stderr, "cuFFT: failed to allocate host Green's function\n");
+        return;
+    }
+
+    for (int kx = 0; kx < Nx; kx++) {
+        double cx = 2.0 * cos(twopi_x * kx);
+        for (int ky = 0; ky < Ny; ky++) {
+            double cxy = cx + 2.0 * cos(twopi_y * ky);
+            for (int kz = 0; kz < Nz_complex; kz++) {
+                long long idx = (long long)kx * Ny * Nz_complex
+                              + (long long)ky * Nz_complex + kz;
+                double Lk = cxy + 2.0 * cos(twopi_z * kz) - 6.0;
+                if (kx == 0 && ky == 0 && kz == 0) {
+                    h_green[idx] = 0.0;  // zero mode
+                } else {
+                    h_green[idx] = dx2 / (N3 * Lk);
+                }
+            }
+        }
+    }
+
+    cudaMemcpy(d_fft_green, h_green, (size_t)N_complex * sizeof(double),
+               cudaMemcpyHostToDevice);
+    free(h_green);
+}
+
+// ==========================================================================
+// C API: cuda_fft_poisson_setup
+// Upload fft_map, create cuFFT plans, compute Green's function
+// Called once per level (or when grid changes)
+// ==========================================================================
+extern "C" {
+
+void cuda_fft_poisson_setup(const int* fft_map, int Nx, int Ny, int Nz, double dx2)
+{
+    if (!g_mg_stream) {
+        cudaStreamCreateWithFlags(&g_mg_stream, cudaStreamNonBlocking);
+    }
+
+    long long N_real = (long long)Nx * Ny * Nz;
+    int Nz_complex = Nz / 2 + 1;
+    long long N_complex = (long long)Nx * Ny * Nz_complex;
+
+    // Check if plans need recreation (grid size changed)
+    if (Nx != g_fft_Nx || Ny != g_fft_Ny || Nz != g_fft_Nz) {
+        // Destroy old plans
+        if (g_fft_plan_d2z) { cufftDestroy(g_fft_plan_d2z); g_fft_plan_d2z = 0; }
+        if (g_fft_plan_z2d) { cufftDestroy(g_fft_plan_z2d); g_fft_plan_z2d = 0; }
+        if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
+        if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
+        if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+        if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
+
+        // Check GPU memory
+        size_t free_mem = 0, total_mem = 0;
+        cudaMemGetInfo(&free_mem, &total_mem);
+        size_t need = (size_t)N_real * sizeof(cufftDoubleReal)
+                    + (size_t)N_complex * sizeof(cufftDoubleComplex)
+                    + (size_t)N_complex * sizeof(double)
+                    + (size_t)N_real * sizeof(int);
+        if (need > free_mem * 8 / 10) {
+            fprintf(stderr, "cuFFT: need %.1f MB but only %.1f MB free — SKIP\n",
+                    (double)need / (1024.0*1024.0), (double)free_mem / (1024.0*1024.0));
+            g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
+            return;
+        }
+
+        // Allocate arrays
+        cudaError_t e1 = cudaMalloc(&d_fft_real,    (size_t)N_real * sizeof(cufftDoubleReal));
+        cudaError_t e2 = cudaMalloc(&d_fft_complex, (size_t)N_complex * sizeof(cufftDoubleComplex));
+        cudaError_t e3 = cudaMalloc(&d_fft_green,   (size_t)N_complex * sizeof(double));
+        cudaError_t e4 = cudaMalloc(&d_fft_map,     (size_t)N_real * sizeof(int));
+        if (e1 || e2 || e3 || e4) {
+            fprintf(stderr, "cuFFT: allocation FAILED\n");
+            if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
+            if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
+            if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+            if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
+            g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
+            return;
+        }
+
+        // Create cuFFT plans
+        int dims[3] = {Nx, Ny, Nz};  // row-major: x varies slowest
+        cufftResult r1 = cufftPlanMany(&g_fft_plan_d2z, 3, dims,
+                                        NULL, 1, 0, NULL, 1, 0,
+                                        CUFFT_D2Z, 1);
+        cufftResult r2 = cufftPlanMany(&g_fft_plan_z2d, 3, dims,
+                                        NULL, 1, 0, NULL, 1, 0,
+                                        CUFFT_Z2D, 1);
+        if (r1 != CUFFT_SUCCESS || r2 != CUFFT_SUCCESS) {
+            fprintf(stderr, "cuFFT: plan creation FAILED (r1=%d r2=%d)\n", r1, r2);
+            if (g_fft_plan_d2z) { cufftDestroy(g_fft_plan_d2z); g_fft_plan_d2z = 0; }
+            if (g_fft_plan_z2d) { cufftDestroy(g_fft_plan_z2d); g_fft_plan_z2d = 0; }
+            g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
+            return;
+        }
+
+        // Set plans to use MG stream
+        cufftSetStream(g_fft_plan_d2z, g_mg_stream);
+        cufftSetStream(g_fft_plan_z2d, g_mg_stream);
+
+        g_fft_Nx = Nx;
+        g_fft_Ny = Ny;
+        g_fft_Nz = Nz;
+
+        // Compute and upload Green's function
+        compute_green_function(Nx, Ny, Nz, dx2);
+
+        printf("cuFFT setup: %d x %d x %d, dx2=%.6e, GPU mem=%.1f MB\n",
+               Nx, Ny, Nz, dx2, (double)need / (1024.0*1024.0));
+        fflush(stdout);
+    }
+
+    // Always upload fft_map (may change after load balancing)
+    cudaMemcpy(d_fft_map, fft_map, (size_t)N_real * sizeof(int),
+               cudaMemcpyHostToDevice);
+}
+
+// ==========================================================================
+// C API: cuda_fft_poisson_solve
+// Assumes d_mg_f2 has RHS already uploaded (via cuda_mg_upload),
+// and d_fft_map is set via cuda_fft_poisson_setup.
+// After solve, d_mg_phi contains the solution.
+// ==========================================================================
+void cuda_fft_poisson_solve(const double* h_rhs_3d, int N_real_in)
+{
+    if (g_fft_Nx <= 0 || !d_fft_real || !g_mg_stream) return;
+
+    long long N_real = (long long)g_fft_Nx * g_fft_Ny * g_fft_Nz;
+    int Nz_complex = g_fft_Nz / 2 + 1;
+    long long N_complex = (long long)g_fft_Nx * g_fft_Ny * Nz_complex;
+
+    // Upload global RHS 3D array to d_fft_real
+    cudaMemcpyAsync(d_fft_real, h_rhs_3d, (size_t)N_real * sizeof(double),
+                    cudaMemcpyHostToDevice, g_mg_stream);
+
+    // Forward FFT: R2C
+    cufftResult r = cufftExecD2Z(g_fft_plan_d2z, d_fft_real, d_fft_complex);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFT forward FAILED: %d\n", r);
+        return;
+    }
+
+    // Apply Green's function
+    int block = 256;
+    int grid = ((int)N_complex + block - 1) / block;
+    fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
+        d_fft_complex, d_fft_green, (int)N_complex);
+
+    // Inverse FFT: C2R
+    r = cufftExecZ2D(g_fft_plan_z2d, d_fft_complex, d_fft_real);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFT inverse FAILED: %d\n", r);
+        return;
+    }
+
+    // Scatter from 3D array to RAMSES phi via fft_map
+    grid = ((int)N_real + block - 1) / block;
+    fft_scatter_kernel<<<grid, block, 0, g_mg_stream>>>(
+        d_mg_phi, d_fft_real, d_fft_map, (int)N_real);
+
+    cudaStreamSynchronize(g_mg_stream);
+}
+
+// ==========================================================================
+// C API: cuda_fft_poisson_free
+// Free cuFFT plans and arrays. Called at finalize.
+// ==========================================================================
+void cuda_fft_poisson_free(void)
+{
+    if (g_fft_plan_d2z) { cufftDestroy(g_fft_plan_d2z); g_fft_plan_d2z = 0; }
+    if (g_fft_plan_z2d) { cufftDestroy(g_fft_plan_z2d); g_fft_plan_z2d = 0; }
+    if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
+    if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
+    if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+    if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
+    g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
+}
+
+} // extern "C" — cuFFT Poisson
