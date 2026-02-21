@@ -1116,9 +1116,13 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
 
   ! Upload mesh arrays to GPU (serial, once per godunov_fine call)
   call system_clock(t_start)
-  ncell_total = int(ncoarse, c_long_long) + int(twotondim, c_long_long) * int(ngridmax, c_long_long)
-  call cuda_mesh_upload_f(uold, f, son, ncell_total, int(nvar, c_int), int(ndim, c_int), poisson)
-  mesh_on_gpu = (cuda_mesh_is_ready_c() == 1)
+  if(gpu_hydro) then
+     ncell_total = int(ncoarse, c_long_long) + int(twotondim, c_long_long) * int(ngridmax, c_long_long)
+     call cuda_mesh_upload_f(uold, f, son, ncell_total, int(nvar, c_int), int(ndim, c_int), poisson)
+     mesh_on_gpu = (cuda_mesh_is_ready_c() == 1)
+  else
+     mesh_on_gpu = .false.
+  end if
   call system_clock(t_now)
   acc_mesh_upload = acc_mesh_upload + dble(t_now - t_start) / dble(clock_rate)
 

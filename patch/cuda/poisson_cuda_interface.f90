@@ -170,10 +170,59 @@ module poisson_cuda_interface
        integer(c_int), value :: N_real
      end subroutine
 
+     ! cuFFT Poisson: solve and return to host (no d_mg_phi dependency)
+     subroutine cuda_fft_poisson_solve_host_c(h_rhs_3d, h_phi_3d, N_real) &
+          bind(C, name='cuda_fft_poisson_solve_host')
+       import :: c_double, c_int
+       real(c_double) :: h_rhs_3d(*)
+       real(c_double) :: h_phi_3d(*)
+       integer(c_int), value :: N_real
+     end subroutine
+
      ! cuFFT Poisson: free plans and arrays
      subroutine cuda_fft_poisson_free_c() &
           bind(C, name='cuda_fft_poisson_free')
      end subroutine
+
+#ifdef USE_CUFFTMP
+     ! cuFFTMp: setup distributed FFT plan with MPI communicator
+     subroutine cuda_fftmp_poisson_setup_c(f_comm, Nx, Ny, Nz, dx2) &
+          bind(C, name='cuda_fftmp_poisson_setup')
+       import :: c_int, c_double
+       integer(c_int), value :: f_comm, Nx, Ny, Nz
+       real(c_double), value :: dx2
+     end subroutine
+
+     ! cuFFTMp: distributed solve (local X-slab RHS in, local X-slab phi out)
+     subroutine cuda_fftmp_poisson_solve_c(h_rhs_slab, h_phi_slab, &
+          local_Nx, Ny, Nz, y_start_shuffled, local_Ny_shuffled) &
+          bind(C, name='cuda_fftmp_poisson_solve')
+       import :: c_double, c_int
+       real(c_double) :: h_rhs_slab(*)
+       real(c_double) :: h_phi_slab(*)
+       integer(c_int), value :: local_Nx, Ny, Nz
+       integer(c_int), value :: y_start_shuffled, local_Ny_shuffled
+     end subroutine
+
+     ! cuFFTMp: free plan and distributed memory
+     subroutine cuda_fftmp_poisson_free_c() &
+          bind(C, name='cuda_fftmp_poisson_free')
+     end subroutine
+
+     ! cuFFTMp: check if ready (1=ready, 0=not init, -1=failed)
+     integer(c_int) function cuda_fftmp_is_ready_c() &
+          bind(C, name='cuda_fftmp_is_ready')
+       import :: c_int
+     end function
+
+     ! cuFFTMp: query local slab sizes
+     subroutine cuda_fftmp_get_local_sizes_c(local_Nx, x_start, &
+          local_Ny, y_start) &
+          bind(C, name='cuda_fftmp_get_local_sizes')
+       import :: c_int
+       integer(c_int) :: local_Nx, x_start, local_Ny, y_start
+     end subroutine
+#endif
   end interface
 
 end module poisson_cuda_interface

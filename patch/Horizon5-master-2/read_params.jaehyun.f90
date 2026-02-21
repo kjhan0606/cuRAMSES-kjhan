@@ -26,7 +26,8 @@ subroutine read_params
 !jhshin1
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
        & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,ordering &
-       & ,bisec_tol,static,geom,overload,cost_weighting,aton
+       & ,bisec_tol,static,geom,overload,cost_weighting,aton &
+       & ,gpu_hydro,gpu_poisson,gpu_fft
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump
   namelist/amr_params/levelmin,levelmax,ngridmax,ngridtot &
@@ -174,6 +175,24 @@ subroutine read_params
 
 #ifndef WITHOUTMPI
   call MPI_BCAST(nrestart,1,MPI_INTEGER,0,MPI_COMM_WORLD,ierr)
+#endif
+
+  !-------------------------------------------------
+  ! GPU acceleration: disable if not compiled with USE_CUDA
+  !-------------------------------------------------
+#ifndef HYDRO_CUDA
+  if(gpu_hydro .or. gpu_poisson .or. gpu_fft) then
+     if(myid==1) write(*,*) 'WARNING: gpu_* options ignored (not compiled with USE_CUDA)'
+     gpu_hydro = .false.
+     gpu_poisson = .false.
+     gpu_fft = .false.
+  end if
+#else
+  if(myid==1 .and. (gpu_hydro .or. gpu_poisson .or. gpu_fft)) then
+     write(*,'(A,L1,A,L1,A,L1)') &
+          ' GPU acceleration: hydro=',gpu_hydro, &
+          ' poisson=',gpu_poisson,' fft=',gpu_fft
+  end if
 #endif
 
   !-------------------------------------------------

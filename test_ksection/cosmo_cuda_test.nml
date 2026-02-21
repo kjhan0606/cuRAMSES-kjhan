@@ -7,7 +7,7 @@ nrestart=2
 nremap=5
 nsubcycle=1,1,2
 ncontrol=1
-nstepmax=10
+nstepmax=7
 ordering='ksection'
 memory_balance=.false.
 /

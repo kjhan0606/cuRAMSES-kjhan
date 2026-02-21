@@ -5,10 +5,21 @@
 
 #include "cuda_stream_pool.h"
 #include <cufft.h>
+#include <cufftXt.h>
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
 #include <cmath>
+
+#ifdef USE_CUFFTMP
+#include <mpi.h>
+// Declare cuFFTMp and NVSHMEM symbols directly to avoid header version mismatch
+// (cuFFTMp 11.4 headers expect CUFFT_VERSION 11400, system cuFFT has 12000)
+#define CUFFT_COMM_MPI_VAL 0x00
+extern "C" cufftResult cufftMpAttachComm(cufftHandle plan, int comm_type, void *comm_handle);
+
+// NVSHMEM removed — causes PMI hang with Intel MPI
+#endif
 
 // ==========================================================================
 // Lookup tables in constant memory
@@ -100,6 +111,17 @@ static cufftDoubleComplex* d_fft_complex = nullptr;
 static double*             d_fft_green   = nullptr;
 static int*                d_fft_map     = nullptr;
 static int g_fft_Nx = 0, g_fft_Ny = 0, g_fft_Nz = 0;
+
+// ==========================================================================
+// cuFFTMp distributed Poisson solver state
+// ==========================================================================
+#ifdef USE_CUFFTMP
+static cufftHandle    g_fftmp_plan = 0;
+static cudaLibXtDesc *g_fftmp_desc = nullptr;
+static int g_fftmp_Nx = 0, g_fftmp_Ny = 0, g_fftmp_Nz = 0;
+static int g_fftmp_initialized = 0;
+static double g_fftmp_dx2 = 0.0;
+#endif
 
 // ==========================================================================
 // Gauss-Seidel kernel: one thread per active grid, processes 4 cells
@@ -543,6 +565,14 @@ void cuda_mg_finalize(void)
     if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
     if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
     g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
+
+#ifdef USE_CUFFTMP
+    // Free cuFFTMp arrays
+    if (g_fftmp_desc) { cufftXtFree(g_fftmp_desc); g_fftmp_desc = nullptr; }
+    if (g_fftmp_plan) { cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0; }
+    g_fftmp_Nx = 0; g_fftmp_Ny = 0; g_fftmp_Nz = 0;
+    g_fftmp_initialized = 0;
+#endif
 
     if (d_mg_phi)   { cudaFree(d_mg_phi);   d_mg_phi   = nullptr; }
     if (d_mg_f1)    { cudaFree(d_mg_f1);    d_mg_f1    = nullptr; }
@@ -1140,6 +1170,49 @@ void cuda_fft_poisson_solve(const double* h_rhs_3d, int N_real_in)
 }
 
 // ==========================================================================
+// C API: cuda_fft_poisson_solve_host
+// Like cuda_fft_poisson_solve but returns result in host h_phi_3d array.
+// Does NOT use d_mg_phi — fully independent of MG GPU arrays.
+// ==========================================================================
+void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N_real_in)
+{
+    if (g_fft_Nx <= 0 || !d_fft_real || !g_mg_stream) return;
+
+    long long N_real = (long long)g_fft_Nx * g_fft_Ny * g_fft_Nz;
+    int Nz_complex = g_fft_Nz / 2 + 1;
+    long long N_complex = (long long)g_fft_Nx * g_fft_Ny * Nz_complex;
+
+    // Upload global RHS 3D array to d_fft_real
+    cudaMemcpyAsync(d_fft_real, h_rhs_3d, (size_t)N_real * sizeof(double),
+                    cudaMemcpyHostToDevice, g_mg_stream);
+
+    // Forward FFT: R2C
+    cufftResult r = cufftExecD2Z(g_fft_plan_d2z, d_fft_real, d_fft_complex);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFT forward FAILED: %d\n", r);
+        return;
+    }
+
+    // Apply Green's function
+    int block = 256;
+    int grid = ((int)N_complex + block - 1) / block;
+    fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
+        d_fft_complex, d_fft_green, (int)N_complex);
+
+    // Inverse FFT: C2R
+    r = cufftExecZ2D(g_fft_plan_z2d, d_fft_complex, d_fft_real);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFT inverse FAILED: %d\n", r);
+        return;
+    }
+
+    // Download result to host (no scatter to d_mg_phi)
+    cudaMemcpyAsync(h_phi_3d, d_fft_real, (size_t)N_real * sizeof(double),
+                    cudaMemcpyDeviceToHost, g_mg_stream);
+    cudaStreamSynchronize(g_mg_stream);
+}
+
+// ==========================================================================
 // C API: cuda_fft_poisson_free
 // Free cuFFT plans and arrays. Called at finalize.
 // ==========================================================================
@@ -1155,3 +1228,276 @@ void cuda_fft_poisson_free(void)
 }
 
 } // extern "C" — cuFFT Poisson
+
+// ==========================================================================
+// cuFFTMp distributed Poisson solver
+// Uses NVIDIA cuFFTMp for multi-GPU distributed 3D FFT.
+// Eliminates MPI_ALLREDUCE bottleneck by distributing data across GPUs.
+// ==========================================================================
+#ifdef USE_CUFFTMP
+
+// ==========================================================================
+// Kernel: Apply Green's function on distributed complex data (Y-slab)
+// After forward D2Z, cuFFTMp shuffles data into Y-slab decomposition.
+// Each rank processes its local Y-range of the complex array.
+// Layout: [Nx][local_Ny][Nz/2+1] in row-major
+// ==========================================================================
+__global__ void fftmp_green_kernel(
+    cufftDoubleComplex* __restrict__ d_cplx,
+    int Nx, int Ny, int Nz,
+    int local_Ny, int y_start,
+    double dx2)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int Nz_complex = Nz / 2 + 1;
+    long long total = (long long)Nx * local_Ny * Nz_complex;
+    if (idx >= total) return;
+
+    // Decompose linear index into (kx, local_ky, kz)
+    int kz = idx % Nz_complex;
+    int rem = idx / Nz_complex;
+    int local_ky = rem % local_Ny;
+    int kx = rem / local_Ny;
+
+    int ky = local_ky + y_start;
+
+    // Compute Green's function: G = dx2 / (N^3 * Lk)
+    // Lk = 2*cos(2*pi*kx/Nx) + 2*cos(2*pi*ky/Ny) + 2*cos(2*pi*kz/Nz) - 6
+    double N3 = (double)Nx * (double)Ny * (double)Nz;
+    double twopi_x = 2.0 * M_PI / (double)Nx;
+    double twopi_y = 2.0 * M_PI / (double)Ny;
+    double twopi_z = 2.0 * M_PI / (double)Nz;
+
+    double Lk = 2.0 * cos(twopi_x * kx)
+              + 2.0 * cos(twopi_y * ky)
+              + 2.0 * cos(twopi_z * kz) - 6.0;
+
+    double g;
+    if (kx == 0 && ky == 0 && kz == 0) {
+        g = 0.0;  // zero mode
+    } else {
+        g = dx2 / (N3 * Lk);
+    }
+
+    d_cplx[idx].x *= g;
+    d_cplx[idx].y *= g;
+}
+
+// ==========================================================================
+// C API: cuda_fftmp_poisson_setup
+// Create cuFFTMp plan with MPI communicator, allocate distributed memory.
+// ==========================================================================
+extern "C" {
+
+void cuda_fftmp_poisson_setup(int f_comm, int Nx, int Ny, int Nz, double dx2)
+{
+    if (g_fftmp_initialized && Nx == g_fftmp_Nx && Ny == g_fftmp_Ny && Nz == g_fftmp_Nz) {
+        return;  // already set up for this grid size
+    }
+
+    // Cleanup previous state
+    if (g_fftmp_initialized) {
+        if (g_fftmp_desc) { cufftXtFree(g_fftmp_desc); g_fftmp_desc = nullptr; }
+        if (g_fftmp_plan) { cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0; }
+        g_fftmp_initialized = 0;
+    }
+
+    // Convert Fortran MPI communicator to C
+    MPI_Comm c_comm = MPI_Comm_f2c(f_comm);
+
+    int myrank, nranks;
+    MPI_Comm_rank(c_comm, &myrank);
+    MPI_Comm_size(c_comm, &nranks);
+
+    // Create cuFFT plan (NVSHMEM init removed — causes PMI hang)
+    cufftResult r = cufftCreate(&g_fftmp_plan);
+    if (r != CUFFT_SUCCESS) {
+        if (myrank == 0)
+            fprintf(stderr, "cuFFTMp: cufftCreate FAILED: %d\n", r);
+        g_fftmp_initialized = -1;  // mark as permanently failed
+        return;
+    }
+
+    // Attach MPI communicator (from libcufftMp)
+    r = cufftMpAttachComm(g_fftmp_plan, CUFFT_COMM_MPI_VAL, &c_comm);
+    if (r != CUFFT_SUCCESS) {
+        if (myrank == 0)
+            fprintf(stderr, "cuFFTMp: cufftMpAttachComm FAILED: %d "
+                    "(cuFFT version mismatch? system=%d, cuFFTMp expects 11400)\n",
+                    r, CUFFT_VERSION);
+        cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0;
+        g_fftmp_initialized = -1;  // mark as permanently failed
+        return;
+    }
+
+    // Make 3D plan (D2Z = real-to-complex)
+    size_t workSize = 0;
+    r = cufftMakePlan3d(g_fftmp_plan, Nx, Ny, Nz, CUFFT_D2Z, &workSize);
+    if (r != CUFFT_SUCCESS) {
+        if (myrank == 0)
+            fprintf(stderr, "cuFFTMp: cufftMakePlan3d FAILED: %d\n", r);
+        cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0;
+        g_fftmp_initialized = -1;
+        return;
+    }
+
+    // Allocate distributed memory (cuFFTMp manages the slab decomposition)
+    r = cufftXtMalloc(g_fftmp_plan, &g_fftmp_desc, CUFFT_XT_FORMAT_INPLACE);
+    if (r != CUFFT_SUCCESS) {
+        if (myrank == 0)
+            fprintf(stderr, "cuFFTMp: cufftXtMalloc FAILED: %d\n", r);
+        cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0;
+        g_fftmp_initialized = -1;
+        return;
+    }
+
+    g_fftmp_Nx = Nx;
+    g_fftmp_Ny = Ny;
+    g_fftmp_Nz = Nz;
+    g_fftmp_dx2 = dx2;
+    g_fftmp_initialized = 1;
+
+    if (myrank == 0) {
+        printf("cuFFTMp setup: %d x %d x %d, dx2=%.6e, workSize=%.1f MB, nranks=%d\n",
+               Nx, Ny, Nz, dx2, (double)workSize / (1024.0*1024.0), nranks);
+        fflush(stdout);
+    }
+}
+
+// ==========================================================================
+// C API: cuda_fftmp_poisson_solve
+// Upload local X-slab RHS, forward FFT, Green, inverse FFT, download phi.
+// h_rhs_slab: host array [local_Nx][Ny][Nz] (real, row-major)
+// h_phi_slab: host array [local_Nx][Ny][Nz] (real, row-major, output)
+// local_Nx, Ny, Nz: slab dimensions
+// ==========================================================================
+void cuda_fftmp_poisson_solve(const double* h_rhs_slab, double* h_phi_slab,
+                              int local_Nx, int Ny, int Nz,
+                              int y_start_shuffled, int local_Ny_shuffled)
+{
+    if (!g_fftmp_initialized || !g_fftmp_desc) return;
+
+    // Upload host RHS to distributed descriptor (INPLACE = X-slab layout)
+    cufftResult r = cufftXtMemcpy(g_fftmp_plan, g_fftmp_desc,
+                                  (void*)h_rhs_slab, CUFFT_COPY_HOST_TO_DEVICE);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFTMp: H2D memcpy FAILED: %d\n", r);
+        return;
+    }
+
+    // Forward FFT: D2Z (real-to-complex)
+    // After exec, data is in INPLACE_SHUFFLED format (Y-slab decomposition)
+    r = cufftXtExecDescriptorD2Z(g_fftmp_plan, g_fftmp_desc, g_fftmp_desc);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFTMp: forward D2Z FAILED: %d\n", r);
+        return;
+    }
+
+    // Apply Green's function on GPU (data is now on local GPU in Y-slab)
+    {
+        int Nz_complex = Nz / 2 + 1;
+        long long total = (long long)g_fftmp_Nx * local_Ny_shuffled * Nz_complex;
+        int block = 256;
+        int grid = ((int)total + block - 1) / block;
+
+        // Get pointer to local GPU data from descriptor
+        cudaXtDesc *xtdesc = g_fftmp_desc->descriptor;
+        cufftDoubleComplex *d_local = (cufftDoubleComplex*)xtdesc->data[0];
+
+        fftmp_green_kernel<<<grid, block>>>(
+            d_local, g_fftmp_Nx, Ny, Nz,
+            local_Ny_shuffled, y_start_shuffled, g_fftmp_dx2);
+        cudaDeviceSynchronize();
+    }
+
+    // Inverse FFT: Z2D (complex-to-real)
+    // cuFFTMp inverse with D2Z plan: use cufftXtExecDescriptorZ2D
+    r = cufftXtExecDescriptorZ2D(g_fftmp_plan, g_fftmp_desc, g_fftmp_desc);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFTMp: inverse Z2D FAILED: %d\n", r);
+        return;
+    }
+
+    // Download result (INPLACE = X-slab) back to host
+    r = cufftXtMemcpy(g_fftmp_plan, (void*)h_phi_slab,
+                      g_fftmp_desc, CUFFT_COPY_DEVICE_TO_HOST);
+    if (r != CUFFT_SUCCESS) {
+        fprintf(stderr, "cuFFTMp: D2H memcpy FAILED: %d\n", r);
+        return;
+    }
+}
+
+// ==========================================================================
+// C API: cuda_fftmp_poisson_free
+// Free cuFFTMp plan and distributed memory.
+// ==========================================================================
+void cuda_fftmp_poisson_free(void)
+{
+    if (g_fftmp_desc) { cufftXtFree(g_fftmp_desc); g_fftmp_desc = nullptr; }
+    if (g_fftmp_plan) { cufftDestroy(g_fftmp_plan); g_fftmp_plan = 0; }
+    g_fftmp_Nx = 0; g_fftmp_Ny = 0; g_fftmp_Nz = 0;
+    g_fftmp_initialized = 0;
+}
+
+// ==========================================================================
+// C API: cuda_fftmp_is_ready
+// Returns 1 if cuFFTMp is initialized and ready, 0 otherwise, -1 if failed
+// ==========================================================================
+int cuda_fftmp_is_ready(void)
+{
+    return g_fftmp_initialized;
+}
+
+// ==========================================================================
+// C API: cuda_fftmp_get_local_sizes
+// Query the local slab sizes from the plan descriptor.
+// For INPLACE (input, X-slab): local_Nx = Nx/nranks (approx)
+// For INPLACE_SHUFFLED (output, Y-slab): local_Ny = Ny/nranks (approx)
+// Returns via pointers: local_Nx, x_start, local_Ny_shuffled, y_start_shuffled
+// ==========================================================================
+void cuda_fftmp_get_local_sizes(int* local_Nx_out, int* x_start_out,
+                                int* local_Ny_out, int* y_start_out)
+{
+    if (!g_fftmp_initialized || !g_fftmp_desc) {
+        *local_Nx_out = 0; *x_start_out = 0;
+        *local_Ny_out = 0; *y_start_out = 0;
+        return;
+    }
+
+    // For D2Z plan, INPLACE allocation is max of:
+    //   real:    local_Nx * Ny * Nz * sizeof(double)
+    //   complex: Nx * local_Ny * (Nz/2+1) * sizeof(cufftDoubleComplex)
+    // We determine local_Nx and local_Ny from the grid dimensions and rank.
+
+    int myrank, nranks;
+    MPI_Comm_rank(MPI_COMM_WORLD, &myrank);
+    MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+
+    // cuFFTMp slabs: first dimension (X) for input, second dimension (Y) for output
+    // Default decomposition divides evenly with remainder to last ranks
+    int Nx = g_fftmp_Nx, Ny = g_fftmp_Ny;
+
+    int base_Nx = Nx / nranks;
+    int rem_Nx  = Nx % nranks;
+    // Ranks 0..rem_Nx-1 get (base_Nx+1), rest get base_Nx
+    if (myrank < rem_Nx) {
+        *local_Nx_out = base_Nx + 1;
+        *x_start_out  = myrank * (base_Nx + 1);
+    } else {
+        *local_Nx_out = base_Nx;
+        *x_start_out  = rem_Nx * (base_Nx + 1) + (myrank - rem_Nx) * base_Nx;
+    }
+
+    int base_Ny = Ny / nranks;
+    int rem_Ny  = Ny % nranks;
+    if (myrank < rem_Ny) {
+        *local_Ny_out = base_Ny + 1;
+        *y_start_out  = myrank * (base_Ny + 1);
+    } else {
+        *local_Ny_out = base_Ny;
+        *y_start_out  = rem_Ny * (base_Ny + 1) + (myrank - rem_Ny) * base_Ny;
+    }
+}
+
+} // extern "C" — cuFFTMp
+#endif

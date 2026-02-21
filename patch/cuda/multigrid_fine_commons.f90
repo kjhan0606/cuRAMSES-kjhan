@@ -199,11 +199,22 @@ subroutine multigrid_fine(ilevel,icount)
    ! Initiate solve at fine level
    ! ---------------------------------------------------------------------
 
-   ! GPU setup: upload MG arrays to GPU if CUDA available
+   ! -----------------------------------------------------------------
+   ! cuFFT direct solve for fully uniform level (periodic BC)
+   ! Independent of GPU MG — only needs GPU existence
+   ! -----------------------------------------------------------------
    use_mg_gpu = .false.
    use_ri_gpu = .false.
+   is_uniform_fft = .false.
 #ifdef HYDRO_CUDA
-   if(cuda_pool_is_initialized_c() /= 0) then
+   if(gpu_fft .and. cuda_pool_is_initialized_c() /= 0) then
+      expected_grids = int(nx,i8b)*int(ny,i8b)*int(nz,i8b) &
+                     * 8_i8b**(ilevel-1)
+      if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
+   end if
+
+   ! GPU MG setup: controlled by gpu_poisson namelist parameter
+   if(gpu_poisson .and. .not. is_uniform_fft .and. cuda_pool_is_initialized_c() /= 0) then
       ncell_tot = ncoarse + twotondim*ngridmax
       ncell_tot_c = int(ncell_tot, c_long_long)
       dx_mg  = 0.5d0**ilevel
@@ -234,24 +245,15 @@ subroutine multigrid_fine(ilevel,icount)
            ' ncell=',ncell_tot,' ngrid=',active(ilevel)%ngrid
    end if
 
-   ! -----------------------------------------------------------------
-   ! cuFFT direct solve for fully uniform level (periodic BC)
-   ! -----------------------------------------------------------------
-   is_uniform_fft = .false.
-   if(use_mg_gpu) then
-      expected_grids = int(nx,i8b)*int(ny,i8b)*int(nz,i8b) &
-                     * 8_i8b**(ilevel-1)
-      if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
-   end if
-
    if(is_uniform_fft) then
       call fft_poisson_solve_uniform(ilevel, icount)
-      ! Download phi from GPU
-      call cuda_mg_download_phi_c(phi, ncell_tot_c)
+      ! phi is already scattered to CPU by fft_poisson_solve_uniform
       call make_virtual_fine_dp(phi(1), ilevel)
       ! Cleanup GPU state
-      call cuda_mg_halo_free_c()
-      call cuda_mg_free_c()
+      if(use_mg_gpu) then
+         call cuda_mg_halo_free_c()
+         call cuda_mg_free_c()
+      end if
       if(allocated(mg_halo_emit_cells)) deallocate(mg_halo_emit_cells)
       if(allocated(mg_halo_recv_cells)) deallocate(mg_halo_recv_cells)
       if(allocated(mg_halo_emit_buf))   deallocate(mg_halo_emit_buf)
@@ -273,7 +275,7 @@ subroutine multigrid_fine(ilevel,icount)
          call cleanup_mg_level(ifine)
       end do
       if(myid==1) write(*,'(A,I5,A)') &
-           '   ==> Level=',ilevel,' cuFFT direct solve DONE'
+           '   ==> Level=',ilevel,' FFT direct solve DONE'
       return
    end if
 #endif
@@ -2385,6 +2387,25 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    integer :: Kx, Ky, Kz
    integer :: info
 
+   ! cuFFTMp dispatch
+   logical :: use_fftmp
+#ifdef USE_CUFFTMP
+   integer :: local_Nx_mp, x_start_mp, local_Ny_mp, y_start_mp
+   integer :: slab_size_mp
+   real(dp), allocatable, save :: rhs_slab(:), phi_slab(:)
+   integer(i8b), save :: saved_slab_size = 0
+
+   ! MPI_ALLTOALLV variables for slab exchange
+   integer, allocatable :: sendcounts(:), sdispls(:)
+   integer, allocatable :: recvcounts(:), rdispls(:)
+   real(dp), allocatable :: sendbuf(:), recvbuf(:)
+   integer :: dest_rank, x_local, base_Nx, rem_Nx
+   integer :: n_send_total, n_recv_total
+   integer :: irank
+   ! Scratch for counting
+   integer, allocatable :: send_idx(:)
+#endif
+
    ! Grid dimensions for this level (cell grid, not oct grid)
    fft_Nx = nx * 2**ilevel
    fft_Ny = ny * 2**ilevel
@@ -2394,10 +2415,235 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    dx_fft  = 0.5d0**ilevel
    dx2_fft = dx_fft * dx_fft
 
-   if(myid==1) write(*,'(A,I3,A,I5,A,I5,A,I5,A,I15)') &
-        ' cuFFT Poisson: level=', ilevel, &
+   ! ------------------------------------------------------------------
+   ! Decide: cuFFTMp (distributed) vs cuFFT (ALLREDUCE)
+   ! ------------------------------------------------------------------
+   use_fftmp = .false.
+#ifdef USE_CUFFTMP
+   if(N_total > 256_i8b**3 .and. ncpu > 1) then
+      ! Only try if not permanently failed
+      if(cuda_fftmp_is_ready_c() >= 0) use_fftmp = .true.
+   end if
+#endif
+
+   if(myid==1) write(*,'(A,I3,A,I5,A,I5,A,I5,A,I15,A,L1)') &
+        ' FFT Poisson: level=', ilevel, &
         ' grid=', fft_Nx, 'x', fft_Ny, 'x', fft_Nz, &
-        ' N=', N_total
+        ' N=', N_total, ' distributed=', use_fftmp
+
+#ifdef USE_CUFFTMP
+   if(use_fftmp) then
+      ! ================================================================
+      ! cuFFTMp distributed path
+      ! ================================================================
+
+      ! Setup cuFFTMp plan (once per grid size change)
+      call cuda_fftmp_poisson_setup_c(int(MPI_COMM_WORLD, c_int), &
+           int(fft_Nx, c_int), int(fft_Ny, c_int), int(fft_Nz, c_int), dx2_fft)
+
+      ! Check if setup succeeded; if not, fall back to ALLREDUCE+cuFFT
+      if(cuda_fftmp_is_ready_c() /= 1) then
+         if(myid==1) write(*,'(A)') &
+              '   cuFFTMp setup FAILED — falling back to ALLREDUCE + cuFFT'
+         use_fftmp = .false.
+         goto 100  ! jump to ALLREDUCE+cuFFT path
+      end if
+
+      ! Get local slab sizes from cuFFTMp
+      call cuda_fftmp_get_local_sizes_c(local_Nx_mp, x_start_mp, &
+           local_Ny_mp, y_start_mp)
+
+      slab_size_mp = local_Nx_mp * fft_Ny * fft_Nz
+
+      if(myid==1) write(*,'(A,I5,A,I5,A,I5,A,I5)') &
+           '   cuFFTMp: local_Nx=', local_Nx_mp, ' x_start=', x_start_mp, &
+           ' local_Ny=', local_Ny_mp, ' y_start=', y_start_mp
+
+      ! Allocate slab arrays
+      if(int(slab_size_mp,i8b) /= saved_slab_size) then
+         if(allocated(rhs_slab)) deallocate(rhs_slab)
+         if(allocated(phi_slab)) deallocate(phi_slab)
+         allocate(rhs_slab(0:max(slab_size_mp,1)-1))
+         allocate(phi_slab(0:max(slab_size_mp,1)-1))
+         saved_slab_size = int(slab_size_mp, i8b)
+      end if
+
+      ! Compute X-slab decomposition parameters
+      base_Nx = fft_Nx / ncpu
+      rem_Nx  = mod(fft_Nx, ncpu)
+
+      ! ------------------------------------------------------------------
+      ! Step 1: Gather local RHS and prepare for ALLTOALLV exchange
+      ! Each rank sends its cells to the rank that owns the X-slab
+      ! ------------------------------------------------------------------
+      allocate(sendcounts(0:ncpu-1))
+      allocate(sdispls(0:ncpu-1))
+      allocate(recvcounts(0:ncpu-1))
+      allocate(rdispls(0:ncpu-1))
+
+      ! Count how many cells this rank sends to each X-slab owner
+      sendcounts = 0
+      ngrid_loc = active(ilevel)%ngrid
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            ix = modulo(ix, fft_Nx)
+
+            ! Which rank owns this X-plane?
+            if(rem_Nx > 0 .and. ix < rem_Nx * (base_Nx + 1)) then
+               dest_rank = ix / (base_Nx + 1)
+            else
+               dest_rank = rem_Nx + (ix - rem_Nx*(base_Nx+1)) / max(base_Nx,1)
+            end if
+            dest_rank = min(dest_rank, ncpu-1)
+            sendcounts(dest_rank) = sendcounts(dest_rank) + 1
+         end do
+      end do
+
+      ! Exchange counts
+      call MPI_ALLTOALL(sendcounts, 1, MPI_INTEGER, &
+           recvcounts, 1, MPI_INTEGER, MPI_COMM_WORLD, info)
+
+      ! Compute displacements
+      sdispls(0) = 0
+      rdispls(0) = 0
+      do irank = 1, ncpu-1
+         sdispls(irank) = sdispls(irank-1) + sendcounts(irank-1)
+         rdispls(irank) = rdispls(irank-1) + recvcounts(irank-1)
+      end do
+      n_send_total = sdispls(ncpu-1) + sendcounts(ncpu-1)
+      n_recv_total = rdispls(ncpu-1) + recvcounts(ncpu-1)
+
+      ! Pack send buffer: (idx_in_slab, rhs_value) interleaved
+      ! We'll send 2 doubles per cell: slab index + value
+      allocate(sendbuf(0:2*n_send_total-1))
+      allocate(recvbuf(0:2*n_recv_total-1))
+      allocate(send_idx(0:ncpu-1))
+      send_idx = sdispls
+
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+         Ky = nint(xg(igrid_amr, 2) * dble(fft_Ny))
+         Kz = nint(xg(igrid_amr, 3) * dble(fft_Nz))
+
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            iy = Ky - 1 + mod((ind-1)/2, 2)
+            iz = Kz - 1 + (ind-1)/4
+            ix = modulo(ix, fft_Nx)
+            iy = modulo(iy, fft_Ny)
+            iz = modulo(iz, fft_Nz)
+
+            if(rem_Nx > 0 .and. ix < rem_Nx * (base_Nx + 1)) then
+               dest_rank = ix / (base_Nx + 1)
+            else
+               dest_rank = rem_Nx + (ix - rem_Nx*(base_Nx+1)) / max(base_Nx,1)
+            end if
+            dest_rank = min(dest_rank, ncpu-1)
+
+            ! Local X index within destination slab
+            if(dest_rank < rem_Nx) then
+               x_local = ix - dest_rank * (base_Nx + 1)
+            else
+               x_local = ix - rem_Nx*(base_Nx+1) - (dest_rank-rem_Nx)*base_Nx
+            end if
+
+            ! Slab-local row-major index
+            idx_3d = x_local * fft_Ny * fft_Nz + iy * fft_Nz + iz
+
+            iskip = ncoarse + (ind - 1) * ngridmax
+            icell_amr = iskip + igrid_amr
+
+            sendbuf(2*send_idx(dest_rank))     = dble(idx_3d)
+            sendbuf(2*send_idx(dest_rank) + 1) = f(icell_amr, 2)
+            send_idx(dest_rank) = send_idx(dest_rank) + 1
+         end do
+      end do
+
+      ! Exchange (2 doubles per cell)
+      sendcounts = sendcounts * 2
+      recvcounts = recvcounts * 2
+      sdispls = sdispls * 2
+      rdispls = rdispls * 2
+
+      call MPI_ALLTOALLV(sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
+           recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
+           MPI_COMM_WORLD, info)
+
+      ! Unpack into local slab
+      rhs_slab = 0.0d0
+      do ix = 0, n_recv_total - 1
+         idx_3d = nint(recvbuf(2*ix))
+         rhs_slab(idx_3d) = rhs_slab(idx_3d) + recvbuf(2*ix + 1)
+      end do
+
+      ! ------------------------------------------------------------------
+      ! Step 2: cuFFTMp distributed solve
+      ! ------------------------------------------------------------------
+      call cuda_fftmp_poisson_solve_c(rhs_slab, phi_slab, &
+           int(local_Nx_mp, c_int), int(fft_Ny, c_int), int(fft_Nz, c_int), &
+           int(y_start_mp, c_int), int(local_Ny_mp, c_int))
+
+      ! ------------------------------------------------------------------
+      ! Step 3: Send solved phi back to original cell owners
+      ! Reuse ALLTOALLV: slab owner sends phi to cell owner
+      ! ------------------------------------------------------------------
+      ! recvbuf already has (idx_in_slab, _) entries.
+      ! Replace rhs values with phi values from phi_slab
+      do ix = 0, n_recv_total - 1
+         idx_3d = nint(recvbuf(2*ix))
+         recvbuf(2*ix + 1) = phi_slab(idx_3d)
+      end do
+
+      ! Reverse ALLTOALLV: send phi back
+      ! Now recv→send, send→recv
+      call MPI_ALLTOALLV(recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
+           sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
+           MPI_COMM_WORLD, info)
+
+      ! Unpack phi to RAMSES cells
+      send_idx = sdispls / 2  ! Reset to element indices (not byte offsets)
+
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            ix = modulo(ix, fft_Nx)
+
+            if(rem_Nx > 0 .and. ix < rem_Nx * (base_Nx + 1)) then
+               dest_rank = ix / (base_Nx + 1)
+            else
+               dest_rank = rem_Nx + (ix - rem_Nx*(base_Nx+1)) / max(base_Nx,1)
+            end if
+            dest_rank = min(dest_rank, ncpu-1)
+
+            iskip = ncoarse + (ind - 1) * ngridmax
+            icell_amr = iskip + igrid_amr
+
+            ! phi value is in sendbuf at the same position we packed it
+            phi(icell_amr) = sendbuf(2*send_idx(dest_rank) + 1)
+            send_idx(dest_rank) = send_idx(dest_rank) + 1
+         end do
+      end do
+
+      deallocate(sendcounts, sdispls, recvcounts, rdispls)
+      deallocate(sendbuf, recvbuf, send_idx)
+
+      return
+   end if
+#endif
+
+   ! ================================================================
+   ! cuFFT ALLREDUCE path (default, for grids ≤256³ or single rank)
+   ! Also used as fallback when cuFFTMp fails
+   ! ================================================================
+100 continue
 
    ! ------------------------------------------------------------------
    ! Persistent allocation (only allocate on first call or size change)
@@ -2461,19 +2707,23 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    rhs_3d = rhs_local
 #endif
 
-   ! Note: fft_map stays LOCAL (each rank's own cell indices)
-   ! The scatter kernel uses local fft_map to write to local d_mg_phi
-
    ! ------------------------------------------------------------------
-   ! Step 3: cuFFT setup (plans + Green's function, only on first call or grid change)
+   ! Step 3: cuFFT setup (plans + Green's function, only on grid change)
    ! ------------------------------------------------------------------
    call cuda_fft_poisson_setup_c(fft_map, &
         int(fft_Nx, c_int), int(fft_Ny, c_int), int(fft_Nz, c_int), dx2_fft)
 
    ! ------------------------------------------------------------------
-   ! Step 4: cuFFT solve (upload RHS, FFT, Green, IFFT, scatter to d_mg_phi)
+   ! Step 4: cuFFT solve and scatter phi to CPU
+   ! Uses cuda_fft_poisson_solve_host_c (no d_mg_phi dependency)
    ! ------------------------------------------------------------------
-   call cuda_fft_poisson_solve_c(rhs_3d, int(N_total, c_int))
+   call cuda_fft_poisson_solve_host_c(rhs_3d, rhs_3d, int(N_total, c_int))
+
+   ! Scatter from 3D array to RAMSES phi via fft_map
+   do idx_3d = 0, int(N_total-1)
+      icell_amr = fft_map(idx_3d)
+      if(icell_amr > 0) phi(icell_amr) = rhs_3d(idx_3d)
+   end do
 
 end subroutine fft_poisson_solve_uniform
 #endif

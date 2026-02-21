@@ -475,6 +475,117 @@ automatically.}
 \end{quote}
 
 
+%----------------------------------------------------------------------
+\subsection{GPU Acceleration}
+%----------------------------------------------------------------------
+
+The following parameters control GPU acceleration.  They require
+compilation with \texttt{make USE\_CUDA=1}; when compiled without CUDA
+support, any \texttt{gpu\_*} flags set to \texttt{.true.}\ are
+silently reset to \texttt{.false.}\ with a warning.
+
+All three flags default to \texttt{.false.}\ (CPU-only mode).  They
+can be combined independently to select the optimal configuration for
+the available hardware.
+
+% ------------------------------------------------------------------
+\paramheader{gpu\_hydro}{logical}{.false.}
+\label{param:gpu_hydro}
+
+\begin{quote}
+Enable hybrid CPU/GPU hydrodynamics solver.  When \texttt{.true.}, the
+Godunov solver dispatches large grid batches to the GPU while small
+batches are processed by CPU threads.  The full mesh
+(\texttt{uold}, \texttt{f}, \texttt{son}) is uploaded to GPU memory
+once per \texttt{godunov\_fine} call ($\sim$19\,GB for a typical
+$512^3$ run with 11 hydro variables).
+
+\textbf{Requires one MPI rank per GPU.}
+
+\apinote{On GPUs with limited PCIe bandwidth (e.g.\ NVIDIA A40 via
+PCIe Gen4), the mesh upload and gather/scatter overhead can exceed the
+GPU compute benefit, resulting in a net slowdown.  Benchmark before
+enabling in production.  The code automatically falls back to CPU-only
+if GPU memory is insufficient.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{gpu\_poisson}{logical}{.false.}
+\label{param:gpu_poisson}
+
+\begin{quote}
+Enable GPU-accelerated Poisson multigrid (MG) V-cycle for AMR levels.
+Gauss--Seidel red--black smoothing and residual computation run on the
+GPU; halo exchanges use pinned-memory asynchronous transfers.
+
+The GPU MG solver uploads $\sim$6.4\,GB of MG arrays (phi, f, flag2,
+nbor, igrid) plus $\sim$320\,MB for GPU restrict/interpolation
+buffers.
+
+\apinote{Like \paramref{gpu_hydro}, this feature is PCIe-bandwidth
+limited.  Benchmarks on A40 (PCIe Gen4) show GPU MG is slower than
+CPU MG.  On GPUs with high-bandwidth host--device links (e.g.\ Grace
+Hopper), GPU MG may provide a benefit.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{gpu\_fft}{logical}{.false.}
+\label{param:gpu_fft}
+
+\begin{quote}
+Enable cuFFT direct Poisson solve for fully uniform AMR levels.  When
+a level is fully covered (all $N = n_x \times n_y \times n_z \times
+8^{\ell-1}$ grids exist), the Poisson equation is solved via 3D FFT
+instead of multigrid V-cycles.  This bypasses iterative convergence
+entirely.
+
+The solver flow is:
+\begin{enumerate}[nosep]
+  \item Gather local cell RHS values into a global 3D array via
+        \texttt{MPI\_ALLREDUCE}.
+  \item Upload to GPU and execute forward R2C FFT (cuFFT).
+  \item Apply the spectral Green's function
+        $G(\mathbf{k}) = \Delta x^2 / (N^3 L_k)$
+        where $L_k = 2\cos k_x + 2\cos k_y + 2\cos k_z - 6$.
+  \item Inverse C2R FFT and download result to host.
+  \item Scatter $\phi$ back to RAMSES cells.
+\end{enumerate}
+
+\textbf{GPU memory usage:} $\sim$3\,GB per rank for a $512^3$ grid.
+
+\textbf{Performance:} For a $512^3$ base grid (4 MPI ranks, A40),
+the cuFFT direct solve reduces the base-level Poisson time from
+242\,s (MG V-cycle) to $\sim$20\,s (\textbf{12$\times$ speedup}).
+
+\apinote{This flag is independent of \paramref{gpu_poisson}.  When
+both are \texttt{.false.}, all Poisson solving uses CPU multigrid.
+When only \texttt{gpu\_fft=.true.}, the base level uses cuFFT on GPU
+while AMR levels use CPU multigrid --- this is often the optimal
+configuration on PCIe-limited GPUs.}
+
+\apiwarning{The current implementation uses \texttt{MPI\_ALLREDUCE}
+to gather the global RHS array, which becomes a bottleneck for
+$N > 256^3$ ($\sim$1\,GB of data).  For $256^3$ and below, the
+overhead is negligible.}
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Examples:}}}
+\begin{lstlisting}
+! CPU-only (default, safest)
+gpu_hydro   = .false.
+gpu_poisson = .false.
+gpu_fft     = .false.
+
+! cuFFT base level only (recommended for PCIe GPUs)
+gpu_fft     = .true.
+
+! Full GPU acceleration (for NVLink/CXL GPUs only)
+gpu_hydro   = .true.
+gpu_poisson = .true.
+gpu_fft     = .true.
+\end{lstlisting}
+
+
 %======================================================================
 \section{\texttt{\&AMR\_PARAMS} -- Adaptive Mesh Refinement}
 \label{sec:amr_params}

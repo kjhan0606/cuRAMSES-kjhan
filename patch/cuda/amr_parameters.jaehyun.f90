@@ -63,6 +63,11 @@ module amr_parameters
   logical::clumpfind=.false.  ! Enable clump finder
   logical::aton=.false.       ! Enable ATON coarse grid radiation transfer
 
+  ! GPU acceleration (requires USE_CUDA compilation)
+  logical::gpu_hydro=.false.   ! GPU hydro solver (hybrid CPU/GPU)
+  logical::gpu_poisson=.false. ! GPU Poisson MG for AMR levels
+  logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
+
   ! Mesh parameters
   integer::geom=1             ! 1: cartesian, 2: cylindrical, 3: spherical
   integer::nx=1,ny=1,nz=1     ! Number of coarse cells in each dimension
