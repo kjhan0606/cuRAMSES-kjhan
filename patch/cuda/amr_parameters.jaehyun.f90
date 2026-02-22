@@ -69,6 +69,9 @@ module amr_parameters
   logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
   logical::gpu_sink=.false.    ! GPU AGN feedback (average_AGN + AGN_blast)
 
+  ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
+  logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
+
   ! Mesh parameters
   integer::geom=1             ! 1: cartesian, 2: cylindrical, 3: spherical
   integer::nx=1,ny=1,nz=1     ! Number of coarse cells in each dimension

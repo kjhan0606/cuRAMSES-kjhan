@@ -58,6 +58,10 @@ subroutine multigrid_fine(ilevel,icount)
 
    logical :: allmasked, allmasked_tot
 
+   ! FFT direct solve variables (shared by FFTW3 and cuFFT)
+   logical :: is_uniform_fft
+   integer(i8b) :: expected_grids
+
    ! GPU Poisson MG variables
    logical :: use_mg_gpu, use_ri_gpu
 #ifdef HYDRO_CUDA
@@ -65,9 +69,6 @@ subroutine multigrid_fine(ilevel,icount)
    integer :: ncell_tot, safe_int, ri_flag
    real(kind=8) :: dx_mg, dx2_mg, oneoverdx2_mg, dx2_norm_mg
    real(kind=8) :: gpu_norm2, dummy_norm2
-   ! cuFFT variables
-   logical :: is_uniform_fft
-   integer(i8b) :: expected_grids
 #endif
 
    if(gravity_type>0)return
@@ -200,14 +201,25 @@ subroutine multigrid_fine(ilevel,icount)
    ! ---------------------------------------------------------------------
 
    ! -----------------------------------------------------------------
-   ! cuFFT direct solve for fully uniform level (periodic BC)
-   ! Independent of GPU MG — only needs GPU existence
+   ! FFT direct solve for fully uniform level (periodic BC)
+   ! Priority: FFTW3 (CPU) > cuFFT (GPU) > MG V-cycle
    ! -----------------------------------------------------------------
    use_mg_gpu = .false.
    use_ri_gpu = .false.
    is_uniform_fft = .false.
+
+#ifdef USE_FFTW
+   ! FFTW3 CPU direct solve (highest priority if enabled)
+   if(use_fftw) then
+      expected_grids = int(nx,i8b)*int(ny,i8b)*int(nz,i8b) &
+                     * 8_i8b**(ilevel-1)
+      if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
+   end if
+#endif
+
 #ifdef HYDRO_CUDA
-   if(gpu_fft .and. cuda_pool_is_initialized_c() /= 0) then
+   ! cuFFT GPU direct solve (if FFTW not handling it)
+   if(.not. is_uniform_fft .and. gpu_fft .and. cuda_pool_is_initialized_c() /= 0) then
       expected_grids = int(nx,i8b)*int(ny,i8b)*int(nz,i8b) &
                      * 8_i8b**(ilevel-1)
       if(numbtot(1,ilevel) == expected_grids) is_uniform_fft = .true.
@@ -244,11 +256,23 @@ subroutine multigrid_fine(ilevel,icount)
            ' ri=',use_ri_gpu, &
            ' ncell=',ncell_tot,' ngrid=',active(ilevel)%ngrid
    end if
+#endif
 
    if(is_uniform_fft) then
-      call fft_poisson_solve_uniform(ilevel, icount)
-      ! phi is already scattered to CPU by fft_poisson_solve_uniform
+#ifdef USE_FFTW
+      if(use_fftw) then
+         call fftw_poisson_solve_uniform(ilevel, icount)
+      else
+#endif
+#ifdef HYDRO_CUDA
+         call fft_poisson_solve_uniform(ilevel, icount)
+#endif
+#ifdef USE_FFTW
+      end if
+#endif
+      ! phi is already scattered by the FFT solver
       call make_virtual_fine_dp(phi(1), ilevel)
+#ifdef HYDRO_CUDA
       ! Cleanup GPU state
       if(use_mg_gpu) then
          call cuda_mg_halo_free_c()
@@ -265,6 +289,7 @@ subroutine multigrid_fine(ilevel,icount)
       if(allocated(mg_ri_coarse_rhs))  deallocate(mg_ri_coarse_rhs)
       if(allocated(mg_ri_coarse_phi))  deallocate(mg_ri_coarse_phi)
       mg_ri_total_coarse = 0
+#endif
       ! Free precomputed neighbors
       if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
       if(ilevel>1 .and. levelmin_mg < ilevel) then
@@ -278,7 +303,6 @@ subroutine multigrid_fine(ilevel,icount)
            '   ==> Level=',ilevel,' FFT direct solve DONE'
       return
    end if
-#endif
 
    iter = 0
    err = 1.0d0
@@ -2726,6 +2750,466 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    end do
 
 end subroutine fft_poisson_solve_uniform
+#endif
+
+
+#ifdef USE_FFTW
+! ########################################################################
+! FFTW3 CPU direct Poisson solver for fully uniform levels (periodic BC)
+! Two paths:
+!   Small grid (N <= 256^3): MPI_ALLREDUCE + local FFTW3+OMP
+!   Large grid (N >  256^3): MPI_ALLTOALLV + FFTW3 MPI slab decomposition
+! ########################################################################
+
+subroutine fftw_poisson_solve_uniform(ilevel, icount)
+   use amr_commons
+   use poisson_commons
+   use poisson_parameters
+   use iso_c_binding
+   use omp_lib
+   implicit none
+#ifndef WITHOUTMPI
+   include "mpif.h"
+#endif
+   include 'fftw3-mpi.f03'
+
+   integer, intent(in) :: ilevel, icount
+
+   ! === Grid dimensions ===
+   integer :: fft_Nx, fft_Ny, fft_Nz
+   integer(i8b) :: N_total
+   real(dp) :: dx_fft, dx2_fft
+   logical :: use_distributed
+
+   ! === FFTW cached state (persist across calls) ===
+   logical, save :: fftw_initialized = .false.
+   type(C_PTR), save :: plan_r2c = C_NULL_PTR, plan_c2r = C_NULL_PTR
+   integer, save :: saved_Nx = 0, saved_Ny = 0, saved_Nz = 0
+   logical, save :: saved_distributed = .false.
+
+   ! Small-grid arrays (save)
+   integer,  allocatable, save :: fft_map(:)
+   real(dp), allocatable, save :: rhs_local(:), rhs_3d(:)
+   real(C_DOUBLE), allocatable, save :: green(:)
+   complex(C_DOUBLE_COMPLEX), allocatable, save :: cdata(:)
+   integer(i8b), save :: saved_N_total = 0
+   integer(i8b) :: N_complex
+
+   ! Large-grid FFTW MPI (save)
+   type(C_PTR), save :: p_rdata = C_NULL_PTR, p_cdata = C_NULL_PTR
+   real(C_DOUBLE), pointer, save :: rdata_fftw(:) => null()
+   complex(C_DOUBLE_COMPLEX), pointer, save :: cdata_fftw(:) => null()
+   integer(C_INTPTR_T), save :: local_nx_fftw = 0, nx_start_fftw = 0
+   integer(C_INTPTR_T), save :: alloc_local = 0
+   integer, save :: fftw_block = 0  ! FFTW MPI block size for slab distribution
+
+   ! Loop variables
+   integer :: igrid, ngrid_loc, ind, iskip
+   integer :: icell_amr, igrid_amr
+   integer :: ix, iy, iz, idx_3d
+   integer :: Kx, Ky, Kz
+   integer :: info, ierr
+   integer :: kx_i, ky_i, kz_i
+   real(dp) :: denom, twopi
+   integer(i8b) :: idx_c
+
+   ! MPI ALLTOALLV variables for large-grid path
+   integer, allocatable :: sendcounts(:), sdispls(:)
+   integer, allocatable :: recvcounts(:), rdispls(:)
+   real(dp), allocatable :: sendbuf(:), recvbuf(:)
+   integer, allocatable :: send_idx(:)
+   integer :: dest_rank, x_local, base_Nx, rem_Nx
+   integer :: n_send_total, n_recv_total, irank
+   integer :: local_Nz_half, slab_real_size
+
+   ! ================================================================
+   ! Step 0: Grid dimensions
+   ! ================================================================
+   fft_Nx = nx * 2**ilevel
+   fft_Ny = ny * 2**ilevel
+   fft_Nz = nz * 2**ilevel
+   N_total = int(fft_Nx, i8b) * int(fft_Ny, i8b) * int(fft_Nz, i8b)
+   dx_fft  = 0.5d0**ilevel
+   dx2_fft = dx_fft * dx_fft
+   twopi   = 2.0d0 * acos(-1.0d0)
+   use_distributed = (N_total > 256_i8b**3 .and. ncpu > 1)
+
+   if(myid==1) write(*,'(A,I3,A,I5,A,I5,A,I5,A,I15,A,L1)') &
+        ' FFTW3 Poisson: level=', ilevel, &
+        ' grid=', fft_Nx, 'x', fft_Ny, 'x', fft_Nz, &
+        ' N=', N_total, ' distributed=', use_distributed
+
+   ! ================================================================
+   ! Step 1: FFTW initialization (once)
+   ! ================================================================
+   if(.not. fftw_initialized) then
+      ierr = fftw_init_threads()
+      call fftw_plan_with_nthreads(int(omp_get_max_threads(), C_INT))
+      call fftw_mpi_init()
+      fftw_initialized = .true.
+      if(myid==1) write(*,'(A,I3,A)') &
+           '   FFTW3 initialized with ', omp_get_max_threads(), ' threads'
+   end if
+
+   ! ================================================================
+   ! Step 2: Plan creation (only on grid size change)
+   ! ================================================================
+   if(fft_Nx /= saved_Nx .or. fft_Ny /= saved_Ny .or. fft_Nz /= saved_Nz &
+      .or. (use_distributed .neqv. saved_distributed)) then
+      ! Destroy old plans
+      if(c_associated(plan_r2c)) call fftw_destroy_plan(plan_r2c)
+      if(c_associated(plan_c2r)) call fftw_destroy_plan(plan_c2r)
+      plan_r2c = C_NULL_PTR
+      plan_c2r = C_NULL_PTR
+      saved_Nx = fft_Nx
+      saved_Ny = fft_Ny
+      saved_Nz = fft_Nz
+      saved_distributed = use_distributed
+
+      if(use_distributed) then
+         ! --- Large-grid: FFTW3 MPI plans (in-place R2C) ---
+         ! Free old allocation (single block for in-place)
+         if(c_associated(p_rdata)) call fftw_free(p_rdata)
+         p_rdata = C_NULL_PTR
+         p_cdata = C_NULL_PTR
+
+         ! Query local sizes — n0=Nx distributes X-slabs across ranks
+         alloc_local = fftw_mpi_local_size_3d( &
+              int(fft_Nx, C_INTPTR_T), &
+              int(fft_Ny, C_INTPTR_T), &
+              int(fft_Nz/2+1, C_INTPTR_T), &
+              MPI_COMM_WORLD, local_nx_fftw, nx_start_fftw)
+
+         ! In-place R2C: single allocation, real & complex share memory
+         ! Real layout: local_nx * Ny * 2*(Nz/2+1) (padded last dim)
+         ! Complex layout: local_nx * Ny * (Nz/2+1)
+         p_rdata = fftw_alloc_complex(alloc_local)
+         p_cdata = p_rdata  ! Same memory for in-place
+         slab_real_size = 2 * int(alloc_local)
+         call c_f_pointer(p_rdata, rdata_fftw, [slab_real_size])
+         call c_f_pointer(p_cdata, cdata_fftw, [int(alloc_local)])
+
+         ! In-place plans: FFTW detects same base address
+         plan_r2c = fftw_mpi_plan_dft_r2c_3d( &
+              int(fft_Nx, C_INTPTR_T), &
+              int(fft_Ny, C_INTPTR_T), &
+              int(fft_Nz, C_INTPTR_T), &
+              rdata_fftw, cdata_fftw, &
+              MPI_COMM_WORLD, FFTW_ESTIMATE)
+
+         plan_c2r = fftw_mpi_plan_dft_c2r_3d( &
+              int(fft_Nx, C_INTPTR_T), &
+              int(fft_Ny, C_INTPTR_T), &
+              int(fft_Nz, C_INTPTR_T), &
+              cdata_fftw, rdata_fftw, &
+              MPI_COMM_WORLD, FFTW_ESTIMATE)
+
+         ! FFTW block size: ceil(Nx/ncpu)
+         fftw_block = (fft_Nx + ncpu - 1) / ncpu
+
+         if(myid==1) write(*,'(A,I6,A,I6,A,I6)') &
+              '   FFTW3 MPI: local_nx=', int(local_nx_fftw), &
+              ' nx_start=', int(nx_start_fftw), &
+              ' block=', fftw_block
+
+         ! Precompute Green's function for local slab
+         if(allocated(green)) deallocate(green)
+         N_complex = int(local_nx_fftw,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
+         allocate(green(0:N_complex-1))
+
+         do kx_i = 0, int(local_nx_fftw)-1
+            do ky_i = 0, fft_Ny-1
+               do kz_i = 0, fft_Nz/2
+                  idx_c = int(kx_i,i8b)*int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b) &
+                        + int(ky_i,i8b)*int(fft_Nz/2+1,i8b) + int(kz_i,i8b)
+                  ix = int(nx_start_fftw) + kx_i  ! global kx
+                  denom = 2.0d0*(cos(twopi*dble(ix)/dble(fft_Nx)) &
+                               + cos(twopi*dble(ky_i)/dble(fft_Ny)) &
+                               + cos(twopi*dble(kz_i)/dble(fft_Nz)) - 3.0d0)
+                  if(ix==0 .and. ky_i==0 .and. kz_i==0) then
+                     green(idx_c) = 0.0d0
+                  else
+                     green(idx_c) = dx2_fft / denom
+                  end if
+               end do
+            end do
+         end do
+
+      else
+         ! --- Small-grid: local FFTW3+OMP plans ---
+         if(allocated(green)) deallocate(green)
+         if(allocated(cdata)) deallocate(cdata)
+
+         N_complex = int(fft_Nx,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
+         allocate(cdata(0:N_complex-1))
+         allocate(green(0:N_complex-1))
+
+         ! Plans: fftw3.f03 uses bind(C), no dimension reversal needed
+         ! Our data is C row-major (idx = ix*Ny*Nz + iy*Nz + iz)
+         ! n0=Nx (slowest), n1=Ny, n2=Nz (fastest, gets R2C reduction)
+         ! We need allocated arrays for plan creation
+         if(.not. allocated(rhs_3d)) then
+            allocate(rhs_3d(0:N_total-1))
+         else if(size(rhs_3d) < N_total) then
+            deallocate(rhs_3d)
+            allocate(rhs_3d(0:N_total-1))
+         end if
+
+         plan_r2c = fftw_plan_dft_r2c_3d( &
+              int(fft_Nx, C_INT), int(fft_Ny, C_INT), int(fft_Nz, C_INT), &
+              rhs_3d, cdata, FFTW_ESTIMATE)
+
+         plan_c2r = fftw_plan_dft_c2r_3d( &
+              int(fft_Nx, C_INT), int(fft_Ny, C_INT), int(fft_Nz, C_INT), &
+              cdata, rhs_3d, FFTW_ESTIMATE)
+
+         ! Precompute Green's function
+         do kx_i = 0, fft_Nx-1
+            do ky_i = 0, fft_Ny-1
+               do kz_i = 0, fft_Nz/2
+                  idx_c = int(kx_i,i8b)*int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b) &
+                        + int(ky_i,i8b)*int(fft_Nz/2+1,i8b) + int(kz_i,i8b)
+                  denom = 2.0d0*(cos(twopi*dble(kx_i)/dble(fft_Nx)) &
+                               + cos(twopi*dble(ky_i)/dble(fft_Ny)) &
+                               + cos(twopi*dble(kz_i)/dble(fft_Nz)) - 3.0d0)
+                  if(kx_i==0 .and. ky_i==0 .and. kz_i==0) then
+                     green(idx_c) = 0.0d0
+                  else
+                     green(idx_c) = dx2_fft / denom
+                  end if
+               end do
+            end do
+         end do
+      end if
+   end if  ! plan creation
+
+
+   if(use_distributed) then
+      ! ============================================================
+      ! LARGE GRID PATH: FFTW3 MPI (slab decomposition)
+      ! Uses ALLTOALLV to redistribute data to FFTW's X-slab layout
+      ! ============================================================
+
+      ! Compute X-slab decomposition parameters (matching FFTW's distribution)
+      ! FFTW distributes n0 (=Nx) dimension: each rank gets ~Nx/ncpu slabs
+      ! We use our own ALLTOALLV to match fftw_mpi_local_size_3d output
+
+      ! --- Step 1: Gather local RHS and prepare ALLTOALLV ---
+      allocate(sendcounts(0:ncpu-1))
+      allocate(sdispls(0:ncpu-1))
+      allocate(recvcounts(0:ncpu-1))
+      allocate(rdispls(0:ncpu-1))
+
+      ! Count how many cells this rank sends to each X-slab owner
+      ! FFTW MPI block distribution: block = ceil(Nx/ncpu)
+      ! rank r owns x-indices [r*block, min((r+1)*block, Nx)-1]
+      ! dest_rank = ix / block (clamped to ncpu-1)
+
+      sendcounts = 0
+      ngrid_loc = active(ilevel)%ngrid
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            ix = modulo(ix, fft_Nx)
+            dest_rank = min(ix / fftw_block, ncpu-1)
+            sendcounts(dest_rank) = sendcounts(dest_rank) + 1
+         end do
+      end do
+
+      ! Exchange counts
+      call MPI_ALLTOALL(sendcounts, 1, MPI_INTEGER, &
+           recvcounts, 1, MPI_INTEGER, MPI_COMM_WORLD, info)
+
+      ! Compute displacements
+      sdispls(0) = 0
+      rdispls(0) = 0
+      do irank = 1, ncpu-1
+         sdispls(irank) = sdispls(irank-1) + sendcounts(irank-1)
+         rdispls(irank) = rdispls(irank-1) + recvcounts(irank-1)
+      end do
+      n_send_total = sdispls(ncpu-1) + sendcounts(ncpu-1)
+      n_recv_total = rdispls(ncpu-1) + recvcounts(ncpu-1)
+
+      ! Pack send buffer: (slab_idx, rhs_value) pairs
+      allocate(sendbuf(0:2*n_send_total-1))
+      allocate(recvbuf(0:2*n_recv_total-1))
+      allocate(send_idx(0:ncpu-1))
+      send_idx = sdispls
+
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+         Ky = nint(xg(igrid_amr, 2) * dble(fft_Ny))
+         Kz = nint(xg(igrid_amr, 3) * dble(fft_Nz))
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            iy = Ky - 1 + mod((ind-1)/2, 2)
+            iz = Kz - 1 + (ind-1)/4
+            ix = modulo(ix, fft_Nx)
+            iy = modulo(iy, fft_Ny)
+            iz = modulo(iz, fft_Nz)
+
+            dest_rank = min(ix / fftw_block, ncpu-1)
+
+            ! Local X index within destination slab
+            x_local = ix - dest_rank * fftw_block
+
+            ! Slab-local row-major index (in-place R2C: padded last dim)
+            idx_3d = x_local * fft_Ny * 2*(fft_Nz/2+1) + iy * 2*(fft_Nz/2+1) + iz
+
+            iskip = ncoarse + (ind - 1) * ngridmax
+            icell_amr = iskip + igrid_amr
+
+            sendbuf(2*send_idx(dest_rank))     = dble(idx_3d)
+            sendbuf(2*send_idx(dest_rank) + 1) = f(icell_amr, 2)
+            send_idx(dest_rank) = send_idx(dest_rank) + 1
+         end do
+      end do
+
+      ! Exchange (2 doubles per cell)
+      sendcounts = sendcounts * 2
+      recvcounts = recvcounts * 2
+      sdispls = sdispls * 2
+      rdispls = rdispls * 2
+
+      call MPI_ALLTOALLV(sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
+           recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
+           MPI_COMM_WORLD, info)
+
+      ! Unpack into FFTW real data array
+      rdata_fftw = 0.0d0
+      do ix = 0, n_recv_total - 1
+         idx_3d = nint(recvbuf(2*ix))
+         rdata_fftw(idx_3d + 1) = rdata_fftw(idx_3d + 1) + recvbuf(2*ix + 1)
+      end do
+
+      ! --- Step 2: Forward R2C FFT ---
+      call fftw_mpi_execute_dft_r2c(plan_r2c, rdata_fftw, cdata_fftw)
+
+      ! --- Step 3: Apply Green's function ---
+      N_complex = int(local_nx_fftw,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
+      do idx_c = 0, N_complex-1
+         cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c)
+      end do
+
+      ! --- Step 4: Inverse C2R FFT ---
+      call fftw_mpi_execute_dft_c2r(plan_c2r, cdata_fftw, rdata_fftw)
+
+      ! --- Step 5: Normalize ---
+      rdata_fftw = rdata_fftw / dble(N_total)
+
+      ! --- Step 6: Send phi back via reverse ALLTOALLV ---
+      ! Replace rhs values in recvbuf with phi from rdata_fftw
+      do ix = 0, n_recv_total - 1
+         idx_3d = nint(recvbuf(2*ix))
+         recvbuf(2*ix + 1) = rdata_fftw(idx_3d + 1)
+      end do
+
+      call MPI_ALLTOALLV(recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
+           sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
+           MPI_COMM_WORLD, info)
+
+      ! Unpack phi to RAMSES cells
+      send_idx = sdispls / 2
+
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            ix = modulo(ix, fft_Nx)
+            dest_rank = min(ix / fftw_block, ncpu-1)
+
+            iskip = ncoarse + (ind - 1) * ngridmax
+            icell_amr = iskip + igrid_amr
+
+            phi(icell_amr) = sendbuf(2*send_idx(dest_rank) + 1)
+            send_idx(dest_rank) = send_idx(dest_rank) + 1
+         end do
+      end do
+
+      deallocate(sendcounts, sdispls, recvcounts, rdispls)
+      deallocate(sendbuf, recvbuf, send_idx)
+
+   else
+      ! ============================================================
+      ! SMALL GRID PATH: ALLREDUCE + local FFTW3+OMP
+      ! ============================================================
+
+      ! Persistent allocation (only on size change)
+      if(N_total /= saved_N_total) then
+         if(allocated(fft_map))   deallocate(fft_map)
+         if(allocated(rhs_local)) deallocate(rhs_local)
+         if(allocated(rhs_3d))    deallocate(rhs_3d)
+         allocate(fft_map(0:N_total-1))
+         allocate(rhs_local(0:N_total-1))
+         allocate(rhs_3d(0:N_total-1))
+         saved_N_total = N_total
+      end if
+
+      ! --- Step 1: Build fft_map and gather local RHS ---
+      fft_map   = 0
+      rhs_local = 0.0d0
+
+      ngrid_loc = active(ilevel)%ngrid
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         Kx = nint(xg(igrid_amr, 1) * dble(fft_Nx))
+         Ky = nint(xg(igrid_amr, 2) * dble(fft_Ny))
+         Kz = nint(xg(igrid_amr, 3) * dble(fft_Nz))
+         do ind = 1, twotondim
+            ix = Kx - 1 + mod(ind-1, 2)
+            iy = Ky - 1 + mod((ind-1)/2, 2)
+            iz = Kz - 1 + (ind-1)/4
+            ix = modulo(ix, fft_Nx)
+            iy = modulo(iy, fft_Ny)
+            iz = modulo(iz, fft_Nz)
+
+            ! C row-major index
+            idx_3d = ix * fft_Ny * fft_Nz + iy * fft_Nz + iz
+
+            iskip = ncoarse + (ind - 1) * ngridmax
+            icell_amr = iskip + igrid_amr
+
+            fft_map(idx_3d) = icell_amr
+            rhs_local(idx_3d) = f(icell_amr, 2)
+         end do
+      end do
+
+      ! --- Step 2: MPI_ALLREDUCE ---
+#ifndef WITHOUTMPI
+      call MPI_ALLREDUCE(rhs_local, rhs_3d, int(N_total), &
+           MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+#else
+      rhs_3d = rhs_local
+#endif
+
+      ! --- Step 3: Forward R2C FFT ---
+      call fftw_execute_dft_r2c(plan_r2c, rhs_3d, cdata)
+
+      ! --- Step 4: Apply Green's function ---
+      N_complex = int(fft_Nx,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
+      do idx_c = 0, N_complex-1
+         cdata(idx_c) = cdata(idx_c) * green(idx_c)
+      end do
+
+      ! --- Step 5: Inverse C2R FFT ---
+      call fftw_execute_dft_c2r(plan_c2r, cdata, rhs_3d)
+
+      ! --- Step 6: Normalize ---
+      rhs_3d = rhs_3d / dble(N_total)
+
+      ! --- Step 7: Scatter to phi via fft_map ---
+      do idx_3d = 0, int(N_total-1)
+         icell_amr = fft_map(idx_3d)
+         if(icell_amr > 0) phi(icell_amr) = rhs_3d(idx_3d)
+      end do
+
+   end if  ! use_distributed
+
+end subroutine fftw_poisson_solve_uniform
 #endif
 
 ! ########################################################################

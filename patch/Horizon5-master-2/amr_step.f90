@@ -252,7 +252,23 @@ recursive subroutine amr_step(ilevel,icount)
            call multigrid_fine(ilevel,icount)
         end if
      else
-        call timer('poisson - mg base', 'start')
+#ifdef USE_FFTW
+        if(use_fftw) then
+           call timer('poisson-fftw3 base','start')
+        else
+#endif
+#ifdef HYDRO_CUDA
+        if(gpu_fft .and. cuda_pool_is_initialized_c()/=0) then
+           call timer('poisson-cuFFT base','start')
+        else
+#endif
+           call timer('poisson - mg base', 'start')
+#ifdef HYDRO_CUDA
+        end if
+#endif
+#ifdef USE_FFTW
+        end if
+#endif
         call multigrid_fine(levelmin,icount)
      end if
 !############################################################

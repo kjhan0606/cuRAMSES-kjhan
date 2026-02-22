@@ -82,6 +82,18 @@ else
 endif
 
 #############################################################################
+# FFTW3 CPU direct Poisson solver (build with: make USE_FFTW=1)
+#############################################################################
+ifdef USE_FFTW
+  FFTW3_DIR = $(HOME)/local
+  FFLAGS += -DUSE_FFTW -I$(FFTW3_DIR)/include
+  LIBS_FFTW = -L$(FFTW3_DIR)/lib -lfftw3_mpi -lfftw3_omp -lfftw3 -lm \
+              -Wl,-rpath,$(FFTW3_DIR)/lib
+else
+  LIBS_FFTW =
+endif
+
+#############################################################################
 MOD = mod
 #############################################################################
 # MPI librairies
@@ -92,7 +104,7 @@ LIBMPI =
 LIBCUDA = -L/opt/cuda/lib  -lm -lcuda -lcudart
 
 LIBGRACKLE = -lgrackle -lhdf5 -lz
-LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA)
+LIBS = $(LIBMPI) $(LIBS_HDF5) $(LIBS_CUDA) $(LIBS_FFTW)
 #############################################################################
 # Sources directories are searched in this exact order
 VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:../pm:../poisson:../amr
