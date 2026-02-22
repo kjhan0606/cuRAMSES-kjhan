@@ -67,6 +67,7 @@ module amr_parameters
   logical::gpu_hydro=.false.   ! GPU hydro solver (hybrid CPU/GPU)
   logical::gpu_poisson=.false. ! GPU Poisson MG for AMR levels
   logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
+  logical::gpu_sink=.false.    ! GPU AGN feedback (average_AGN + AGN_blast)
 
   ! Mesh parameters
   integer::geom=1             ! 1: cartesian, 2: cylindrical, 3: spherical

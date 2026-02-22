@@ -29,9 +29,72 @@ recursive subroutine amr_step(ilevel,icount)
 
   real(kind=4):: real_mem, real_mem_tot
 
+  ! Particle sub-timers
+  integer(kind=8) :: pt_t1, pt_t2, pt_rate
+  real(dp), save :: pt_mktree=0, pt_killtree=0, pt_synchro=0, pt_move=0, pt_merge=0
+
+  ! Sink sub-timers
+  integer(kind=8) :: sk_t1, sk_t2
+  real(dp), save :: sk_agn_fb=0, sk_create_sink=0, sk_grow=0, sk_bondi_hoyle=0
+
+#ifdef HYDRO_CUDA
+  ! GPU auto-tuning framework
+  ! Phase 0: first call → force CPU, record time
+  ! Phase 1: second call → force GPU, record time
+  ! Phase 2+: use faster path, keep booking times
+  !
+  ! AGN feedback (sink particles)
+  integer, save :: sk_auto_phase = 0
+  real(dp), save :: sk_cpu_ref = 0d0, sk_gpu_ref = 0d0
+  logical, save :: sk_use_gpu = .false.
+  logical, save :: sk_auto_init = .false.
+  real(dp) :: sk_dt_agn
+  !
+  ! Hydro Godunov
+  integer, save :: hy_auto_phase = 0
+  real(dp), save :: hy_cpu_ref = 0d0, hy_gpu_ref = 0d0
+  logical, save :: hy_use_gpu = .false.
+  logical, save :: hy_auto_init = .false.
+  integer(kind=8) :: hy_t1, hy_t2
+  real(dp) :: hy_dt
+  !
+  ! Poisson MG (gpu_poisson only; gpu_fft excluded from auto-tuning)
+  integer, save :: mg_auto_phase = 0
+  real(dp), save :: mg_cpu_ref = 0d0, mg_gpu_ref = 0d0
+  logical, save :: mg_use_gpu = .false.
+  logical, save :: mg_auto_init = .false.
+  logical, save :: mg_orig_poisson = .false.
+  integer(kind=8) :: mg_t1, mg_t2
+  real(dp) :: mg_dt
+#endif
+
   if(numbtot(1,ilevel)==0)return
 
   if(verbose)write(*,999)icount,ilevel, levelmin
+
+#ifdef HYDRO_CUDA
+  !---------------------------------------------------
+  ! GPU auto-tuning: set flags at start of coarse step
+  !---------------------------------------------------
+  if(ilevel==levelmin) then
+     ! Hydro auto-tuning: init + flag setting
+     if(.not. hy_auto_init .and. gpu_hydro) then
+        hy_auto_init = .true.
+        hy_auto_phase = 0
+     endif
+     if(hy_auto_init) then
+        if(hy_auto_phase == 0) then
+           gpu_hydro = .false.
+        else if(hy_auto_phase == 1) then
+           gpu_hydro = .true.
+        else
+           gpu_hydro = hy_use_gpu
+        endif
+     endif
+     ! Poisson auto-tuning: init is done near multigrid_fine call
+     ! (mg_auto_init set there), flags set at levelmin entry
+  endif
+#endif
 
   !-------------------------------------------
   ! Make new refinements and update boundaries
@@ -114,7 +177,10 @@ recursive subroutine amr_step(ilevel,icount)
   ! Particle leakage
   !-----------------
                                call timer('particles','start')
+  call system_clock(pt_t1, pt_rate)
   if(pic)call make_tree_fine(ilevel)
+  call system_clock(pt_t2)
+  pt_mktree = pt_mktree + dble(pt_t2-pt_t1)/dble(pt_rate)
   
   !------------------------
   ! Output results to files
@@ -202,11 +268,77 @@ recursive subroutine amr_step(ilevel,icount)
      if(hydro.and.star.and.f_w>0.)call kinetic_feedback
      
      call timer('sinks','start')
+#ifdef HYDRO_CUDA
+     ! --- GPU auto-tuning: set gpu_sink for this step ---
+     if(.not. sk_auto_init .and. gpu_sink) then
+        sk_auto_init = .true.
+        sk_auto_phase = 0
+     endif
+     if(sk_auto_init) then
+        if(sk_auto_phase == 0) then
+           gpu_sink = .false.  ! Phase 0: force CPU path
+        else if(sk_auto_phase == 1) then
+           gpu_sink = .true.   ! Phase 1: force GPU path
+        else
+           gpu_sink = sk_use_gpu  ! Phase 2+: use decided path
+        endif
+     endif
+#endif
+     call system_clock(sk_t1)
      if(sink .and. sink_AGN)call AGN_feedback
+     call system_clock(sk_t2)
+     sk_agn_fb = sk_agn_fb + dble(sk_t2-sk_t1)/dble(pt_rate)
+#ifdef HYDRO_CUDA
+     ! --- GPU auto-tuning: record time and update decision ---
+     if(sk_auto_init .and. sink .and. sink_AGN) then
+        sk_dt_agn = dble(sk_t2-sk_t1)/dble(pt_rate)
+        if(sk_auto_phase == 0) then
+           ! Phase 0 done: recorded CPU time
+           sk_cpu_ref = sk_dt_agn
+           sk_auto_phase = 1
+           if(myid==1) write(*,'(A,F8.3,A)') &
+                ' [GPU auto-tune] AGN_feedback CPU: ', sk_cpu_ref, ' s'
+        else if(sk_auto_phase == 1) then
+           ! Phase 1 done: recorded GPU time, decide
+           sk_gpu_ref = sk_dt_agn
+           sk_use_gpu = (sk_gpu_ref < sk_cpu_ref)
+           sk_auto_phase = 2
+           gpu_sink = sk_use_gpu
+           if(myid==1) then
+              write(*,'(A,F8.3,A,F8.3,A)') &
+                   ' [GPU auto-tune] AGN_feedback GPU: ', sk_gpu_ref, &
+                   ' s  (CPU was ', sk_cpu_ref, ' s)'
+              if(sk_use_gpu) then
+                 write(*,'(A)') ' [GPU auto-tune] Decision: GPU (faster)'
+              else
+                 write(*,'(A)') ' [GPU auto-tune] Decision: CPU (faster)'
+              endif
+           endif
+        else
+           ! Phase 2+: keep booking, check for switch
+           if(sk_use_gpu) then
+              sk_gpu_ref = sk_dt_agn
+           else
+              sk_cpu_ref = sk_dt_agn
+              ! Switch to GPU if CPU became slower
+              if(sk_cpu_ref > sk_gpu_ref .and. sk_gpu_ref > 0d0) then
+                 sk_use_gpu = .true.
+                 gpu_sink = .true.
+                 if(myid==1) write(*,'(A,F8.3,A,F8.3,A)') &
+                      ' [GPU auto-tune] Switching to GPU: CPU=', &
+                      sk_cpu_ref, ' s > GPU=', sk_gpu_ref, ' s'
+              endif
+           endif
+        endif
+     endif
+#endif
      !-----------------------------------------------------
      ! Create sink particles and associated cloud particles
      !-----------------------------------------------------
+     call system_clock(sk_t1)
      if(sink)call create_sink
+     call system_clock(sk_t2)
+     sk_create_sink = sk_create_sink + dble(sk_t2-sk_t1)/dble(pt_rate)
 
   endif
 
@@ -228,11 +360,14 @@ recursive subroutine amr_step(ilevel,icount)
   if(pic)then
      ! Remove particles to finer levels
                                call timer('particles','start')
+     call system_clock(pt_t1)
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
      call kill_tree_fine(ilevel)
      ! Update boundary conditions for remaining particles
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
      call virtual_tree_fine(ilevel)
+     call system_clock(pt_t2)
+     pt_killtree = pt_killtree + dble(pt_t2-pt_t1)/dble(pt_rate)
   end if
 !############################################################
 !       call getmem(real_mem)
@@ -264,18 +399,54 @@ recursive subroutine amr_step(ilevel,icount)
      ! Compute gravitational potential
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
 !jhshin1
+#ifdef HYDRO_CUDA
+     ! --- GPU auto-tuning for Poisson MG (NOT fft) ---
+     ! gpu_fft is excluded from auto-tuning because cuFFT direct solve
+     ! and MG V-cycle produce different potential scales, so switching
+     ! between them mid-run causes energy conservation failure.
+     if(.not. mg_auto_init .and. gpu_poisson) then
+        mg_auto_init = .true.
+        mg_auto_phase = 0
+        mg_orig_poisson = gpu_poisson
+     endif
+     if(mg_auto_init .and. ilevel==levelmin) then
+        if(mg_auto_phase == 0) then
+           gpu_poisson = .false.
+        else if(mg_auto_phase == 1) then
+           gpu_poisson = mg_orig_poisson
+        else
+           if(.not. mg_use_gpu) then
+              gpu_poisson = .false.
+           endif
+        endif
+     endif
+#endif
+#ifdef HYDRO_CUDA
+     call system_clock(mg_t1)
+#endif
      if(ilevel>levelmin)then
         if(ilevel .ge. cg_levelmin) then
            call timer('poisson - cg', 'start')
            call phi_fine_cg(ilevel,icount)
         else
-           call timer('poisson - mg', 'start')
+           call timer('poisson - mg AMR', 'start')
            call multigrid_fine(ilevel,icount)
         end if
      else
-        call timer('poisson - mg', 'start')
+        call timer('poisson - mg base', 'start')
         call multigrid_fine(levelmin,icount)
      end if
+#ifdef HYDRO_CUDA
+     call system_clock(mg_t2)
+     if(mg_auto_init) then
+        mg_dt = dble(mg_t2-mg_t1)/dble(pt_rate)
+        if(mg_auto_phase == 0) then
+           mg_cpu_ref = mg_cpu_ref + mg_dt
+        else if(mg_auto_phase == 1) then
+           mg_gpu_ref = mg_gpu_ref + mg_dt
+        endif
+     endif
+#endif
 !############################################################
 !       call getmem(real_mem)
 !       call MPI_ALLREDUCE(real_mem,real_mem_tot,1,MPI_REAL,MPI_MAX,MPI_COMM_WORLD,info)
@@ -310,8 +481,11 @@ recursive subroutine amr_step(ilevel,icount)
      ! Synchronize remaining particles for gravity
      if(pic)then
                                call timer('particles','start')
+        call system_clock(pt_t1)
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
         call synchro_fine(ilevel)
+        call system_clock(pt_t2)
+        pt_synchro = pt_synchro + dble(pt_t2-pt_t1)/dble(pt_rate)
      end if
 !############################################################
 !       call getmem(real_mem)
@@ -338,6 +512,7 @@ recursive subroutine amr_step(ilevel,icount)
 
         ! Density threshold and/or Bondi accretion onto sink particle
                                call timer('sinks','start')
+        call system_clock(sk_t1)
         if(sink)then
            if(bondi)then
               call grow_bondi(ilevel)
@@ -345,6 +520,8 @@ recursive subroutine amr_step(ilevel,icount)
               call grow_jeans(ilevel)
            endif
         endif
+        call system_clock(sk_t2)
+        sk_grow = sk_grow + dble(sk_t2-sk_t1)/dble(pt_rate)
 !############################################################
 !       call getmem(real_mem)
 !       call MPI_ALLREDUCE(real_mem,real_mem_tot,1,MPI_REAL,MPI_MAX,MPI_COMM_WORLD,info)
@@ -425,7 +602,25 @@ recursive subroutine amr_step(ilevel,icount)
 
      ! Hyperbolic solver
                                call timer('hydro - godunov','start')
+#ifdef HYDRO_CUDA
+     ! --- GPU auto-tuning for hydro: flags set at levelmin entry ---
+     ! (actual flag setting is done at start of amr_step(levelmin))
+#endif
+#ifdef HYDRO_CUDA
+     call system_clock(hy_t1)
+#endif
      call godunov_fine(ilevel)
+#ifdef HYDRO_CUDA
+     call system_clock(hy_t2)
+     if(hy_auto_init) then
+        hy_dt = dble(hy_t2-hy_t1)/dble(pt_rate)
+        if(hy_auto_phase == 0) then
+           hy_cpu_ref = hy_cpu_ref + hy_dt
+        else if(hy_auto_phase == 1) then
+           hy_gpu_ref = hy_gpu_ref + hy_dt
+        endif
+     endif
+#endif
 
      ! Reverse update boundaries
                                call timer('hydro - rev ghostzones','start')
@@ -490,7 +685,10 @@ recursive subroutine amr_step(ilevel,icount)
   !---------------
   if(pic)then
                                call timer('particles','start')
+     call system_clock(pt_t1)
      call move_fine(ilevel) ! Only remaining particles
+     call system_clock(pt_t2)
+     pt_move = pt_move + dble(pt_t2-pt_t1)/dble(pt_rate)
   end if
 
   !----------------------------------
@@ -501,7 +699,10 @@ recursive subroutine amr_step(ilevel,icount)
 
   ! Compute Bondi-Hoyle accretion parameters
                                call timer('sinks','start')
+  call system_clock(sk_t1)
   if(sink.and.bondi)call bondi_hoyle(ilevel)
+  call system_clock(sk_t2)
+  sk_bondi_hoyle = sk_bondi_hoyle + dble(sk_t2-sk_t1)/dble(pt_rate)
 
   !---------------------------------------
   ! Update physical and virtual boundaries
@@ -537,7 +738,10 @@ recursive subroutine amr_step(ilevel,icount)
   ! Merge finer level particles
   !----------------------------
                                call timer('particles','start')
+  call system_clock(pt_t1)
   if(pic)call merge_tree_fine(ilevel)
+  call system_clock(pt_t2)
+  pt_merge = pt_merge + dble(pt_t2-pt_t1)/dble(pt_rate)
 
   !---------------
   ! Radiation step
@@ -555,6 +759,91 @@ recursive subroutine amr_step(ilevel,icount)
   if(ilevel>levelmin)then
      if(nsubcycle(ilevel-1)==1)dtnew(ilevel-1)=dtnew(ilevel)
      if(icount==2)dtnew(ilevel-1)=dtold(ilevel)+dtnew(ilevel)
+  end if
+
+#ifdef HYDRO_CUDA
+  ! --- GPU auto-tuning: end-of-coarse-step decision for hydro & poisson ---
+  if(ilevel==levelmin) then
+     ! Hydro auto-tuning decision
+     if(hy_auto_init) then
+        if(hy_auto_phase == 0) then
+           hy_auto_phase = 1
+           if(myid==1) write(*,'(A,F8.3,A)') &
+                ' [GPU auto-tune] Hydro CPU: ', hy_cpu_ref, ' s'
+        else if(hy_auto_phase == 1) then
+           hy_use_gpu = (hy_gpu_ref < hy_cpu_ref)
+           hy_auto_phase = 2
+           gpu_hydro = hy_use_gpu
+           if(myid==1) then
+              write(*,'(A,F8.3,A,F8.3,A)') &
+                   ' [GPU auto-tune] Hydro GPU: ', hy_gpu_ref, &
+                   ' s  (CPU was ', hy_cpu_ref, ' s)'
+              if(hy_use_gpu) then
+                 write(*,'(A)') ' [GPU auto-tune] Hydro decision: GPU (faster)'
+              else
+                 write(*,'(A)') ' [GPU auto-tune] Hydro decision: CPU (faster)'
+              endif
+           endif
+        else
+           ! Phase 2+: monitor accumulated time per coarse step
+           if(hy_use_gpu) then
+              hy_gpu_ref = 0d0  ! will re-accumulate next step
+           else
+              hy_cpu_ref = 0d0
+           endif
+        endif
+     endif
+     ! Poisson MG auto-tuning decision (gpu_fft excluded)
+     if(mg_auto_init) then
+        if(mg_auto_phase == 0) then
+           mg_auto_phase = 1
+           if(myid==1) write(*,'(A,F8.3,A)') &
+                ' [GPU auto-tune] Poisson MG CPU: ', mg_cpu_ref, ' s'
+        else if(mg_auto_phase == 1) then
+           mg_use_gpu = (mg_gpu_ref < mg_cpu_ref)
+           mg_auto_phase = 2
+           if(.not. mg_use_gpu) then
+              gpu_poisson = .false.
+           endif
+           if(myid==1) then
+              write(*,'(A,F8.3,A,F8.3,A)') &
+                   ' [GPU auto-tune] Poisson MG GPU: ', mg_gpu_ref, &
+                   ' s  (CPU was ', mg_cpu_ref, ' s)'
+              if(mg_use_gpu) then
+                 write(*,'(A)') ' [GPU auto-tune] Poisson MG decision: GPU (faster)'
+              else
+                 write(*,'(A)') ' [GPU auto-tune] Poisson MG decision: CPU (faster)'
+              endif
+           endif
+        else
+           ! Phase 2+: monitor
+           if(mg_use_gpu) then
+              mg_gpu_ref = 0d0
+           else
+              mg_cpu_ref = 0d0
+           endif
+        endif
+     endif
+  endif
+#endif
+
+  ! Print particle sub-timers at last step
+  if(ilevel==levelmin .and. nstep>=nstepmax .and. myid==1) then
+     write(*,'(A)') ' === Particle sub-timers ==='
+     write(*,'(A,F8.3,A)') '   make_tree  : ', pt_mktree, ' s'
+     write(*,'(A,F8.3,A)') '   kill+virt  : ', pt_killtree, ' s'
+     write(*,'(A,F8.3,A)') '   synchro    : ', pt_synchro, ' s'
+     write(*,'(A,F8.3,A)') '   move       : ', pt_move, ' s'
+     write(*,'(A,F8.3,A)') '   merge      : ', pt_merge, ' s'
+     write(*,'(A,F8.3,A)') '   TOTAL      : ', &
+          pt_mktree+pt_killtree+pt_synchro+pt_move+pt_merge, ' s'
+     write(*,'(A)') ' === Sink sub-timers ==='
+     write(*,'(A,F8.3,A)') '   AGN_feedback : ', sk_agn_fb, ' s'
+     write(*,'(A,F8.3,A)') '   create_sink  : ', sk_create_sink, ' s'
+     write(*,'(A,F8.3,A)') '   grow_bondi   : ', sk_grow, ' s'
+     write(*,'(A,F8.3,A)') '   bondi_hoyle  : ', sk_bondi_hoyle, ' s'
+     write(*,'(A,F8.3,A)') '   TOTAL        : ', &
+          sk_agn_fb+sk_create_sink+sk_grow+sk_bondi_hoyle, ' s'
   end if
 
 999 format(' Entering amr_step',i1,' for level',i2, '  for a levelmin ',i3)

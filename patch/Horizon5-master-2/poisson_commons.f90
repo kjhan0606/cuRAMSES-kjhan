@@ -33,6 +33,20 @@ module poisson_commons
   end type mg_nbor_cache_t
   type(mg_nbor_cache_t), allocatable, dimension(:) :: nbor_mg_cache
 
+  ! GPU MG halo exchange arrays (emission/reception cell indices and buffers)
+  integer, allocatable :: mg_halo_emit_cells(:)
+  integer, allocatable :: mg_halo_recv_cells(:)
+  real(dp), allocatable :: mg_halo_emit_buf(:)
+  real(dp), allocatable :: mg_halo_recv_buf(:)
+  integer :: mg_halo_n_emit = 0
+  integer :: mg_halo_n_recv = 0
+
+  ! GPU MG restrict/interp flat arrays
+  integer, allocatable :: mg_ri_flat_offset(:)
+  integer :: mg_ri_total_coarse = 0
+  real(dp), allocatable :: mg_ri_coarse_rhs(:)
+  real(dp), allocatable :: mg_ri_coarse_phi(:)
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

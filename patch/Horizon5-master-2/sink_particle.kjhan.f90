@@ -22,18 +22,27 @@ subroutine create_sink
   integer::ilevel,ivar,info,icpu,igrid,npartbound,isink,nelvelmax_loc
   real(dp)::dx_min,vol_min,dx,dx_temp
   integer::nx_loc
+  integer(kind=8)::cs_t0,cs_t1,cs_t2,cs_t3,cs_t4,cs_t5,cs_t6,cs_t7,cs_t8,cs_rate
+  real(dp)::cs_kill_virt,cs_rho_star,cs_make_sink,cs_kill_cloud,cs_update_pos
+  real(dp)::cs_merge,cs_create_cloud,cs_scatter,cs_hydro,cs_bondi
+  ! (per-level scatter timers removed)
   if(verbose)write(*,*)' Entering create_sink'
+  call system_clock(cs_t0, cs_rate)
 
   ! Remove particles to finer levels
   do ilevel=levelmin,nlevelmax
      call kill_tree_fine(ilevel)
      call virtual_tree_fine(ilevel)
   end do
+  call system_clock(cs_t1)
+  cs_kill_virt = dble(cs_t1-cs_t0)/dble(cs_rate)
 
   ! Get the star density value in each cell
   do ilevel=levelmin,nlevelmax
      call kjhan_get_rho_star(ilevel)
   enddo
+  call system_clock(cs_t2)
+  cs_rho_star = dble(cs_t2-cs_t1)/dble(cs_rate)
 
   ! Create new sink particles
   call kjhan_make_sink(nlevelmax)
@@ -41,25 +50,39 @@ subroutine create_sink
      if(ilevel>=levelmin)call kjhan_make_sink(ilevel)
      call merge_tree_fine(ilevel)
   end do
+  call system_clock(cs_t3)
+  cs_make_sink = dble(cs_t3-cs_t2)/dble(cs_rate)
 
   ! Remove particle clouds around old sinks
   call kjhan_kill_cloud(1)
 
   ! update sink position before merging sinks and creating clouds
   call kjhan_update_sink_position_velocity
+  call system_clock(cs_t4)
+  cs_kill_cloud = dble(cs_t4-cs_t3)/dble(cs_rate)
 
   ! Merge sink using FOF
   call merge_sink(1)
+  call system_clock(cs_t5)
+  cs_merge = dble(cs_t5-cs_t4)/dble(cs_rate)
 
   ! Create new particle clouds
   call kjhan_create_cloud(1)
+  call system_clock(cs_t6)
+  cs_create_cloud = dble(cs_t6-cs_t5)/dble(cs_rate)
 
   ! Scatter particle to the grid
+  ! Scatter particles from coarse to fine levels.
+  ! Optimization: skip make_tree_fine for levels below levelmin.
+  ! Cloud particles are created at level 1 and cascade down via kill_tree_fine.
+  ! At coarse levels, make_tree_fine does no useful work (no sister grids to move to).
   do ilevel=1,nlevelmax
-     call make_tree_fine(ilevel)
+     if(ilevel >= levelmin) call make_tree_fine(ilevel)
      call kill_tree_fine(ilevel)
      call virtual_tree_fine(ilevel)
   end do
+  call system_clock(cs_t7)
+  cs_scatter = dble(cs_t7-cs_t6)/dble(cs_rate)
 
   ! Update hydro quantities for split cells
   if(hydro)then
@@ -76,6 +99,8 @@ subroutine create_sink
         if(simple_boundary)call make_boundary_hydro(ilevel)
      end do
   end if
+  call system_clock(cs_t8)
+  cs_hydro = dble(cs_t8-cs_t7)/dble(cs_rate)
 
   jsink=0d0
   ! Compute Bondi parameters and gather particle
@@ -83,6 +108,24 @@ subroutine create_sink
      if(bondi)call bondi_hoyle(ilevel)
      call merge_tree_fine(ilevel)
   end do
+
+  if(myid==1) then
+     call system_clock(cs_t1)
+     cs_bondi = dble(cs_t1-cs_t8)/dble(cs_rate)
+     write(*,'(A)') ' === create_sink sub-timers ==='
+     write(*,'(A,F8.3,A)') '   kill+virtual   : ', cs_kill_virt, ' s'
+     write(*,'(A,F8.3,A)') '   rho_star       : ', cs_rho_star, ' s'
+     write(*,'(A,F8.3,A)') '   make_sink      : ', cs_make_sink, ' s'
+     write(*,'(A,F8.3,A)') '   kill_cloud+upd : ', cs_kill_cloud, ' s'
+     write(*,'(A,F8.3,A)') '   merge_sink     : ', cs_merge, ' s'
+     write(*,'(A,F8.3,A)') '   create_cloud   : ', cs_create_cloud, ' s'
+     write(*,'(A,F8.3,A)') '   scatter(tree)  : ', cs_scatter, ' s'
+     write(*,'(A,F8.3,A)') '   hydro(upload+gz): ', cs_hydro, ' s'
+     write(*,'(A,F8.3,A)') '   bondi_hoyle    : ', cs_bondi, ' s'
+     write(*,'(A,F8.3,A)') '   TOTAL          : ', &
+          cs_kill_virt+cs_rho_star+cs_make_sink+cs_kill_cloud+cs_merge+ &
+          cs_create_cloud+cs_scatter+cs_hydro+cs_bondi, ' s'
+  endif
 
 end subroutine create_sink
 !################################################################
@@ -123,6 +166,11 @@ subroutine kjhan_make_sink(ilevel)
   real(dp),dimension(1:3)::xbound,skip_loc
   real(dp)::dx,dx_loc,scale,vol_loc,dx_min,vol_min,dxx,dyy,dzz,dr_sink,rmax_sink,rmax
   real(dp)::bx1,bx2,by1,by2,bz1,bz2,factG,pi,nCOM,d_star,star_ratio
+  ! Spatial binning for sink proximity check
+  integer::nbin_sink,ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi
+  real(dp)::inv_bin_size_sink
+  integer,dimension(:,:,:),allocatable::bin_head_sink
+  integer,dimension(:),allocatable::sink_next
 
   integer ,target, allocatable::Pind_grid(:,:),Pind_cell(:,:)
   logical ,target, allocatable::Pok(:,:)
@@ -306,10 +354,26 @@ subroutine kjhan_make_sink(ilevel)
   !----------------------------
   ! Compute number of new sinks
   !----------------------------
+  ! Build spatial bins for sink proximity check (replaces O(nsink) brute-force)
+  if(nsink>0)then
+     nbin_sink=max(1,min(128,int(scale*xbound(1)/rmax_sink)))
+     inv_bin_size_sink=dble(nbin_sink)/(scale*xbound(1))
+     allocate(bin_head_sink(nbin_sink,nbin_sink,nbin_sink))
+     allocate(sink_next(1:nsink))
+     bin_head_sink=0; sink_next=0
+     do isink=1,nsink
+        ibx=max(1,min(nbin_sink,int(xsink(isink,1)*inv_bin_size_sink)+1))
+        iby=max(1,min(nbin_sink,int(xsink(isink,2)*inv_bin_size_sink)+1))
+        ibz=max(1,min(nbin_sink,int(xsink(isink,3)*inv_bin_size_sink)+1))
+        sink_next(isink)=bin_head_sink(ibx,iby,ibz)
+        bin_head_sink(ibx,iby,ibz)=isink
+     end do
+  endif
+
   ntot=0
   ! Loop over grids
   ncache=active(ilevel)%ngrid
-!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz ) reduction(+: ntot) schedule(static)
+!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz, ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi ) reduction(+: ntot) schedule(static)
   do igrid=1,ncache,nvector
      ngrid=MIN(nvector,ncache-igrid+1)
      do i=1,ngrid
@@ -349,37 +413,62 @@ subroutine kjhan_make_sink(ilevel)
           ! Quenching criterion
            if(flag2(ind_cell(i))==1)ok(i)=.false.
 
-          if(ok(i))then
+          if(ok(i).and.nsink>0)then
              x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
              y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
              z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-             do isink=1,nsink
-               dxx=x-xsink(isink,1)
-               if(dxx> x_half)then
-                  dxx=dxx-x_box
-               endif
-               if(dxx<-x_half)then
-                  dxx=dxx+x_box
-               endif
-               dr_sink=dxx*dxx
-               dyy=y-xsink(isink,2)
-               if(dyy> y_half)then
-                  dyy=dyy-y_box
-               endif
-               if(dyy<-y_half)then
-                  dyy=dyy+y_box
-               endif
-               dr_sink=dyy*dyy+dr_sink
-               dzz=z-xsink(isink,3)
-               if(dzz> z_half)then
-                  dzz=dzz-z_box
-               endif
-               if(dzz<-z_half)then
-                  dzz=dzz+z_box
-               endif
-               dr_sink=dzz*dzz+dr_sink
-               if(dr_sink .le. rmax_sink2)ok(i)=.false.
-             enddo
+             ! 27-bin spatial neighbor search
+             ibx=max(1,min(nbin_sink,int(x*inv_bin_size_sink)+1))
+             iby=max(1,min(nbin_sink,int(y*inv_bin_size_sink)+1))
+             ibz=max(1,min(nbin_sink,int(z*inv_bin_size_sink)+1))
+             ibx_lo=ibx-1; ibx_hi=ibx+1
+             iby_lo=iby-1; iby_hi=iby+1
+             ibz_lo=ibz-1; ibz_hi=ibz+1
+             ! Periodic wrapping for bin indices
+             if(ibx_lo<1) ibx_lo=ibx_lo+nbin_sink
+             if(ibx_hi>nbin_sink) ibx_hi=ibx_hi-nbin_sink
+             if(iby_lo<1) iby_lo=iby_lo+nbin_sink
+             if(iby_hi>nbin_sink) iby_hi=iby_hi-nbin_sink
+             if(ibz_lo<1) ibz_lo=ibz_lo+nbin_sink
+             if(ibz_hi>nbin_sink) ibz_hi=ibz_hi-nbin_sink
+             do jbz=1,nbin_sink
+                if(ibz_lo<=ibz_hi)then
+                   if(jbz<ibz_lo.or.jbz>ibz_hi) cycle
+                else
+                   if(jbz<ibz_lo.and.jbz>ibz_hi) cycle
+                endif
+             do jby=1,nbin_sink
+                if(iby_lo<=iby_hi)then
+                   if(jby<iby_lo.or.jby>iby_hi) cycle
+                else
+                   if(jby<iby_lo.and.jby>iby_hi) cycle
+                endif
+             do jbx=1,nbin_sink
+                if(ibx_lo<=ibx_hi)then
+                   if(jbx<ibx_lo.or.jbx>ibx_hi) cycle
+                else
+                   if(jbx<ibx_lo.and.jbx>ibx_hi) cycle
+                endif
+                isink=bin_head_sink(jbx,jby,jbz)
+                do while(isink>0)
+                  dxx=x-xsink(isink,1)
+                  if(dxx> x_half)dxx=dxx-x_box
+                  if(dxx<-x_half)dxx=dxx+x_box
+                  dr_sink=dxx*dxx
+                  dyy=y-xsink(isink,2)
+                  if(dyy> y_half)dyy=dyy-y_box
+                  if(dyy<-y_half)dyy=dyy+y_box
+                  dr_sink=dyy*dyy+dr_sink
+                  dzz=z-xsink(isink,3)
+                  if(dzz> z_half)dzz=dzz-z_box
+                  if(dzz<-z_half)dzz=dzz+z_box
+                  dr_sink=dzz*dzz+dr_sink
+                  if(dr_sink .le. rmax_sink2)ok(i)=.false.
+                  isink=sink_next(isink)
+                end do
+             end do
+             end do
+             end do
           endif
 
        end do
@@ -396,6 +485,11 @@ subroutine kjhan_make_sink(ilevel)
   end do
 
 
+
+  ! Cleanup spatial bins
+  if(nsink>0)then
+     deallocate(bin_head_sink,sink_next)
+  endif
 
   if(verbose)write(*,*)'Check multiple sink creation',ntot
 !  write(*,*)'Check multiple sink creation',myid,ntot
@@ -5825,6 +5919,10 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   use pm_commons
   use amr_commons
   use hydro_commons
+#ifdef HYDRO_CUDA
+  use sink_cuda_interface
+  use cuda_commons, only: cuda_pool_is_initialized_c
+#endif
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -5879,6 +5977,17 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
   real(dp) :: bin_size, inv_bin_size
   integer, allocatable :: bin_head(:,:,:), agn_next(:)
+#ifdef HYDRO_CUDA
+  logical :: gpu_done
+  integer :: ncells_total, jc, igrid_i, ind_cell_i, iskip_i, use_gpu, ic
+  integer :: ilevel_g, ind_g
+  real(dp) :: dx_g, dx_loc_g, vol_loc_g
+  real(dp),allocatable :: h_cell_x(:),h_cell_y(:),h_cell_z(:)
+  real(dp),allocatable :: h_cell_vol(:),h_cell_d(:),h_cell_dx(:)
+  integer(4),allocatable :: h_cell_idx(:), h_agn_ok(:)
+  real(dp),dimension(1:twotondim,1:3) :: xc_g
+  integer :: ix_g,iy_g,iz_g
+#endif
 
   if(verbose)write(*,*)'  +Entering average_AGN'
 !$omp parallel shared(nthreads)
@@ -5942,7 +6051,104 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 
   ! Initialize the averaged variables
   vol_gas=0d0;mass_gas=0d0;vol_blast=0d0;mass_blast=0d0;ind_blast=-1;psy_norm=0d0;ZAGN=0d0
-!######################################################################################################### 
+
+#ifdef HYDRO_CUDA
+  ! ---- GPU dispatch for average_AGN ----
+  gpu_done = .false.
+  if(gpu_sink .and. cuda_pool_is_initialized_c() /= 0 .and. nAGN > 0) then
+    ! Count leaf cells across all levels
+    ncells_total = 0
+    do ilevel_g = levelmin, nlevelmax
+      do igrid_i = 1, active(ilevel_g)%ngrid
+        do ind_g = 1, twotondim
+          iskip_i = ncoarse + (ind_g-1)*ngridmax
+          ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
+          if(son(ind_cell_i) == 0) ncells_total = ncells_total + 1
+        end do
+      end do
+    end do
+    if(ncells_total > 0) then
+      allocate(h_cell_x(1:ncells_total), h_cell_y(1:ncells_total), h_cell_z(1:ncells_total))
+      allocate(h_cell_vol(1:ncells_total), h_cell_d(1:ncells_total), h_cell_dx(1:ncells_total))
+      allocate(h_cell_idx(1:ncells_total))
+      allocate(h_agn_ok(1:nAGN))
+      ! Fill flat cell arrays
+      jc = 0
+      do ilevel_g = levelmin, nlevelmax
+        dx_g = 0.5D0**ilevel_g
+        dx_loc_g = dx_g * scale
+        vol_loc_g = dx_loc_g**ndim
+        do ind_g = 1, twotondim
+          iz_g = (ind_g-1)/4
+          iy_g = (ind_g-1-4*iz_g)/2
+          ix_g = (ind_g-1-2*iy_g-4*iz_g)
+          xc_g(ind_g,1) = (dble(ix_g)-0.5D0)*dx_g
+          xc_g(ind_g,2) = (dble(iy_g)-0.5D0)*dx_g
+          xc_g(ind_g,3) = (dble(iz_g)-0.5D0)*dx_g
+        end do
+        do igrid_i = 1, active(ilevel_g)%ngrid
+          do ind_g = 1, twotondim
+            iskip_i = ncoarse + (ind_g-1)*ngridmax
+            ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
+            if(son(ind_cell_i) == 0) then
+              jc = jc + 1
+              h_cell_x(jc) = (xg(active(ilevel_g)%igrid(igrid_i),1)+xc_g(ind_g,1)-skip_loc(1))*scale
+              h_cell_y(jc) = (xg(active(ilevel_g)%igrid(igrid_i),2)+xc_g(ind_g,2)-skip_loc(2))*scale
+              h_cell_z(jc) = (xg(active(ilevel_g)%igrid(igrid_i),3)+xc_g(ind_g,3)-skip_loc(3))*scale
+              h_cell_vol(jc) = vol_loc_g
+              h_cell_d(jc) = uold(ind_cell_i,1)
+              h_cell_dx(jc) = dx_loc_g
+              h_cell_idx(jc) = ind_cell_i
+            endif
+          end do
+        end do
+      end do
+      ! Pack ok_blast_agn to integer array
+      do iAGN = 1, nAGN
+        h_agn_ok(iAGN) = merge(1, 0, ok_blast_agn(iAGN))
+      end do
+      ! Call GPU kernel (bin_head column-major layout matches CUDA kernel)
+      use_gpu = cuda_sink_average_agn_c( &
+        h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_d, h_cell_dx, h_cell_idx, ncells_total, &
+        xAGN, jAGN, dMBH_AGN, dMEd_AGN, EsaveAGN, h_agn_ok, nAGN, &
+        bin_head, agn_next, nbin, inv_bin_size, rmax, rmax2, X_floor, &
+        vol_gas, mass_gas, psy_norm, vol_blast, mass_blast, ind_blast)
+      if(use_gpu == 1) then
+        gpu_done = .true.
+        ! Blast cell mass extraction for jet AGN (CPU post-processing)
+        do iAGN = 1, nAGN
+          if(EsaveAGN(iAGN) == 0d0 .and. X_radio(iAGN) < X_floor &
+               & .and. ok_blast_agn(iAGN) .and. ind_blast(iAGN) > 0) then
+            jtot = sqrt(jAGN(iAGN,1)**2 + jAGN(iAGN,2)**2 + jAGN(iAGN,3)**2)
+            if(jtot > 0d0) then
+              d = uold(ind_blast(iAGN),1)
+              u = uold(ind_blast(iAGN),2)/d
+              v = uold(ind_blast(iAGN),3)/d
+              w = uold(ind_blast(iAGN),4)/d
+              ekk = 0.5d0*d*(u*u+v*v+w*w)
+              eint = uold(ind_blast(iAGN),5) - ekk
+              mAGN(iAGN) = min(mloadAGN*dMsmbh_AGN(iAGN), 0.25d0*d*vol_blast(iAGN))
+              if(metal) then
+                ZAGN(iAGN) = uold(ind_blast(iAGN),imetal)/d
+                uold(ind_blast(iAGN),imetal) = uold(ind_blast(iAGN),imetal) &
+                  & - ZAGN(iAGN)*mAGN(iAGN)/vol_blast(iAGN)
+              endif
+              d = d - mAGN(iAGN)/vol_blast(iAGN)
+              uold(ind_blast(iAGN),1) = d
+              uold(ind_blast(iAGN),2) = d*u
+              uold(ind_blast(iAGN),3) = d*v
+              uold(ind_blast(iAGN),4) = d*w
+              uold(ind_blast(iAGN),5) = eint + 0.5d0*d*(u*u+v*v+w*w)
+            endif
+          endif
+        end do
+      endif
+      deallocate(h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_d, h_cell_dx, h_cell_idx, h_agn_ok)
+    endif
+  endif
+  if(.not. gpu_done) then
+#endif
+!#########################################################################################################
 ! STATUS:
 ! mass_blast, ind_blast, vol_blast: global return variables of iAGN but only once saved when iAGN is completely contained by
 !                                   the lowest grid cell
@@ -5951,7 +6157,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 ! STRATEGY:
 ! vol_blast, ind_blast, mass_blast ==> let it be.
 ! vol_gas, mass_gas, psy_norm ==> use thread-local array variables and broadcast the sum to global array variables.
-!######################################################################################################### 
+!#########################################################################################################
   Pvol_gas=0d0;Pmass_gas=0d0;Ppsy_norm=0d0
 
   ! Loop over levels
@@ -6118,6 +6324,9 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   psy_norm(iAGN) = sum(Ppsy_norm(iAGN,0:nthreads-1))
   enddo
 
+#ifdef HYDRO_CUDA
+  endif ! .not. gpu_done
+#endif
 
   deallocate(bin_head, agn_next)
   deallocate(Pind_cell)
@@ -6194,6 +6403,10 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   use amr_commons
   use hydro_commons
   use cooling_module, ONLY: XH=>X, rhoc, mH
+#ifdef HYDRO_CUDA
+  use sink_cuda_interface
+  use cuda_commons, only: cuda_pool_is_initialized_c
+#endif
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -6243,6 +6456,19 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
   real(dp) :: bin_size, inv_bin_size
   integer, allocatable :: bin_head(:,:,:), agn_next(:)
+#ifdef HYDRO_CUDA
+  logical :: gpu_done
+  integer :: ncells_total, jc, igrid_i, ind_cell_i, iskip_i, use_gpu
+  integer :: ilevel_g, ind_g, ivar
+  real(dp) :: dx_g, dx_loc_g, vol_loc_g
+  real(dp),allocatable :: h_cell_x(:),h_cell_y(:),h_cell_z(:)
+  real(dp),allocatable :: h_cell_vol(:),h_cell_dx(:)
+  real(dp),allocatable :: h_cell_uold(:,:)
+  integer(4),allocatable :: h_cell_idx(:), h_agn_ok(:), h_agn_ok_save(:)
+  real(dp),dimension(1:twotondim,1:3) :: xc_g
+  integer :: ix_g,iy_g,iz_g
+  real(dp),allocatable :: h_esave_out(:)
+#endif
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::EsaveAGN_mpi,EsaveAGN_all
 #endif
@@ -6346,6 +6572,100 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   end do
   EsaveAGN=0d0
   PEsaveAGN=0d0
+
+#ifdef HYDRO_CUDA
+  ! ---- GPU dispatch for AGN_blast ----
+  gpu_done = .false.
+  if(gpu_sink .and. cuda_pool_is_initialized_c() /= 0 .and. nAGN > 0) then
+    ! Count leaf cells across all levels
+    ncells_total = 0
+    do ilevel_g = levelmin, nlevelmax
+      do igrid_i = 1, active(ilevel_g)%ngrid
+        do ind_g = 1, twotondim
+          iskip_i = ncoarse + (ind_g-1)*ngridmax
+          ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
+          if(son(ind_cell_i) == 0) ncells_total = ncells_total + 1
+        end do
+      end do
+    end do
+    if(ncells_total > 0) then
+      allocate(h_cell_x(1:ncells_total), h_cell_y(1:ncells_total), h_cell_z(1:ncells_total))
+      allocate(h_cell_vol(1:ncells_total), h_cell_dx(1:ncells_total))
+      allocate(h_cell_idx(1:ncells_total))
+      allocate(h_cell_uold(1:ncells_total, 1:nvar))
+      allocate(h_agn_ok(1:nAGN), h_agn_ok_save(1:nAGN))
+      allocate(h_esave_out(1:nAGN))
+      ! Fill flat cell arrays + gather uold
+      jc = 0
+      do ilevel_g = levelmin, nlevelmax
+        dx_g = 0.5D0**ilevel_g
+        dx_loc_g = dx_g * scale
+        vol_loc_g = dx_loc_g**ndim
+        do ind_g = 1, twotondim
+          iz_g = (ind_g-1)/4
+          iy_g = (ind_g-1-4*iz_g)/2
+          ix_g = (ind_g-1-2*iy_g-4*iz_g)
+          xc_g(ind_g,1) = (dble(ix_g)-0.5D0)*dx_g
+          xc_g(ind_g,2) = (dble(iy_g)-0.5D0)*dx_g
+          xc_g(ind_g,3) = (dble(iz_g)-0.5D0)*dx_g
+        end do
+        do igrid_i = 1, active(ilevel_g)%ngrid
+          do ind_g = 1, twotondim
+            iskip_i = ncoarse + (ind_g-1)*ngridmax
+            ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
+            if(son(ind_cell_i) == 0) then
+              jc = jc + 1
+              h_cell_x(jc) = (xg(active(ilevel_g)%igrid(igrid_i),1)+xc_g(ind_g,1)-skip_loc(1))*scale
+              h_cell_y(jc) = (xg(active(ilevel_g)%igrid(igrid_i),2)+xc_g(ind_g,2)-skip_loc(2))*scale
+              h_cell_z(jc) = (xg(active(ilevel_g)%igrid(igrid_i),3)+xc_g(ind_g,3)-skip_loc(3))*scale
+              h_cell_vol(jc) = vol_loc_g
+              h_cell_dx(jc) = dx_loc_g
+              h_cell_idx(jc) = ind_cell_i
+              do ivar = 1, nvar
+                h_cell_uold(jc, ivar) = uold(ind_cell_i, ivar)
+              end do
+            endif
+          end do
+        end do
+      end do
+      ! Pack logical arrays to integer
+      do iAGN = 1, nAGN
+        h_agn_ok(iAGN) = merge(1, 0, ok_blast_agn(iAGN))
+        h_agn_ok_save(iAGN) = merge(1, 0, ok_save(iAGN))
+      end do
+      ! Call GPU kernel
+      use_gpu = cuda_sink_agn_blast_c( &
+        h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_dx, &
+        h_cell_uold, ncells_total, nvar, &
+        xAGN, jAGN, vAGN, &
+        p_gas, uBlast, mAGN, ZAGN, &
+        psy_norm, vol_gas, &
+        dMBH_AGN, dMEd_AGN, &
+        h_agn_ok, h_agn_ok_save, nAGN, &
+        bin_head, agn_next, &
+        nbin, inv_bin_size, rmax, rmax2, X_floor, &
+        scale_T2, T2maxAGNz, imetal, gamma, &
+        h_esave_out)
+      if(use_gpu == 1) then
+        gpu_done = .true.
+        ! Set vol_loc for post-loop (matches CPU path: last level value)
+        vol_loc = (0.5D0**nlevelmax * scale)**ndim
+        ! Scatter modified uold back
+        do ivar = 1, nvar
+          do jc = 1, ncells_total
+            uold(h_cell_idx(jc), ivar) = h_cell_uold(jc, ivar)
+          end do
+        end do
+        ! Copy Esave output
+        EsaveAGN(1:nAGN) = h_esave_out(1:nAGN)
+      endif
+      deallocate(h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_dx)
+      deallocate(h_cell_idx, h_cell_uold)
+      deallocate(h_agn_ok, h_agn_ok_save, h_esave_out)
+    endif
+  endif
+  if(.not. gpu_done) then
+#endif
 
   ! Loop over levels
   do ilevel=levelmin,nlevelmax
@@ -6594,6 +6914,10 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   do iAGN=1, nAGN
      EsaveAGN(iAGN) = sum(PEsaveAGN(iAGN,0:nthreads-1))
   enddo
+
+#ifdef HYDRO_CUDA
+  endif ! .not. gpu_done
+#endif
 
 !$omp parallel do private(iAGN,ekk,d,etot,eint,T2_1,T2_2, d_gas,u,v,w)
   do iAGN=1,nAGN

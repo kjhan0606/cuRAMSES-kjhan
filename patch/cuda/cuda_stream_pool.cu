@@ -37,9 +37,9 @@ static bool         g_mesh_host_pinned = false;
 // Buffer management helpers (2x over-allocation)
 // ============================================================================
 
-static void ensure_hydro_buffers(int slot, int ngrid) {
+static bool ensure_hydro_buffers(int slot, int ngrid) {
     StreamSlot& s = g_pool[slot];
-    if (ngrid <= s.hydro_cap) return;
+    if (ngrid <= s.hydro_cap) return true;
     int cap = ngrid * 2;
 
     size_t uloc_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NVAR * sizeof(double);
@@ -53,18 +53,31 @@ static void ensure_hydro_buffers(int slot, int ngrid) {
     if (s.d_flux) cudaFree(s.d_flux);
     if (s.d_tmp)  cudaFree(s.d_tmp);
     if (s.d_ok)   cudaFree(s.d_ok);
+    s.d_uloc = nullptr; s.d_gloc = nullptr;
+    s.d_flux = nullptr; s.d_tmp  = nullptr; s.d_ok = nullptr;
 
-    cudaMalloc(&s.d_uloc, uloc_sz);
-    cudaMalloc(&s.d_gloc, gloc_sz);
-    cudaMalloc(&s.d_flux, flux_sz);
-    cudaMalloc(&s.d_tmp,  tmp_sz);
-    cudaMalloc(&s.d_ok,   ok_sz);
+    cudaError_t e1 = cudaMalloc(&s.d_uloc, uloc_sz);
+    cudaError_t e2 = cudaMalloc(&s.d_gloc, gloc_sz);
+    cudaError_t e3 = cudaMalloc(&s.d_flux, flux_sz);
+    cudaError_t e4 = cudaMalloc(&s.d_tmp,  tmp_sz);
+    cudaError_t e5 = cudaMalloc(&s.d_ok,   ok_sz);
+    if (e1 || e2 || e3 || e4 || e5) {
+        fprintf(stderr, "CUDA hydro buffers: allocation FAILED (slot %d, cap %d)\n", slot, cap);
+        if (s.d_uloc) { cudaFree(s.d_uloc); s.d_uloc = nullptr; }
+        if (s.d_gloc) { cudaFree(s.d_gloc); s.d_gloc = nullptr; }
+        if (s.d_flux) { cudaFree(s.d_flux); s.d_flux = nullptr; }
+        if (s.d_tmp)  { cudaFree(s.d_tmp);  s.d_tmp  = nullptr; }
+        if (s.d_ok)   { cudaFree(s.d_ok);   s.d_ok   = nullptr; }
+        s.hydro_cap = 0;
+        return false;
+    }
     s.hydro_cap = cap;
+    return true;
 }
 
-static void ensure_hydro_inter_buffers(int slot, int ngrid) {
+static bool ensure_hydro_inter_buffers(int slot, int ngrid) {
     StreamSlot& s = g_pool[slot];
-    if (ngrid <= s.hydro_inter_cap) return;
+    if (ngrid <= s.hydro_inter_cap) return true;
     int cap = ngrid * 2;
 
     size_t q_sz  = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * NVAR * sizeof(double);
@@ -76,37 +89,65 @@ static void ensure_hydro_inter_buffers(int slot, int ngrid) {
     if (s.d_dq) cudaFree(s.d_dq);
     if (s.d_qm) cudaFree(s.d_qm);
     if (s.d_qp) cudaFree(s.d_qp);
+    s.d_q = nullptr; s.d_c = nullptr;
+    s.d_dq = nullptr; s.d_qm = nullptr; s.d_qp = nullptr;
 
-    cudaMalloc(&s.d_q,  q_sz);
-    cudaMalloc(&s.d_c,  c_sz);
-    cudaMalloc(&s.d_dq, dq_sz);
-    cudaMalloc(&s.d_qm, dq_sz);
-    cudaMalloc(&s.d_qp, dq_sz);
+    cudaError_t e1 = cudaMalloc(&s.d_q,  q_sz);
+    cudaError_t e2 = cudaMalloc(&s.d_c,  c_sz);
+    cudaError_t e3 = cudaMalloc(&s.d_dq, dq_sz);
+    cudaError_t e4 = cudaMalloc(&s.d_qm, dq_sz);
+    cudaError_t e5 = cudaMalloc(&s.d_qp, dq_sz);
+    if (e1 || e2 || e3 || e4 || e5) {
+        fprintf(stderr, "CUDA hydro inter buffers: allocation FAILED (slot %d, cap %d)\n", slot, cap);
+        if (s.d_q)  { cudaFree(s.d_q);  s.d_q  = nullptr; }
+        if (s.d_c)  { cudaFree(s.d_c);  s.d_c  = nullptr; }
+        if (s.d_dq) { cudaFree(s.d_dq); s.d_dq = nullptr; }
+        if (s.d_qm) { cudaFree(s.d_qm); s.d_qm = nullptr; }
+        if (s.d_qp) { cudaFree(s.d_qp); s.d_qp = nullptr; }
+        s.hydro_inter_cap = 0;
+        return false;
+    }
     s.hydro_inter_cap = cap;
+    return true;
 }
 
-static void ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
+static bool ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
     StreamSlot& s = g_pool[slot];
     if (ngrid > s.stencil_cap) {
         int cap = ngrid * 2;
         if (s.d_stencil_idx)  cudaFree(s.d_stencil_idx);
         if (s.d_stencil_grav) cudaFree(s.d_stencil_grav);
+        s.d_stencil_idx = nullptr; s.d_stencil_grav = nullptr;
         size_t idx_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
-        cudaMalloc(&s.d_stencil_idx,  idx_sz);
-        cudaMalloc(&s.d_stencil_grav, idx_sz);
+        cudaError_t e1 = cudaMalloc(&s.d_stencil_idx,  idx_sz);
+        cudaError_t e2 = cudaMalloc(&s.d_stencil_grav, idx_sz);
+        if (e1 || e2) {
+            fprintf(stderr, "CUDA stencil buffers: allocation FAILED (slot %d)\n", slot);
+            if (s.d_stencil_idx)  { cudaFree(s.d_stencil_idx);  s.d_stencil_idx  = nullptr; }
+            if (s.d_stencil_grav) { cudaFree(s.d_stencil_grav); s.d_stencil_grav = nullptr; }
+            s.stencil_cap = 0;
+            return false;
+        }
         s.stencil_cap = cap;
     }
     if (n_interp > s.interp_cap) {
         int cap = (n_interp > 0) ? n_interp * 2 : 1024;
         if (s.d_interp_vals) cudaFree(s.d_interp_vals);
-        cudaMalloc(&s.d_interp_vals, (size_t)cap * NVAR * sizeof(double));
+        s.d_interp_vals = nullptr;
+        cudaError_t e = cudaMalloc(&s.d_interp_vals, (size_t)cap * NVAR * sizeof(double));
+        if (e) {
+            fprintf(stderr, "CUDA interp buffers: allocation FAILED (slot %d)\n", slot);
+            s.interp_cap = 0;
+            return false;
+        }
         s.interp_cap = cap;
     }
+    return true;
 }
 
-static void ensure_reduce_buffers(int slot, int ngrid) {
+static bool ensure_reduce_buffers(int slot, int ngrid) {
     StreamSlot& s = g_pool[slot];
-    if (ngrid <= s.reduce_cap) return;
+    if (ngrid <= s.reduce_cap) return true;
     int cap = ngrid * 2;
 
     if (s.d_ok_int)       cudaFree(s.d_ok_int);
@@ -116,16 +157,32 @@ static void ensure_reduce_buffers(int slot, int ngrid) {
     if (s.d_add_enew_l)   cudaFree(s.d_add_enew_l);
     if (s.d_add_divu_lm1) cudaFree(s.d_add_divu_lm1);
     if (s.d_add_enew_lm1) cudaFree(s.d_add_enew_lm1);
+    s.d_ok_int = nullptr; s.d_add_unew = nullptr; s.d_add_lm1 = nullptr;
+    s.d_add_divu_l = nullptr; s.d_add_enew_l = nullptr;
+    s.d_add_divu_lm1 = nullptr; s.d_add_enew_lm1 = nullptr;
 
     size_t ok_sz = (size_t)cap * STENCIL_NI * STENCIL_NJ * STENCIL_NK * sizeof(int);
-    cudaMalloc(&s.d_ok_int, ok_sz);
-    cudaMalloc(&s.d_add_unew,     (size_t)cap * 8 * NVAR * sizeof(double));
-    cudaMalloc(&s.d_add_lm1,      (size_t)cap * 6 * NVAR * sizeof(double));
-    cudaMalloc(&s.d_add_divu_l,   (size_t)cap * 8 * sizeof(double));
-    cudaMalloc(&s.d_add_enew_l,   (size_t)cap * 8 * sizeof(double));
-    cudaMalloc(&s.d_add_divu_lm1, (size_t)cap * 6 * sizeof(double));
-    cudaMalloc(&s.d_add_enew_lm1, (size_t)cap * 6 * sizeof(double));
+    cudaError_t e1 = cudaMalloc(&s.d_ok_int, ok_sz);
+    cudaError_t e2 = cudaMalloc(&s.d_add_unew,     (size_t)cap * 8 * NVAR * sizeof(double));
+    cudaError_t e3 = cudaMalloc(&s.d_add_lm1,      (size_t)cap * 6 * NVAR * sizeof(double));
+    cudaError_t e4 = cudaMalloc(&s.d_add_divu_l,   (size_t)cap * 8 * sizeof(double));
+    cudaError_t e5 = cudaMalloc(&s.d_add_enew_l,   (size_t)cap * 8 * sizeof(double));
+    cudaError_t e6 = cudaMalloc(&s.d_add_divu_lm1, (size_t)cap * 6 * sizeof(double));
+    cudaError_t e7 = cudaMalloc(&s.d_add_enew_lm1, (size_t)cap * 6 * sizeof(double));
+    if (e1 || e2 || e3 || e4 || e5 || e6 || e7) {
+        fprintf(stderr, "CUDA reduce buffers: allocation FAILED (slot %d, cap %d)\n", slot, cap);
+        if (s.d_ok_int)       { cudaFree(s.d_ok_int);       s.d_ok_int       = nullptr; }
+        if (s.d_add_unew)     { cudaFree(s.d_add_unew);     s.d_add_unew     = nullptr; }
+        if (s.d_add_lm1)      { cudaFree(s.d_add_lm1);      s.d_add_lm1      = nullptr; }
+        if (s.d_add_divu_l)   { cudaFree(s.d_add_divu_l);   s.d_add_divu_l   = nullptr; }
+        if (s.d_add_enew_l)   { cudaFree(s.d_add_enew_l);   s.d_add_enew_l   = nullptr; }
+        if (s.d_add_divu_lm1) { cudaFree(s.d_add_divu_lm1); s.d_add_divu_lm1 = nullptr; }
+        if (s.d_add_enew_lm1) { cudaFree(s.d_add_enew_lm1); s.d_add_enew_lm1 = nullptr; }
+        s.reduce_cap = 0;
+        return false;
+    }
     s.reduce_cap = cap;
+    return true;
 }
 
 static void ensure_pinned_buffers(int slot, int ngrid) {
@@ -535,17 +592,17 @@ void cuda_h2d_bandwidth_test(void) {
 // Internal helpers for other .cu files
 StreamSlot* get_pool() { return g_pool; }
 bool is_pool_initialized() { return pool_initialized; }
-void pool_ensure_hydro_buffers(int slot, int ngrid) { ensure_hydro_buffers(slot, ngrid); }
-void pool_ensure_hydro_inter_buffers(int slot, int ngrid) { ensure_hydro_inter_buffers(slot, ngrid); }
+bool pool_ensure_hydro_buffers(int slot, int ngrid) { return ensure_hydro_buffers(slot, ngrid); }
+bool pool_ensure_hydro_inter_buffers(int slot, int ngrid) { return ensure_hydro_inter_buffers(slot, ngrid); }
 cudaStream_t cuda_get_stream_internal(int slot) {
     if (slot < 0 || slot >= N_STREAMS) return 0;
     return g_pool[slot].stream;
 }
-void pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
-    ensure_stencil_buffers(slot, ngrid, n_interp);
+bool pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp) {
+    return ensure_stencil_buffers(slot, ngrid, n_interp);
 }
-void pool_ensure_reduce_buffers(int slot, int ngrid) {
-    ensure_reduce_buffers(slot, ngrid);
+bool pool_ensure_reduce_buffers(int slot, int ngrid) {
+    return ensure_reduce_buffers(slot, ngrid);
 }
 void pool_ensure_pinned_buffers(int slot, int ngrid) {
     ensure_pinned_buffers(slot, ngrid);

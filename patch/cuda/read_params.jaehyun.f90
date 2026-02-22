@@ -29,7 +29,7 @@ subroutine read_params
        & ,bisec_tol,static,geom,overload,cost_weighting,aton &
        & ,memory_balance,mem_weight_grid,mem_weight_part &
        & ,jobcontrolfile &
-       & ,gpu_hydro,gpu_poisson,gpu_fft
+       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
@@ -81,7 +81,7 @@ subroutine read_params
   write(*,*)'  _/_/_/    _/_/_/     _/    _/   _/    _/    _/    _/    _/_/_/    _/_/_/_/    _/_/_/ '
   write(*,*)'                              Version 3.0                                             '
   write(*,*)'             written by Romain Teyssier (University of Zurich)                        '
-  write(*,*)'             GPU acceleration by Jaehyun Han (KASI)                                   '
+  write(*,*)'             GPU acceleration by Juhan Kim (KIAS)                                       '
   write(*,*)'                     (c) CEA 1999-2007, UZH 2008-2014                                 '
   write(*,*)' '
   write(*,'(" Working with nproc = ",I4," for ndim = ",I1)')ncpu,ndim
@@ -190,17 +190,18 @@ subroutine read_params
   ! GPU acceleration: disable if not compiled with USE_CUDA
   !-------------------------------------------------
 #ifndef HYDRO_CUDA
-  if(gpu_hydro .or. gpu_poisson .or. gpu_fft) then
+  if(gpu_hydro .or. gpu_poisson .or. gpu_fft .or. gpu_sink) then
      if(myid==1) write(*,*) 'WARNING: gpu_* options ignored (not compiled with USE_CUDA)'
      gpu_hydro = .false.
      gpu_poisson = .false.
      gpu_fft = .false.
+     gpu_sink = .false.
   end if
 #else
-  if(myid==1 .and. (gpu_hydro .or. gpu_poisson .or. gpu_fft)) then
-     write(*,'(A,L1,A,L1,A,L1)') &
+  if(myid==1 .and. (gpu_hydro .or. gpu_poisson .or. gpu_fft .or. gpu_sink)) then
+     write(*,'(A,L1,A,L1,A,L1,A,L1)') &
           ' GPU acceleration: hydro=',gpu_hydro, &
-          ' poisson=',gpu_poisson,' fft=',gpu_fft
+          ' poisson=',gpu_poisson,' fft=',gpu_fft,' sink=',gpu_sink
   end if
 #endif
 

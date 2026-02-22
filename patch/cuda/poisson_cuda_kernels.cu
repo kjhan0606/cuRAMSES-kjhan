@@ -529,10 +529,26 @@ void cuda_mg_residual(int ngrid, int ngridmax, int ncoarse,
 
 void cuda_mg_free(void)
 {
-    // Don't free cell/grid arrays — keep for reuse across levels/steps
-    // Only reset state
     g_mg_ready = false;
-    // Note: actual GPU memory freed in cuda_mg_finalize or pool_finalize
+
+    // Free cell arrays to avoid GPU OOM when hydro mesh also needs GPU memory
+    if (d_mg_phi)   { cudaFree(d_mg_phi);   d_mg_phi   = nullptr; }
+    if (d_mg_f1)    { cudaFree(d_mg_f1);    d_mg_f1    = nullptr; }
+    if (d_mg_f2)    { cudaFree(d_mg_f2);    d_mg_f2    = nullptr; }
+    if (d_mg_f3)    { cudaFree(d_mg_f3);    d_mg_f3    = nullptr; }
+    if (d_mg_flag2) { cudaFree(d_mg_flag2); d_mg_flag2 = nullptr; }
+    g_mg_ncell = 0;
+
+    // Free grid arrays
+    if (d_mg_nbor)  { cudaFree(d_mg_nbor);  d_mg_nbor  = nullptr; }
+    if (d_mg_igrid) { cudaFree(d_mg_igrid); d_mg_igrid = nullptr; }
+    g_mg_alloc_ngrid = 0;
+
+    // Free partial norm2 buffers
+    if (d_mg_partial_norm2) { cudaFree(d_mg_partial_norm2); d_mg_partial_norm2 = nullptr; }
+    if (h_mg_partial_norm2) { cudaFreeHost(h_mg_partial_norm2); h_mg_partial_norm2 = nullptr; }
+    h_mg_partial_cap = 0;
+    // Note: g_mg_stream is kept alive for reuse
 }
 
 void cuda_mg_finalize(void)

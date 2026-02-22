@@ -168,10 +168,10 @@ extern "C" {
 #ifdef __cplusplus
 StreamSlot* get_pool();
 bool is_pool_initialized();
-void pool_ensure_hydro_buffers(int slot, int ngrid);
-void pool_ensure_hydro_inter_buffers(int slot, int ngrid);
-void pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp);
-void pool_ensure_reduce_buffers(int slot, int ngrid);
+bool pool_ensure_hydro_buffers(int slot, int ngrid);
+bool pool_ensure_hydro_inter_buffers(int slot, int ngrid);
+bool pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp);
+bool pool_ensure_reduce_buffers(int slot, int ngrid);
 void pool_ensure_pinned_buffers(int slot, int ngrid);
 cudaStream_t cuda_get_stream_internal(int slot);
 // GPU-resident mesh array accessors

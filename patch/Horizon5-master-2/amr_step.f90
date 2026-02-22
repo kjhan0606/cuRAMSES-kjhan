@@ -248,11 +248,11 @@ recursive subroutine amr_step(ilevel,icount)
            call timer('poisson - cg', 'start')
            call phi_fine_cg(ilevel,icount)
         else
-           call timer('poisson - mg', 'start')
+           call timer('poisson - mg AMR', 'start')
            call multigrid_fine(ilevel,icount)
         end if
      else
-        call timer('poisson - mg', 'start')
+        call timer('poisson - mg base', 'start')
         call multigrid_fine(levelmin,icount)
      end if
 !############################################################

@@ -202,7 +202,7 @@ function Check_FoF_link(gndx, node, particle, np, foflink , linked, gindx, boxsi
               endif
            endif
         else if(ptr .gt.0) then
-           if(particle(ptr)%included .eq. .true.) then
+           if(particle(ptr)%included .eq. .true..or. particle(ptr)%checked .eq. .true. ) then
               nptr = particle(ptr)%sibling
               call EraseFromTree(node, particle,np, optr, ptr, nptr)
               ptr = nptr
@@ -419,6 +419,8 @@ function Omp_Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
   real(dp),dimension(1:3)::xbound,skip_loc
   integer, external:: FoF_link
   integer:: nx_loc
+  integer :: istart, ifinal, istep
+  logical :: iflag
 
 
   allocate(node(1:2*numsink))
@@ -449,26 +451,37 @@ function Omp_Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
   gindx = 0
   icount = 0
 
-  do i = 1, numsink
-     if(particle(i)%included .eq. .false.) then
-        ii = i
-        gindx = gindx + 1
+!!$omp parallel  private(mythr, nthr, istep, istart, ifinal, iflag)
+!  mythr = omp_get_thread_num()
+!  nthr = omp_get_num_threads()
+!  istep = (numsink+nthr-1)/nthr
+!  istart = istep & mythr + 1
+!  ifinal = istep & (mythr+1) + 1
+!  ifinal = min(ifinal, numsink)
+!!$omp do
+!  do i = istart, ifinal
+!     if(particle(i)%included .eq. .false.) then
+!        ii = i
+!        gindx = gindx + 1
 !       gnum = Check_FoF_link(ii, node, particle, numsink, foflink, linked, gindx, boxsize, factG)
-!       if(gnum .eq.0 .or. particle(i)%included .ne. .true.) then
-!          print *, 'Missing finding', gnum, particle(i)%included
-!          stop
-!       endif
-        do j = 1, gnum
-!          if(linked(j) .le.0 .or. linked(j).gt.numsink) then
-!             print *,'wrong detection of linked', j, linked(j)
-!             stop
-!          endif
-           psink(icount+j) = linked(j)
-           gsink(linked(j)) = gindx
-        enddo
-        icount = icount + gnum
-     endif
-  enddo
+!        iflag = .false.
+!        do j = 1, gnum
+!            if(linked(j).lt. istart) iflag = .true.
+!        enddo
+!        if(iflag .eq. .true.) then
+!           do j = 1, gnum
+!              particle(j)%checked = .false.
+!           enddo
+!        else
+!           do j = 1, gnum
+!              particle(j)%included = .true.
+!              psink(icount+j) = linked(j)
+!              gsink(linked(j)) = gindx
+!           enddo
+!        endif
+!        icount = icount + gnum
+!     endif
+!  enddo
 ! if(icount .ne. numsink) then
 !    print *, 'Missing particles are detected ', icount, numsink
 ! endif

@@ -1424,8 +1424,11 @@ void hydro_cuda_unsplit_async(
 {
 
     // Ensure device buffers are large enough (use stride, not ngrid)
-    pool_ensure_hydro_buffers(stream_slot, stride);
-    pool_ensure_hydro_inter_buffers(stream_slot, stride);
+    if (!pool_ensure_hydro_buffers(stream_slot, stride) ||
+        !pool_ensure_hydro_inter_buffers(stream_slot, stride)) {
+        fprintf(stderr, "CUDA unsplit: buffer alloc failed, skipping GPU (slot %d)\n", stream_slot);
+        return;
+    }
 
     StreamSlot* s = &get_pool()[stream_slot];
     cudaStream_t strm = s->stream;
@@ -1522,9 +1525,12 @@ void hydro_cuda_gather_unsplit_async(
     int n_interp,
     int stream_slot)
 {
-    pool_ensure_hydro_buffers(stream_slot, stride);
-    pool_ensure_hydro_inter_buffers(stream_slot, stride);
-    pool_ensure_stencil_buffers(stream_slot, stride, n_interp);
+    if (!pool_ensure_hydro_buffers(stream_slot, stride) ||
+        !pool_ensure_hydro_inter_buffers(stream_slot, stride) ||
+        !pool_ensure_stencil_buffers(stream_slot, stride, n_interp)) {
+        fprintf(stderr, "CUDA gather-unsplit: buffer alloc failed, skipping GPU (slot %d)\n", stream_slot);
+        return;
+    }
 
     StreamSlot* s = &get_pool()[stream_slot];
     cudaStream_t strm = s->stream;
@@ -1625,9 +1631,12 @@ void hydro_cuda_unsplit_reduce_async(
     double dx, double dy, double dz, double dt,
     int ngrid, int stride, int stream_slot)
 {
-    pool_ensure_hydro_buffers(stream_slot, stride);
-    pool_ensure_hydro_inter_buffers(stream_slot, stride);
-    pool_ensure_reduce_buffers(stream_slot, stride);
+    if (!pool_ensure_hydro_buffers(stream_slot, stride) ||
+        !pool_ensure_hydro_inter_buffers(stream_slot, stride) ||
+        !pool_ensure_reduce_buffers(stream_slot, stride)) {
+        fprintf(stderr, "CUDA unsplit-reduce: buffer alloc failed, skipping GPU (slot %d)\n", stream_slot);
+        return;
+    }
 
     StreamSlot* s = &get_pool()[stream_slot];
     cudaStream_t strm = s->stream;
@@ -1738,10 +1747,13 @@ void hydro_cuda_gather_reduce_async(
     double dx, double dy, double dz, double dt,
     int ngrid, int stride, int n_interp, int stream_slot)
 {
-    pool_ensure_hydro_buffers(stream_slot, stride);
-    pool_ensure_hydro_inter_buffers(stream_slot, stride);
-    pool_ensure_stencil_buffers(stream_slot, stride, n_interp);
-    pool_ensure_reduce_buffers(stream_slot, stride);
+    if (!pool_ensure_hydro_buffers(stream_slot, stride) ||
+        !pool_ensure_hydro_inter_buffers(stream_slot, stride) ||
+        !pool_ensure_stencil_buffers(stream_slot, stride, n_interp) ||
+        !pool_ensure_reduce_buffers(stream_slot, stride)) {
+        fprintf(stderr, "CUDA gather-reduce: buffer alloc failed, skipping GPU (slot %d)\n", stream_slot);
+        return;
+    }
 
     StreamSlot* s = &get_pool()[stream_slot];
     cudaStream_t strm = s->stream;
