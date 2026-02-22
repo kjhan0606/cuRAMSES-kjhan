@@ -2803,6 +2803,15 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    integer(C_INTPTR_T), save :: alloc_local = 0
    integer, save :: fftw_block = 0  ! FFTW MPI block size for slab distribution
 
+   ! Sparse P2P partner lists (precomputed, cached)
+   integer, allocatable, save :: fftw_send_partners(:)  ! 0-based MPI ranks
+   integer, allocatable, save :: fftw_recv_partners(:)  ! 0-based MPI ranks
+   integer, save :: n_fftw_send = 0, n_fftw_recv = 0
+   logical, save :: fftw_partners_computed = .false.
+   real(dp), save :: cached_box_xmin = -1.0d0
+   real(dp), save :: cached_box_xmax = -1.0d0
+   integer, save :: cached_fftw_block = 0
+
    ! Loop variables
    integer :: igrid, ngrid_loc, ind, iskip
    integer :: icell_amr, igrid_amr
@@ -2821,6 +2830,14 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    integer :: dest_rank, x_local, base_Nx, rem_Nx
    integer :: n_send_total, n_recv_total, irank
    integer :: local_Nz_half, slab_real_size
+
+   ! Sparse P2P variables
+   integer, allocatable :: reqs(:)
+   integer, allocatable :: mpi_stat(:,:)
+   integer :: nreq, ip
+   integer :: slab_x_lo, slab_x_hi
+   real(dp) :: recv_pos_lo, recv_pos_hi
+   logical :: overlap
 
    ! ================================================================
    ! Step 0: Grid dimensions
@@ -2986,26 +3003,106 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
 
    if(use_distributed) then
       ! ============================================================
-      ! LARGE GRID PATH: FFTW3 MPI (slab decomposition)
-      ! Uses ALLTOALLV to redistribute data to FFTW's X-slab layout
+      ! LARGE GRID PATH: Sparse P2P + FFTW3 MPI slab decomposition
+      ! Uses ISEND/IRECV with precomputed partner lists instead of
+      ! ALLTOALLV — O(n_partners) messages instead of O(ncpu)
       ! ============================================================
 
-      ! Compute X-slab decomposition parameters (matching FFTW's distribution)
-      ! FFTW distributes n0 (=Nx) dimension: each rank gets ~Nx/ncpu slabs
-      ! We use our own ALLTOALLV to match fftw_mpi_local_size_3d output
+      ! --- Precompute P2P partner lists (cached, recomputed on rebalance) ---
+      if(.not. fftw_partners_computed .or. &
+         cached_box_xmin /= bisec_cpubox_min(myid, 1) .or. &
+         cached_box_xmax /= bisec_cpubox_max(myid, 1) .or. &
+         cached_fftw_block /= fftw_block) then
 
-      ! --- Step 1: Gather local RHS and prepare ALLTOALLV ---
+         if(allocated(fftw_send_partners)) deallocate(fftw_send_partners)
+         if(allocated(fftw_recv_partners)) deallocate(fftw_recv_partners)
+
+         ! Send partners: FFTW slab ranks whose position range overlaps my domain
+         ! Uses same overlap test as recv to ensure symmetric P2P consistency
+         n_fftw_send = 0
+         do irank = 0, ncpu - 1
+            slab_x_lo = irank * fftw_block
+            slab_x_hi = min((irank + 1) * fftw_block, fft_Nx) - 1
+            recv_pos_lo = (dble(slab_x_lo) - 0.5d0) / dble(fft_Nx)
+            recv_pos_hi = (dble(slab_x_hi) + 1.5d0) / dble(fft_Nx)
+            overlap = (bisec_cpubox_max(myid, 1) > recv_pos_lo .and. &
+                       bisec_cpubox_min(myid, 1) < recv_pos_hi)
+            if(recv_pos_lo < 0.0d0) &
+               overlap = overlap .or. (bisec_cpubox_max(myid, 1) > recv_pos_lo + 1.0d0)
+            if(recv_pos_hi > 1.0d0) &
+               overlap = overlap .or. (bisec_cpubox_min(myid, 1) < recv_pos_hi - 1.0d0)
+            if(overlap) n_fftw_send = n_fftw_send + 1
+         end do
+
+         allocate(fftw_send_partners(n_fftw_send))
+         n_fftw_send = 0
+         do irank = 0, ncpu - 1
+            slab_x_lo = irank * fftw_block
+            slab_x_hi = min((irank + 1) * fftw_block, fft_Nx) - 1
+            recv_pos_lo = (dble(slab_x_lo) - 0.5d0) / dble(fft_Nx)
+            recv_pos_hi = (dble(slab_x_hi) + 1.5d0) / dble(fft_Nx)
+            overlap = (bisec_cpubox_max(myid, 1) > recv_pos_lo .and. &
+                       bisec_cpubox_min(myid, 1) < recv_pos_hi)
+            if(recv_pos_lo < 0.0d0) &
+               overlap = overlap .or. (bisec_cpubox_max(myid, 1) > recv_pos_lo + 1.0d0)
+            if(recv_pos_hi > 1.0d0) &
+               overlap = overlap .or. (bisec_cpubox_min(myid, 1) < recv_pos_hi - 1.0d0)
+            if(overlap) then
+               n_fftw_send = n_fftw_send + 1
+               fftw_send_partners(n_fftw_send) = irank
+            end if
+         end do
+
+         ! Recv partners: RAMSES ranks whose domain overlaps my FFTW slab
+         slab_x_lo = (myid - 1) * fftw_block
+         slab_x_hi = min(myid * fftw_block, fft_Nx) - 1
+         recv_pos_lo = (dble(slab_x_lo) - 0.5d0) / dble(fft_Nx)
+         recv_pos_hi = (dble(slab_x_hi) + 1.5d0) / dble(fft_Nx)
+
+         n_fftw_recv = 0
+         do irank = 1, ncpu
+            overlap = (bisec_cpubox_max(irank, 1) > recv_pos_lo .and. &
+                       bisec_cpubox_min(irank, 1) < recv_pos_hi)
+            if(recv_pos_lo < 0.0d0) &
+               overlap = overlap .or. (bisec_cpubox_max(irank, 1) > recv_pos_lo + 1.0d0)
+            if(recv_pos_hi > 1.0d0) &
+               overlap = overlap .or. (bisec_cpubox_min(irank, 1) < recv_pos_hi - 1.0d0)
+            if(overlap) n_fftw_recv = n_fftw_recv + 1
+         end do
+
+         allocate(fftw_recv_partners(n_fftw_recv))
+         n_fftw_recv = 0
+         do irank = 1, ncpu
+            overlap = (bisec_cpubox_max(irank, 1) > recv_pos_lo .and. &
+                       bisec_cpubox_min(irank, 1) < recv_pos_hi)
+            if(recv_pos_lo < 0.0d0) &
+               overlap = overlap .or. (bisec_cpubox_max(irank, 1) > recv_pos_lo + 1.0d0)
+            if(recv_pos_hi > 1.0d0) &
+               overlap = overlap .or. (bisec_cpubox_min(irank, 1) < recv_pos_hi - 1.0d0)
+            if(overlap) then
+               n_fftw_recv = n_fftw_recv + 1
+               fftw_recv_partners(n_fftw_recv) = irank - 1  ! 0-based MPI rank
+            end if
+         end do
+
+         cached_box_xmin = bisec_cpubox_min(myid, 1)
+         cached_box_xmax = bisec_cpubox_max(myid, 1)
+         cached_fftw_block = fftw_block
+         fftw_partners_computed = .true.
+
+         if(myid==1) write(*,'(A,I4,A,I4,A)') &
+              '   FFTW3 sparse P2P: n_send=', n_fftw_send, &
+              ', n_recv=', n_fftw_recv, ' partners'
+      end if
+
+      ! --- Step 1: Compute sendcounts ---
       allocate(sendcounts(0:ncpu-1))
-      allocate(sdispls(0:ncpu-1))
       allocate(recvcounts(0:ncpu-1))
+      allocate(sdispls(0:ncpu-1))
       allocate(rdispls(0:ncpu-1))
 
-      ! Count how many cells this rank sends to each X-slab owner
-      ! FFTW MPI block distribution: block = ceil(Nx/ncpu)
-      ! rank r owns x-indices [r*block, min((r+1)*block, Nx)-1]
-      ! dest_rank = ix / block (clamped to ncpu-1)
-
       sendcounts = 0
+      recvcounts = 0
       ngrid_loc = active(ilevel)%ngrid
       do igrid = 1, ngrid_loc
          igrid_amr = active(ilevel)%igrid(igrid)
@@ -3018,9 +3115,27 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
          end do
       end do
 
-      ! Exchange counts
-      call MPI_ALLTOALL(sendcounts, 1, MPI_INTEGER, &
-           recvcounts, 1, MPI_INTEGER, MPI_COMM_WORLD, info)
+      ! --- Step 2: Exchange counts via sparse P2P ---
+      nreq = 0
+      allocate(reqs(n_fftw_send + n_fftw_recv))
+
+      do ip = 1, n_fftw_recv
+         nreq = nreq + 1
+         call MPI_IRECV(recvcounts(fftw_recv_partners(ip)), 1, MPI_INTEGER, &
+              fftw_recv_partners(ip), 701, MPI_COMM_WORLD, reqs(nreq), info)
+      end do
+      do ip = 1, n_fftw_send
+         nreq = nreq + 1
+         call MPI_ISEND(sendcounts(fftw_send_partners(ip)), 1, MPI_INTEGER, &
+              fftw_send_partners(ip), 701, MPI_COMM_WORLD, reqs(nreq), info)
+      end do
+
+      if(nreq > 0) then
+         allocate(mpi_stat(MPI_STATUS_SIZE, nreq))
+         call MPI_WAITALL(nreq, reqs, mpi_stat, info)
+         deallocate(mpi_stat)
+      end if
+      deallocate(reqs)
 
       ! Compute displacements
       sdispls(0) = 0
@@ -3032,7 +3147,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       n_send_total = sdispls(ncpu-1) + sendcounts(ncpu-1)
       n_recv_total = rdispls(ncpu-1) + recvcounts(ncpu-1)
 
-      ! Pack send buffer: (slab_idx, rhs_value) pairs
+      ! --- Step 3: Pack send buffer: (slab_idx, rhs_value) pairs ---
       allocate(sendbuf(0:2*n_send_total-1))
       allocate(recvbuf(0:2*n_recv_total-1))
       allocate(send_idx(0:ncpu-1))
@@ -3068,15 +3183,38 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
          end do
       end do
 
-      ! Exchange (2 doubles per cell)
+      ! --- Step 4: Forward data exchange via sparse P2P ---
       sendcounts = sendcounts * 2
       recvcounts = recvcounts * 2
       sdispls = sdispls * 2
       rdispls = rdispls * 2
 
-      call MPI_ALLTOALLV(sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
-           recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
-           MPI_COMM_WORLD, info)
+      nreq = 0
+      allocate(reqs(n_fftw_send + n_fftw_recv))
+
+      do ip = 1, n_fftw_recv
+         irank = fftw_recv_partners(ip)
+         if(recvcounts(irank) > 0) then
+            nreq = nreq + 1
+            call MPI_IRECV(recvbuf(rdispls(irank)), recvcounts(irank), &
+                 MPI_DOUBLE_PRECISION, irank, 702, MPI_COMM_WORLD, reqs(nreq), info)
+         end if
+      end do
+      do ip = 1, n_fftw_send
+         irank = fftw_send_partners(ip)
+         if(sendcounts(irank) > 0) then
+            nreq = nreq + 1
+            call MPI_ISEND(sendbuf(sdispls(irank)), sendcounts(irank), &
+                 MPI_DOUBLE_PRECISION, irank, 702, MPI_COMM_WORLD, reqs(nreq), info)
+         end if
+      end do
+
+      if(nreq > 0) then
+         allocate(mpi_stat(MPI_STATUS_SIZE, nreq))
+         call MPI_WAITALL(nreq, reqs, mpi_stat, info)
+         deallocate(mpi_stat)
+      end if
+      deallocate(reqs)
 
       ! Unpack into FFTW real data array
       rdata_fftw = 0.0d0
@@ -3085,31 +3223,56 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
          rdata_fftw(idx_3d + 1) = rdata_fftw(idx_3d + 1) + recvbuf(2*ix + 1)
       end do
 
-      ! --- Step 2: Forward R2C FFT ---
+      ! --- Step 5: Forward R2C FFT ---
       call fftw_mpi_execute_dft_r2c(plan_r2c, rdata_fftw, cdata_fftw)
 
-      ! --- Step 3: Apply Green's function ---
+      ! --- Step 6: Apply Green's function ---
       N_complex = int(local_nx_fftw,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
       do idx_c = 0, N_complex-1
          cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c)
       end do
 
-      ! --- Step 4: Inverse C2R FFT ---
+      ! --- Step 7: Inverse C2R FFT ---
       call fftw_mpi_execute_dft_c2r(plan_c2r, cdata_fftw, rdata_fftw)
 
-      ! --- Step 5: Normalize ---
+      ! --- Step 8: Normalize ---
       rdata_fftw = rdata_fftw / dble(N_total)
 
-      ! --- Step 6: Send phi back via reverse ALLTOALLV ---
+      ! --- Step 9: Reverse transfer via sparse P2P ---
       ! Replace rhs values in recvbuf with phi from rdata_fftw
       do ix = 0, n_recv_total - 1
          idx_3d = nint(recvbuf(2*ix))
          recvbuf(2*ix + 1) = rdata_fftw(idx_3d + 1)
       end do
 
-      call MPI_ALLTOALLV(recvbuf, recvcounts, rdispls, MPI_DOUBLE_PRECISION, &
-           sendbuf, sendcounts, sdispls, MPI_DOUBLE_PRECISION, &
-           MPI_COMM_WORLD, info)
+      nreq = 0
+      allocate(reqs(n_fftw_send + n_fftw_recv))
+
+      ! Receive phi from FFTW slab owners (my send partners)
+      do ip = 1, n_fftw_send
+         irank = fftw_send_partners(ip)
+         if(sendcounts(irank) > 0) then
+            nreq = nreq + 1
+            call MPI_IRECV(sendbuf(sdispls(irank)), sendcounts(irank), &
+                 MPI_DOUBLE_PRECISION, irank, 703, MPI_COMM_WORLD, reqs(nreq), info)
+         end if
+      end do
+      ! Send phi to original RAMSES senders (my recv partners)
+      do ip = 1, n_fftw_recv
+         irank = fftw_recv_partners(ip)
+         if(recvcounts(irank) > 0) then
+            nreq = nreq + 1
+            call MPI_ISEND(recvbuf(rdispls(irank)), recvcounts(irank), &
+                 MPI_DOUBLE_PRECISION, irank, 703, MPI_COMM_WORLD, reqs(nreq), info)
+         end if
+      end do
+
+      if(nreq > 0) then
+         allocate(mpi_stat(MPI_STATUS_SIZE, nreq))
+         call MPI_WAITALL(nreq, reqs, mpi_stat, info)
+         deallocate(mpi_stat)
+      end if
+      deallocate(reqs)
 
       ! Unpack phi to RAMSES cells
       send_idx = sdispls / 2
