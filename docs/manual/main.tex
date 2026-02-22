@@ -1959,6 +1959,99 @@ H2D transfer is reduced from 50\% to 3\% of GPU time.  The GPU compute kernels n
 
 
 %======================================================
+\chapter{FFTW3 CPU Direct Poisson Solver}
+\label{ch:fftw3}
+%======================================================
+
+For fully uniform AMR levels (where all $N = N_x \times N_y \times N_z$ cells exist), the Poisson equation can be solved exactly via 3D FFT instead of iterative multigrid V-cycles.  The FFTW3 solver provides an \textbf{8.3$\times$ speedup} over multigrid (241\,s $\to$ 28.9\,s for $512^3$) using CPU-only computation, matching the GPU cuFFT result without requiring a GPU.
+
+\section{Build and Configuration}
+
+\begin{verbatim}
+# Build with FFTW3 support
+cd bin && make HDF5=1 USE_FFTW=1
+
+# Namelist: &RUN_PARAMS
+use_fftw = .true.
+\end{verbatim}
+
+Requires FFTW3 with MPI and OpenMP support (\texttt{-lfftw3\_mpi -lfftw3\_omp -lfftw3}).
+
+\section{Two-Path Architecture}
+
+The solver automatically selects the appropriate path based on grid size:
+
+\subsection{Small Grid Path ($N \le 256^3$)}
+
+\begin{enumerate}[nosep]
+  \item Each rank gathers local RHS into a local array.
+  \item \texttt{MPI\_ALLREDUCE} sums contributions from all ranks.
+  \item Local in-place R2C FFT via FFTW3+OpenMP.
+  \item Apply Green's function: $G(\mathbf{k}) = \Delta x^2 / L_k$ where $L_k = 2\cos k_x + 2\cos k_y + 2\cos k_z - 6$.
+  \item Inverse C2R FFT; scatter $\phi$ back to RAMSES cells.
+\end{enumerate}
+
+\subsection{Large Grid Path ($N > 256^3$): Sparse P2P + FFTW MPI Slab}
+
+For large grids, the \texttt{ALLREDUCE} approach would require ${\sim}1$\,GB+ of data per rank.  Instead, FFTW's MPI slab decomposition distributes the FFT across ranks, with each rank owning $\lceil N_x / N_{\text{cpu}} \rceil$ contiguous $x$-slabs.
+
+Data redistribution between RAMSES's spatial domain decomposition and FFTW's slab layout uses \textbf{sparse point-to-point} communication:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Partner precomputation} (cached, recomputed on load rebalance):
+  \begin{itemize}[nosep]
+    \item \textit{Send partners}: FFTW slab ranks whose position range overlaps my RAMSES domain.
+    \item \textit{Recv partners}: RAMSES ranks whose domain overlaps my FFTW slab.
+    \item Symmetric overlap test from \texttt{bisec\_cpubox\_min/max}:
+    \[
+      \text{overlap}(A, B) = x_{\max}^{(A)} > \frac{s_{\min}^{(B)} - 0.5}{N_x} \;\wedge\; x_{\min}^{(A)} < \frac{s_{\max}^{(B)} + 1.5}{N_x}
+    \]
+    \item Periodic boundary wrapping handled when $s_{\min} < 0$ or $s_{\max} \ge N_x$.
+  \end{itemize}
+  \item \textbf{Count exchange}: \texttt{MPI\_ISEND/IRECV} of sendcounts to partners only (tag 701).
+  \item \textbf{Pack} send buffer with (slab\_idx, rhs) pairs per destination rank.
+  \item \textbf{Forward data exchange}: \texttt{MPI\_ISEND/IRECV} to partners with non-zero counts (tag 702).
+  \item \textbf{Unpack} into FFTW real data array; execute forward R2C FFT.
+  \item \textbf{Apply Green's function}; inverse C2R FFT; normalise.
+  \item \textbf{Reverse data exchange}: phi sent back via same partners, reversed direction (tag 703).
+  \item \textbf{Scatter} $\phi$ to RAMSES cells using same grid iteration order.
+\end{enumerate}
+
+\subsection{Partner List Caching}
+
+Partner lists are stored in \texttt{save} variables and invalidated when:
+\begin{itemize}[nosep]
+  \item \texttt{bisec\_cpubox\_min/max(myid, 1)} changes (load rebalancing), or
+  \item \texttt{fftw\_block} changes (grid size change).
+\end{itemize}
+
+\section{Verification}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Configuration} & $e_{\text{cons}}$ & \textbf{Base Poisson (s)} \\
+\midrule
+MG V-cycle (CPU)    & $6.51 \times 10^{-4}$ & 241 \\
+cuFFT (GPU, A40)    & $6.11 \times 10^{-4}$ & 28 \\
+FFTW3 sparse P2P    & $6.12 \times 10^{-4}$ & 28.9 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+On 12 MPI ranks with $512^3$ base grid: $n_{\text{send}} = 5$, $n_{\text{recv}} = 8$ partners (vs.\ 12 total ranks).
+
+\section{Modified Files}
+
+\begin{itemize}[nosep]
+  \item \texttt{patch/cuda/multigrid\_fine\_commons.f90} --- FFTW3 solver + sparse P2P exchange
+  \item \texttt{patch/Horizon5-master-2/amr\_parameters.f90} --- \texttt{use\_fftw} parameter
+  \item \texttt{patch/Horizon5-master-2/read\_params.f90} --- Read \texttt{use\_fftw} from namelist
+  \item \texttt{bin/Makefile} --- \texttt{USE\_FFTW} compile flag and library linking
+\end{itemize}
+
+
+%======================================================
 \chapter{CPL Dark Energy}
 \label{ch:cpl}
 %======================================================
@@ -2114,6 +2207,10 @@ Runtime control parameters.
 \multicolumn{4}{l}{\textit{Job control (new)}} \\
 \midrule
 \texttt{jobcontrolfile} & char(128) & \texttt{''} & Runtime control file for stop/output requests \\
+\midrule
+\multicolumn{4}{l}{\textit{FFTW3 direct Poisson solver (new)}} \\
+\midrule
+\texttt{use\_fftw} & logical & \texttt{.false.} & FFTW3 CPU direct FFT solve for uniform levels (Ch.~\ref{ch:fftw3}) \\
 \bottomrule
 \end{longtable}
 
@@ -2529,7 +2626,7 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{ksection.f90} & K-section tree + exchange routines \\
 \texttt{load\_balance.kjhan.f90} & numbp sync, bulk exchange, internal timing \\
 \texttt{virtual\_boundaries.kjhan.f90} & Ksec ghost exchange + bulk + build\_comm \\
-\texttt{multigrid\_fine\_commons.f90} & MG ksection communication \\
+\texttt{multigrid\_fine\_commons.f90} & MG ksection communication; FFTW3 direct solver + sparse P2P \\
 \texttt{init\_amr.f90} & Memory savings, Morton init \\
 \texttt{update\_time.f90} & Memory reporting \\
 \texttt{adaptive\_loop.jaehyun.f90} & writemem\_minmax, Morton rebuild, bulk exchange \\

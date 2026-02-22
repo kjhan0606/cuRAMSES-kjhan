@@ -586,6 +586,64 @@ gpu_fft     = .true.
 \end{lstlisting}
 
 
+% ------------------------------------------------------------------
+\paramheader{use\_fftw}{logical}{.false.}
+\label{param:use_fftw}
+
+\begin{quote}
+Enable FFTW3 CPU direct Poisson solve for fully uniform AMR levels.
+This is the \textbf{CPU-only alternative} to \paramref{gpu_fft}:
+it uses \textsc{fftw3} (MPI + OpenMP) instead of cuFFT, achieving
+the same ${\sim}8\times$ speedup over multigrid V-cycles without
+requiring a GPU.
+
+Two grid-size paths are selected automatically:
+\begin{itemize}[nosep]
+  \item \textbf{Small grid} ($N \le 256^3$): \texttt{MPI\_ALLREDUCE}
+        gathers the global RHS; a local FFTW3+OpenMP in-place R2C
+        FFT solves the system.
+  \item \textbf{Large grid} ($N > 256^3$): FFTW's MPI slab
+        decomposition distributes the FFT across ranks.  Data
+        redistribution between RAMSES's spatial domain and FFTW's
+        $x$-slab layout uses \textbf{sparse point-to-point} exchange
+        (\texttt{MPI\_ISEND}/\texttt{MPI\_IRECV}) with precomputed
+        partner lists from \texttt{bisec\_cpubox}.  Only actual
+        overlapping partners communicate (${\sim}5$--20 out of
+        $N_{\text{cpu}}$), replacing the $O(N_{\text{cpu}})$
+        \texttt{MPI\_ALLTOALLV} of the initial implementation.
+\end{itemize}
+
+Partner lists are cached and invalidated on load rebalancing.  The
+overlap test uses the symmetric condition
+$x_{\max}^{(A)} > (s_{\min}^{(B)} - 0.5) / N_x \;\wedge\;
+x_{\min}^{(A)} < (s_{\max}^{(B)} + 1.5) / N_x$,
+with periodic boundary wrapping, ensuring every \texttt{ISEND} has a
+matching \texttt{IRECV}.
+
+\textbf{Performance:} For a $512^3$ base grid (12 MPI ranks),
+FFTW3 reduces base-level Poisson from 241\,s (MG) to 28.9\,s
+(\textbf{8.3$\times$ speedup}), with $e_{\text{cons}} = 6.12 \times
+10^{-4}$ (identical to cuFFT).
+
+\textbf{Build requirement:} \texttt{make HDF5=1 USE\_FFTW=1}
+(links \texttt{-lfftw3\_mpi -lfftw3\_omp -lfftw3}).
+
+\apinote{This flag is mutually exclusive with \paramref{gpu_fft}.
+If both are set, \texttt{use\_fftw} takes precedence.  Unlike
+\texttt{gpu\_fft}, this requires no GPU and scales to arbitrarily
+large grids via the sparse P2P slab exchange.}
+\end{quote}
+
+\noindent\textcolor{apidefault}{\textsf{\textbf{Examples:}}}
+\begin{lstlisting}
+! CPU-only FFTW3 for base level (recommended)
+use_fftw = .true.
+
+! Equivalent to gpu_fft but without GPU
+! Requires: make HDF5=1 USE_FFTW=1
+\end{lstlisting}
+
+
 %======================================================================
 \section{\texttt{\&AMR\_PARAMS} -- Adaptive Mesh Refinement}
 \label{sec:amr_params}

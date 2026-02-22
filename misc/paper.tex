@@ -1499,6 +1499,81 @@ interpolation, and restriction --- to the device, eliminating
 per-iteration PCIe transfers.  This amounts to a GPU-native AMR
 redesign and is left as future work.
 
+\subsection{FFTW3 CPU Direct Poisson Solver}
+\label{sec:fftw3}
+
+Given the limitations of GPU multigrid (Section~\ref{sec:hybrid_perf}),
+we pursue an alternative approach: replacing the iterative MG V-cycle
+on fully uniform AMR levels with a single direct FFT solve.  At the
+base level (\code{levelmin}), all $N = N_x \times N_y \times N_z$
+cells exist and the grid is periodic, making the Poisson equation
+$\nabla^2\phi = 4\pi G\rho$ solvable exactly via spectral methods.
+
+The solver uses \textsc{fftw3} \citep{Frigo2005} and operates in two
+regimes depending on the grid size:
+
+\paragraph{Small grid ($N \le 256^3$).}
+Each rank gathers its local right-hand side into a local array and an
+\code{MPI\_ALLREDUCE} sums the contributions.  A local in-place R2C
+FFT (multi-threaded via \textsc{fftw3}+OpenMP) solves the system.
+
+\paragraph{Large grid ($N > 256^3$).}
+The global grid is distributed across ranks using FFTW's native slab
+decomposition along the $x$-axis.  Each rank owns $\lceil N_x /
+\ncpu \rceil$ contiguous $x$-slabs.  Data redistribution between
+RAMSES's spatial domain decomposition and FFTW's slab layout requires
+an all-to-all exchange in both forward and reverse directions.
+
+\paragraph{Sparse point-to-point exchange.}
+A na\"{\i}ve \code{MPI\_ALLTOALLV} implementation sends $O(\ncpu)$
+messages per rank, even though most are empty: for a $512^3$ grid on
+12~ranks, each rank's RAMSES domain overlaps only 5--8 FFTW slabs.
+At scale ($8000^3$ on 1000 ranks), each rank would need only
+${\sim}8$--20 partners out of 1000, yet \code{ALLTOALLV} still
+sets up $O(\ncpu)$ internal connections.
+
+We replace \code{MPI\_ALLTOALL} (count exchange) and
+\code{MPI\_ALLTOALLV} (data exchange) with sparse
+\code{MPI\_ISEND}/\code{MPI\_IRECV} targeting only actual
+communication partners.  Partner lists are precomputed from the
+spatial bounding boxes (\code{bisec\_cpubox\_min/max}) and the FFTW
+slab ranges using a symmetric overlap test:
+\begin{equation}
+  \text{overlap}(A, B) \;\equiv\;
+  x_{\max}^{(A)} > \frac{s_{\min}^{(B)} - 0.5}{N_x}
+  \;\wedge\;
+  x_{\min}^{(A)} < \frac{s_{\max}^{(B)} + 1.5}{N_x}
+\label{eq:fftw_overlap}
+\end{equation}
+where $[x_{\min}^{(A)}, x_{\max}^{(A)}]$ is rank~$A$'s spatial
+bounding box and $[s_{\min}^{(B)}, s_{\max}^{(B)}]$ is slab~$B$'s
+grid index range.  The same test is evaluated on both sides (sender
+computes which slabs to reach; receiver computes which domains
+overlap), guaranteeing that every \code{MPI\_ISEND} has a matching
+\code{MPI\_IRECV}.  Periodic boundary wrapping is handled by
+extending the overlap check when $s_{\min} < 0$ or $s_{\max} \ge
+N_x$.  Partner lists are cached and invalidated only when the domain
+decomposition changes (load rebalancing).
+
+The forward and reverse data exchanges use per-partner buffer offsets
+within the existing \code{sendbuf}/\code{recvbuf} arrays, keeping
+the memory footprint identical to the \code{ALLTOALLV}
+implementation.  On 12~ranks with a $512^3$ grid, the solver
+identifies $n_{\text{send}} = 5$ and $n_{\text{recv}} = 8$
+partners, reducing the message count from $2 \times 12 = 24$ to
+$2 \times (5 + 8) = 26$ (comparable at small scale, but
+$O(n_{\text{partners}})$ vs.\ $O(\ncpu)$ at large scale).
+
+\paragraph{Performance.}
+The FFTW3 solver reduces the base-level Poisson time from 241\,s
+(MG V-cycle) to 28.9\,s (\textbf{8.3$\times$ speedup}) on 12~ranks
+with a $512^3$ base grid, matching the cuFFT GPU result (28\,s)
+without requiring a GPU.  Energy conservation is identical:
+$e_{\text{cons}} = 6.12 \times 10^{-4}$ for both FFTW3 and cuFFT.
+The solver is enabled via \code{use\_fftw=.true.} in
+\code{\&RUN\_PARAMS} and requires compilation with
+\code{make USE\_FFTW=1}.
+
 
 % ===================================================================
 % 9. PERFORMANCE RESULTS
