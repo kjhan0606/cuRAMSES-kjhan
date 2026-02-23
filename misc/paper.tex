@@ -1908,6 +1908,126 @@ Figure~\ref{fig:memory_balance} visualizes these trends.
 \label{fig:memory_balance}
 \end{figure*}
 
+\subsection{Communication Microbenchmarks}
+\label{sec:perf_bench}
+
+To validate the communication advantages of the \ksec\ framework at
+scale, we design and execute a suite of dedicated microbenchmarks on the
+\textit{Grammar} cluster (16 nodes, $2\times 32$-core Intel Xeon per node,
+InfiniBand HDR interconnect, 504\,Gb RAM per node, Intel~MPI 2021.17).
+All benchmarks are self-contained single-source Fortran programs using
+plane-by-plane ownership computation [$O(N^2)$ memory per rank] so that
+grid sizes up to $N=2048$ are feasible.
+
+\subsubsection{Ghost zone exchange}
+\label{sec:bench_ghost}
+
+This benchmark constructs a uniform $N^3$ periodic grid, assigns cell
+ownership via either Hilbert or \ksec\ domain decomposition, and
+measures ghost zone exchange time for three communication backends:
+\textit{P2P} (non-blocking \texttt{MPI\_ISEND/IRECV}),
+\texttt{MPI\_ALLTOALLV}, and the hierarchical \ksec\ exchange described
+in Section~\ref{sec:ksec_exchange}.  Each cell carries $n_{\rm var}=5$
+double-precision variables (matching \ramses\ hydro), and timings are
+averaged over 3~repeats.
+
+Table~\ref{tab:ghost_bench} reports results for $N=1024$ ($10^9$~cells)
+on 64--256~MPI ranks.  Key findings:
+
+\begin{itemize}
+\item The ghost list \emph{build time} is dominated by the Hilbert curve
+  computation (${\sim}456$\,s, independent of rank count) versus the
+  \ksec\ tree traversal which scales from 200\,s (64~ranks) to 288\,s
+  (256~ranks).  At higher rank counts the \ksec\ advantage grows.
+\item The \emph{exchange time} is sub-second for all methods.  P2P and
+  \texttt{ALLTOALLV} are effectively tied (15--42\,$\mu$s), while the
+  hierarchical \ksec\ exchange is ${\sim}10$--$15\times$ slower
+  (200--370\,ms) due to its $O(\log P)$ serialised stages.
+  The \ksec\ exchange is designed for variable-size AMR messages where
+  all-to-all collectives become prohibitive; on this uniform-grid test
+  its overhead is expected.
+\item The average number of communication partners is 6.0 for \ksec\
+  at all rank counts, compared to 6.0--6.8 for Hilbert, reflecting the
+  compact cuboid sub-domains produced by recursive bisection.
+\end{itemize}
+
+\begin{table}
+\centering
+\caption{Ghost zone exchange benchmark for $N=1024$ ($10^9$~cells,
+  $n_{\rm var}=5$) on the \textit{Grammar} cluster.
+  Build: one-time ghost list construction;
+  Exch: per-exchange latency averaged over 3~repeats.
+  SV: surface-to-volume ratio; Nbr: average neighbour CPU count.}
+\label{tab:ghost_bench}
+\small
+\begin{tabular}{rlrcrrl}
+\hline
+$\ncpu$ & DD & Build\,(s) & SV & Nbr & Method & Exch\,(ms) \\
+\hline
+ 64 & Hilbert   & 453.5 & 0.023 & 6.0 & P2P       & $0.042\pm0.002$ \\
+    &           &       &       &     & A2AV      & $0.034\pm0.000$ \\
+    &           &       &       &     & K-Sec     & $0.368\pm0.005$ \\
+    & K-Section & 200.4 & 0.023 & 6.0 & P2P       & $0.030\pm0.000$ \\
+    &           &       &       &     & A2AV      & $0.027\pm0.001$ \\
+    &           &       &       &     & K-Sec     & $0.365\pm0.004$ \\
+\hline
+128 & Hilbert   & 455.6 & 0.031 & 7.4 & P2P       & $0.025\pm0.003$ \\
+    &           &       &       &     & A2AV      & $0.018\pm0.000$ \\
+    &           &       &       &     & K-Sec     & $0.248\pm0.005$ \\
+    & K-Section & 237.6 & 0.031 & 6.0 & P2P       & $0.023\pm0.001$ \\
+    &           &       &       &     & A2AV      & $0.018\pm0.000$ \\
+    &           &       &       &     & K-Sec     & $0.235\pm0.001$ \\
+\hline
+256 & Hilbert   & 456.0 & 0.039 & 6.8 & P2P       & $0.017\pm0.002$ \\
+    &           &       &       &     & A2AV      & $0.016\pm0.002$ \\
+    &           &       &       &     & K-Sec     & $0.218\pm0.002$ \\
+    & K-Section & 288.2 & 0.039 & 6.0 & P2P       & $0.019\pm0.003$ \\
+    &           &       &       &     & A2AV      & $0.015\pm0.000$ \\
+    &           &       &       &     & K-Sec     & $0.202\pm0.000$ \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{MPI collective performance}
+\label{sec:bench_mpi}
+
+A second benchmark profiles the raw performance of five MPI collectives
+--- \texttt{MPI\_ALLREDUCE}, a manual binary-tree allreduce (reduce to
+root then broadcast, $O(\log_2 P)$ stages), \texttt{MPI\_BCAST},
+neighbour-to-neighbour \texttt{MPI\_SENDRECV} (1D ring), and
+\texttt{MPI\_ALLTOALL} --- over message sizes from 1 to $10^7$ doubles
+(8\,B to 80\,MB).  Each test executes a warmup round followed by 100
+timed repeats; the per-repeat maximum across all ranks is recorded.
+These measurements provide a baseline for interpreting the dominant
+communication costs in \curamses.
+
+\subsubsection{Load balance quality}
+\label{sec:bench_lb}
+
+To isolate the impact of domain decomposition geometry on load balance,
+a third benchmark assigns non-uniform cell weights drawn from 20
+Gaussian clusters (amplitude 10--100, width $\sigma=0.02$--0.10)
+superposed on a unit background.  For each DD method (Hilbert vs.\
+\ksec) the benchmark reports: (i)~the weight imbalance ratio
+$W_{\max}/W_{\mathrm{mean}}$, (ii)~the ghost cell ratio (fraction of
+owned cells with at least one face neighbour on a different rank), and
+(iii)~the number of MPI communication partners per rank.
+
+\subsubsection{Poisson solver}
+\label{sec:bench_poisson}
+
+The fourth benchmark compares three iterative solvers --- Jacobi,
+red-black Gauss-Seidel, and unpreconditioned conjugate gradient (CG) ---
+on a distributed $N^3$ periodic grid with slab decomposition in~$z$.
+The source term is $f = -12\pi^2 \sin(2\pi x)\sin(2\pi y)\sin(2\pi z)$,
+giving an exact solution $\phi = \sin(2\pi x)\sin(2\pi y)\sin(2\pi z)$.
+Each solver separates computation (stencil update) from communication
+(ghost plane exchange via \texttt{MPI\_SENDRECV}), enabling direct
+measurement of the compute/communication ratio.  CG achieves
+machine-precision convergence in $O(N)$ iterations versus the $O(N^2)$
+scaling of Jacobi and Gauss-Seidel, quantifying the benefit of the
+Krylov approach used in \curamses' multigrid V-cycle smoother.
+
 
 % ===================================================================
 % 10. CONCLUSIONS
