@@ -1310,6 +1310,109 @@ of $\sim$4. Verification confirms bit-identical conservation
 diagnostics compared to the original brute-force implementation.
 
 
+\subsection{Sink Particle Merger: Oct-Tree FoF with Auto-Tuning}
+\label{sec:fof}
+
+Sink particles in \ramses\ represent unresolved compact objects (black
+holes, proto-stars) and must be merged when they approach within a
+linking length $r_{\rm link} = r_{\rm merge}\,\Delta x_{\rm min}$.
+The standard merge routine uses a Friends-of-Friends (FoF) algorithm
+with $\Olog{N_{\rm sink}^2}$ brute-force pair enumeration: for each
+connected component (group) it swaps particles into a contiguous block
+and iterates until no new links are found.  Although $N_{\rm sink}$ is
+typically small (${\lesssim}10^3$), production simulations of galaxy
+clusters can reach $N_{\rm sink} \sim 10^5$, at which point the
+$\Olog{N^2}$ scaling becomes prohibitive.
+
+We provide three FoF backends with automatic selection:
+
+\paragraph{Sequential brute-force.}
+The original $\Olog{N^2}$ algorithm, preserved for correctness
+reference.  Each candidate particle is compared against all others;
+linked particles are swapped to the front of the working array and the
+search extends transitively.  Periodic boundary wrapping uses a
+half-box check.
+
+\paragraph{Serial oct-tree.}
+An oct-tree is built over the sink positions.  For each seed particle,
+tree nodes whose bounding sphere does not overlap the linking sphere
+are pruned, reducing the average neighbour search to
+$\Olog{N\log N}$.  Linked particles are erased from the tree
+(\code{EraseFromTree}) so subsequent searches skip them.  This is
+equivalent to the brute-force result but dramatically faster for
+$N_{\rm sink} \gtrsim 500$.
+
+\paragraph{MPI\,+\,OpenMP oct-tree.}
+The particle index range is divided among MPI ranks, and each rank's
+sub-range is further divided among OpenMP threads.  All threads share
+the same read-only tree but maintain private inclusion and group-ID
+arrays.  A thread-safe variant of \code{FoF\_link}
+(\code{Omp\_FoF\_link}) replaces \code{EraseFromTree} with a
+thread-local \code{included} array, enabling concurrent traversal
+without locks.
+
+Cross-boundary groups---those whose transitive closure extends into a
+lower thread's index range---are \emph{rolled back}: the partial group
+is discarded and those particles are left for the owning thread to
+discover in its own range.  This guarantees deterministic results at
+the cost of redundant work for a small fraction of groups.  In
+practice, sink FoF connections are extremely sparse ($< 0.1$\,per\,cent
+of particles form multi-member groups), so the rollback overhead is
+negligible.
+
+After the parallel phase, each thread's partial results are
+consolidated: thread-local group IDs are offset by the cumulative count
+of preceding threads, and MPI ranks chain their offsets via sequential
+\code{MPI\_Send}/\code{MPI\_Recv}.  The final merged result is broadcast
+to all ranks.
+
+\paragraph{Auto-tuning.}
+An \code{Auto\_Do\_FoF} wrapper probes all three backends during the
+first call, measures their wall-clock time, and selects the fastest
+via \code{MPI\_BCAST} consensus.  Subsequent calls bypass the probe
+and invoke the winner directly.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_fof_scaling.pdf}
+\caption{FoF merger wall-clock time as a function of the number of
+  sink particles for the three backends.  The sequential brute-force
+  (blue) scales as $\Olog{N^2}$; the serial oct-tree (orange) scales
+  as $\Olog{N\log N}$; the MPI\,+\,OpenMP oct-tree (green; 3~MPI
+  $\times$ 4~OMP threads) achieves a further ${\sim}4.3\times$
+  parallel speedup.  At $N_{\rm sink}=10^5$, the parallel tree is
+  $600\times$ faster than brute-force.}
+\label{fig:fof_scaling}
+\end{figure}
+
+Table~\ref{tab:fof_perf} summarises the benchmark results.  All three
+methods produce identical group partitions for every test case
+($N_{\rm sink}$ from 1 to $10^5$), verified by an $\Olog{N}$
+bidirectional group-mapping check.
+
+\begin{table}
+\centering
+\caption{FoF benchmark wall-clock times (ms) for selected
+$N_{\rm sink}$.  ``Seq'' is the brute-force $\Olog{N^2}$ method;
+``Tree'' is the serial oct-tree; ``OMP'' is the MPI\,+\,OpenMP tree
+(3~MPI $\times$ 4~threads).}
+\label{tab:fof_perf}
+\footnotesize
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$N_{\rm sink}$ & Seq (ms) & Tree (ms) & OMP (ms) & Tree/$\times$ & OMP/$\times$ \\
+\midrule
+    500 &     0.54 &   0.37 &  0.21 &   1.5 &    2.6 \\
+  1\,000 &     2.19 &   0.82 &  0.37 &   2.7 &    5.9 \\
+  5\,000 &    54.96 &   5.42 &  2.07 &  10.1 &   26.6 \\
+ 10\,000 &   220.26 &  11.92 &  3.24 &  18.5 &   68.0 \\
+ 50\,000 &  5762.31 &  75.10 & 25.65 &  76.7 &  224.6 \\
+100\,000 & 22584.65 & 163.41 & 37.92 & 138.2 &  595.5 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
 % ===================================================================
 % 7. VARIABLE-NCPU RESTART
 % ===================================================================
