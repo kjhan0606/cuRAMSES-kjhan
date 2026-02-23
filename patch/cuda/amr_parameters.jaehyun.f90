@@ -72,6 +72,32 @@ module amr_parameters
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
 
+  ! Exchange method auto-tune (P2P vs K-Section hierarchical)
+  ! 'auto': auto-tune per component, 'p2p': force P2P, 'ksection': force K-Section
+  character(len=16)::exchange_method='auto'
+
+  ! Auto-tune state per exchange component:
+  !   1=fine_dp, 2=fine_int, 3=reverse_dp, 4=reverse_int,
+  !   5=fine_int_pair, 6=fine_dp_bulk, 7=reverse_dp_bulk, 8=reserved
+  integer, parameter :: NXCHG_COMP = 8
+  integer  :: xchg_phase(NXCHG_COMP) = 0       ! 0=test_p2p, 1=test_ksec, 2=running, 3=probing
+  real(dp) :: xchg_time_p2p(NXCHG_COMP) = 0.0  ! accumulated P2P time (phase 0)
+  real(dp) :: xchg_time_ksec(NXCHG_COMP) = 0.0 ! accumulated K-Section time (phase 1)
+  integer  :: xchg_ncall(NXCHG_COMP) = 0       ! call count per phase
+  integer  :: xchg_chosen(NXCHG_COMP) = 0      ! 0=p2p, 1=ksection
+  integer, parameter :: XCHG_NTRIAL = 50       ! calls per initial trial phase
+
+  ! Continuous adaptive auto-tune parameters
+  integer, parameter :: XCHG_NRECHECK = 500    ! re-check interval (calls in phase 2)
+  integer, parameter :: XCHG_NPROBE = 20       ! probe calls in phase 3
+  real(dp),parameter :: XCHG_EMA_ALPHA = 0.05  ! EMA smoothing factor
+  real(dp),parameter :: XCHG_SWITCH_MARGIN=0.20! switch if probe is 20% faster
+  real(dp) :: xchg_ema(NXCHG_COMP) = 0.0       ! EMA of current method time
+  real(dp) :: xchg_probe_sum(NXCHG_COMP) = 0.0 ! accumulated probe time
+  integer  :: xchg_run_count(NXCHG_COMP) = 0   ! calls since last re-check (phase 2)
+  integer  :: xchg_nswitch(NXCHG_COMP) = 0     ! total switches made
+  integer  :: xchg_recheck_interval(NXCHG_COMP) = 0 ! current re-check interval (with backoff)
+
   ! Mesh parameters
   integer::geom=1             ! 1: cartesian, 2: cylindrical, 3: spherical
   integer::nx=1,ny=1,nz=1     ! Number of coarse cells in each dimension
@@ -92,6 +118,7 @@ module amr_parameters
   logical::memory_balance=.false.    ! Memory-based load balancing
   integer::mem_weight_grid=270       ! Memory per grid in dp-equivalents
   integer::mem_weight_part=12        ! Memory per particle in dp-equivalents
+  integer::mem_weight_sink=500      ! Computational weight per sink particle
 
   ! Step parameters
   integer::nrestart=0         ! New run or backup file number

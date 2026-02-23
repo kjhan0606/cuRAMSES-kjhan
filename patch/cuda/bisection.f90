@@ -6,7 +6,8 @@
 module bisection
    use amr_parameters
    use amr_commons
-   use pm_commons, only: numbp
+   use pm_commons, only: numbp, xsink
+   use pm_parameters, only: nsink
 
    implicit none
 
@@ -464,7 +465,9 @@ contains
       integer::icpu,ncell,ncell_loc,ncell_max
       integer::nxny,ix,iy,iz,iskip
       integer::icell_tmp,igrid_tmp,isubcell_tmp
-  
+      integer::isink
+      integer,allocatable::sink_per_grid(:),sink_coarse(:)
+
       integer,dimension(1:nvector),save::ind_grid,ind_cell
 
       real(dp)::dx,scale
@@ -574,6 +577,62 @@ contains
             bisec_cell_cost(i) = 1
          end if
       end do
+
+      ! Add sink particle cost (computational weight near sinks)
+      if (memory_balance .and. sink .and. nsink > 0 .and. mem_weight_sink > 0) then
+         allocate(sink_per_grid(1:ngridmax))
+         allocate(sink_coarse(1:ncoarse))
+         sink_per_grid = 0
+         sink_coarse = 0
+
+         ! Map each sink to its leaf cell via AMR tree descent
+         do isink = 1, nsink
+            ix = int(xsink(isink,1) / scale)
+            iy = int(xsink(isink,2) / scale)
+            iz = int(xsink(isink,3) / scale)
+            ix = min(max(ix, 0), nx-1)
+            iy = min(max(iy, 0), ny-1)
+            iz = min(max(iz, 0), nz-1)
+            icell_tmp = 1 + ix + iy*nx + iz*nxny
+
+            ! Descend AMR tree to leaf cell
+            do while(son(icell_tmp) > 0)
+               igrid_tmp = son(icell_tmp)
+               ind = 1
+               if(xsink(isink,1) >= xg(igrid_tmp,1)) ind = ind + 1
+               if(xsink(isink,2) >= xg(igrid_tmp,2)) ind = ind + 2
+               if(ndim > 2) then
+                  if(xsink(isink,3) >= xg(igrid_tmp,3)) ind = ind + 4
+               end if
+               icell_tmp = igrid_tmp + ncoarse + (ind-1)*ngridmax
+            end do
+
+            ! Accumulate in grid or coarse cell
+            if(icell_tmp > ncoarse) then
+               isubcell_tmp = ((icell_tmp - ncoarse) / ngridmax) + 1
+               igrid_tmp = icell_tmp - ncoarse - ngridmax * (isubcell_tmp - 1)
+               sink_per_grid(igrid_tmp) = sink_per_grid(igrid_tmp) + 1
+            else
+               sink_coarse(icell_tmp) = sink_coarse(icell_tmp) + 1
+            end if
+         end do
+
+         ! Add sink cost to bisec_cell_cost
+         do i = 1, bisec_ncells_loc
+            icell_tmp = bisec_ind_cell(i)
+            if(icell_tmp > ncoarse) then
+               isubcell_tmp = ((icell_tmp - ncoarse) / ngridmax) + 1
+               igrid_tmp = icell_tmp - ncoarse - ngridmax * (isubcell_tmp - 1)
+               bisec_cell_cost(i) = bisec_cell_cost(i) + &
+                    sink_per_grid(igrid_tmp) * mem_weight_sink / twotondim
+            else
+               bisec_cell_cost(i) = bisec_cell_cost(i) + &
+                    sink_coarse(icell_tmp) * mem_weight_sink
+            end if
+         end do
+
+         deallocate(sink_per_grid, sink_coarse)
+      end if
 
    end subroutine
 

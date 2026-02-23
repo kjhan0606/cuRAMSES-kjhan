@@ -468,15 +468,35 @@ subroutine make_virtual_fine_dp(xx,ilevel)
   integer::countsend,countrecv
   integer::info,buf_count,tag=101
   integer,dimension(ncpu)::reqsend,reqrecv
+  logical::use_ksec
+  real(dp)::t1
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: P2P vs K-Section (comp 1: fine_dp)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(1)==1) .or. &
+                   (xchg_phase(1)==2 .and. xchg_chosen(1)==1) .or. &
+                   (xchg_phase(1)==3 .and. xchg_chosen(1)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_fine_dp_ksec(xx,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(1, MPI_WTIME()-t1)
+#endif
      return
   end if
 
 #ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
   ! Receive all messages
   countrecv=0
   do icpu=1,ncpu
@@ -530,6 +550,8 @@ subroutine make_virtual_fine_dp(xx,ilevel)
 
   ! Wait for full completion of sends
   call MPI_WAITALL(countsend,reqsend,statuses,info)
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(1, MPI_WTIME()-t1)
 #endif
 
 111 format('   Entering make_virtual_fine for level ',I2)
@@ -556,15 +578,35 @@ subroutine make_virtual_fine_int(xx,ilevel)
   integer::countsend,countrecv
   integer::info,buf_count,tag=101
   integer,dimension(ncpu)::reqsend,reqrecv
+  logical::use_ksec
+  real(dp)::t1
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: P2P vs K-Section (comp 2: fine_int)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(2)==1) .or. &
+                   (xchg_phase(2)==2 .and. xchg_chosen(2)==1) .or. &
+                   (xchg_phase(2)==3 .and. xchg_chosen(2)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_fine_int_ksec(xx,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(2, MPI_WTIME()-t1)
+#endif
      return
   end if
 
 #ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
   ! Receive all messages
   countrecv=0
   do icpu=1,ncpu
@@ -618,6 +660,8 @@ subroutine make_virtual_fine_int(xx,ilevel)
 
   ! Wait for full completion of sends
   call MPI_WAITALL(countsend,reqsend,statuses,info)
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(2, MPI_WTIME()-t1)
 #endif
 
 111 format('   Entering make_virtual_fine for level ',I2)
@@ -643,6 +687,8 @@ subroutine make_virtual_reverse_dp(xx,ilevel)
   integer::countsend,countrecv
   integer::info,buf_count,tag=101
   integer,dimension(ncpu)::reqsend,reqrecv
+  logical::use_ksec
+  real(dp)::t1
 #ifndef WITHOUTMPI
   integer,dimension(MPI_STATUS_SIZE,ncpu)::statuses
   integer::switchlevel=3
@@ -650,12 +696,30 @@ subroutine make_virtual_reverse_dp(xx,ilevel)
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: P2P vs K-Section (comp 3: reverse_dp)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(3)==1) .or. &
+                   (xchg_phase(3)==2 .and. xchg_chosen(3)==1) .or. &
+                   (xchg_phase(3)==3 .and. xchg_chosen(3)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_reverse_dp_ksec(xx,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(3, MPI_WTIME()-t1)
+#endif
      return
   end if
 
 #ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
   if(ilevel.LE.switchlevel)then
 
  ! Gather emission array
@@ -786,6 +850,8 @@ subroutine make_virtual_reverse_dp(xx,ilevel)
 
   endif
 
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(3, MPI_WTIME()-t1)
 #endif
 
 111 format('   Entering make_virtual_reverse for level ',I2)
@@ -811,6 +877,8 @@ subroutine make_virtual_reverse_int(xx,ilevel)
   integer::countsend,countrecv
   integer::info,buf_count,tag=101
   integer,dimension(ncpu)::reqsend,reqrecv
+  logical::use_ksec
+  real(dp)::t1
 #ifndef WITHOUTMPI
   integer,dimension(MPI_STATUS_SIZE,ncpu)::statuses
   integer::switchlevel=3
@@ -818,12 +886,30 @@ subroutine make_virtual_reverse_int(xx,ilevel)
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: P2P vs K-Section (comp 4: reverse_int)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(4)==1) .or. &
+                   (xchg_phase(4)==2 .and. xchg_chosen(4)==1) .or. &
+                   (xchg_phase(4)==3 .and. xchg_chosen(4)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_reverse_int_ksec(xx,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(4, MPI_WTIME()-t1)
+#endif
      return
   end if
 
 #ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
 
   if(ilevel.le.switchlevel) then
 
@@ -955,6 +1041,8 @@ subroutine make_virtual_reverse_int(xx,ilevel)
 
   endif
 
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(4, MPI_WTIME()-t1)
 #endif
 
 111 format('   Entering make_virtual_reverse for level ',I2)
@@ -1488,23 +1576,52 @@ end subroutine make_virtual_fine_int_ksec
 subroutine make_virtual_fine_int_pair(xx1,xx2,ilevel)
   use amr_commons
   implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
   integer::ilevel
   integer,dimension(1:ncoarse+ngridmax*twotondim)::xx1,xx2
   ! -------------------------------------------------------------------
   ! Exchange two integer arrays simultaneously in a single communication
   ! round. Used for cpu_map + cpu_map2 in load_balance expand pass.
   ! -------------------------------------------------------------------
+  logical::use_ksec
+  real(dp)::t1
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: K-Section bulk vs P2P fallback (comp 5: pair_int)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(5)==1) .or. &
+                   (xchg_phase(5)==2 .and. xchg_chosen(5)==1) .or. &
+                   (xchg_phase(5)==3 .and. xchg_chosen(5)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_fine_int_pair_ksec(xx1,xx2,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(5, MPI_WTIME()-t1)
+#endif
      return
   end if
 
-  ! Fallback: two separate calls
+  ! Fallback: two separate calls (each uses its own auto-tune)
+#ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
+#endif
   call make_virtual_fine_int(xx1,ilevel)
   call make_virtual_fine_int(xx2,ilevel)
+#ifndef WITHOUTMPI
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(5, MPI_WTIME()-t1)
+#endif
 
 end subroutine make_virtual_fine_int_pair
 !################################################################
@@ -1648,6 +1765,9 @@ end subroutine make_virtual_reverse_int_ksec
 subroutine make_virtual_fine_dp_bulk(xx,ncols,ilevel)
   use amr_commons
   implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
   integer,intent(in)::ncols,ilevel
   real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
   ! -------------------------------------------------------------------
@@ -1655,18 +1775,44 @@ subroutine make_virtual_fine_dp_bulk(xx,ncols,ilevel)
   ! Dispatches to ksec version or falls back to per-column calls.
   ! -------------------------------------------------------------------
   integer::ivar
+  logical::use_ksec
+  real(dp)::t1
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: K-Section bulk vs P2P fallback (comp 6: bulk_dp)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(6)==1) .or. &
+                   (xchg_phase(6)==2 .and. xchg_chosen(6)==1) .or. &
+                   (xchg_phase(6)==3 .and. xchg_chosen(6)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_fine_dp_bulk_ksec(xx,ncols,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(6, MPI_WTIME()-t1)
+#endif
      return
   end if
 
   ! Fallback: call single-variable version for each column
+#ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
+#endif
   do ivar=1,ncols
      call make_virtual_fine_dp(xx(1,ivar),ilevel)
   end do
+#ifndef WITHOUTMPI
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(6, MPI_WTIME()-t1)
+#endif
 
 end subroutine make_virtual_fine_dp_bulk
 !################################################################
@@ -1748,6 +1894,9 @@ end subroutine make_virtual_fine_dp_bulk_ksec
 subroutine make_virtual_reverse_dp_bulk(xx,ncols,ilevel)
   use amr_commons
   implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
   integer,intent(in)::ncols,ilevel
   real(dp),dimension(1:ncoarse+ngridmax*twotondim,1:ncols)::xx
   ! -------------------------------------------------------------------
@@ -1755,18 +1904,44 @@ subroutine make_virtual_reverse_dp_bulk(xx,ncols,ilevel)
   ! Dispatches to ksec version or falls back to per-column calls.
   ! -------------------------------------------------------------------
   integer::ivar
+  logical::use_ksec
+  real(dp)::t1
 
   if(numbtot(1,ilevel)==0)return
 
+  ! Auto-tune dispatch: K-Section bulk vs P2P fallback (comp 7: bulk_rev_dp)
+  use_ksec = .false.
   if(ordering=='ksection') then
+     if(exchange_method=='ksection') then
+        use_ksec = .true.
+     else if(exchange_method=='auto') then
+        use_ksec = (xchg_phase(7)==1) .or. &
+                   (xchg_phase(7)==2 .and. xchg_chosen(7)==1) .or. &
+                   (xchg_phase(7)==3 .and. xchg_chosen(7)==0)
+     end if
+  end if
+  if(use_ksec) then
+#ifndef WITHOUTMPI
+     t1 = MPI_WTIME()
+#endif
      call make_virtual_reverse_dp_bulk_ksec(xx,ncols,ilevel)
+#ifndef WITHOUTMPI
+     if(exchange_method=='auto') call xchg_autotune_update(7, MPI_WTIME()-t1)
+#endif
      return
   end if
 
   ! Fallback: call single-variable version for each column
+#ifndef WITHOUTMPI
+  if(ordering=='ksection') t1 = MPI_WTIME()
+#endif
   do ivar=1,ncols
      call make_virtual_reverse_dp(xx(1,ivar),ilevel)
   end do
+#ifndef WITHOUTMPI
+  if(ordering=='ksection' .and. exchange_method=='auto') &
+     call xchg_autotune_update(7, MPI_WTIME()-t1)
+#endif
 
 end subroutine make_virtual_reverse_dp_bulk
 !################################################################
@@ -1843,6 +2018,172 @@ subroutine make_virtual_reverse_dp_bulk_ksec(xx,ncols,ilevel)
 #endif
 
 end subroutine make_virtual_reverse_dp_bulk_ksec
+!################################################################
+!################################################################
+!################################################################
+!################################################################
+subroutine xchg_autotune_update(icomp, elapsed)
+  use amr_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer, intent(in) :: icomp
+  real(dp), intent(in) :: elapsed
+  ! -------------------------------------------------------------------
+  ! Continuous adaptive auto-tune for exchange component icomp.
+  !
+  ! Phase 0: Test P2P for XCHG_NTRIAL calls
+  ! Phase 1: Test K-Section for XCHG_NTRIAL calls, then decide
+  ! Phase 2: Run with chosen method, track EMA.
+  !          Every XCHG_NRECHECK calls, enter Phase 3 to probe.
+  ! Phase 3: Probe alternative for XCHG_NPROBE calls.
+  !          If alternative beats EMA by XCHG_SWITCH_MARGIN, switch.
+  !          Return to Phase 2.
+  !
+  ! All phase transitions use MPI_ALLREDUCE(SUM) for consistency.
+  ! -------------------------------------------------------------------
+  real(dp) :: t_p2p_avg, t_ksec_avg, probe_avg
+  real(dp) :: local_times(2), global_times(2)
+  real(dp) :: local_val, global_val
+  integer  :: ierr, old_chosen
+  character(len=12) :: comp_names(NXCHG_COMP)
+  character(len=8)  :: method_str
+
+  if(exchange_method /= 'auto') return
+
+  comp_names(1) = 'fine_dp'
+  comp_names(2) = 'fine_int'
+  comp_names(3) = 'reverse_dp'
+  comp_names(4) = 'reverse_int'
+  comp_names(5) = 'pair_int'
+  comp_names(6) = 'bulk_dp'
+  comp_names(7) = 'bulk_rev_dp'
+  comp_names(8) = 'reserved'
+
+  xchg_ncall(icomp) = xchg_ncall(icomp) + 1
+
+  ! ===== Phase 0: Accumulate P2P timing =====
+  if(xchg_phase(icomp) == 0) then
+     xchg_time_p2p(icomp) = xchg_time_p2p(icomp) + elapsed
+     if(xchg_ncall(icomp) >= XCHG_NTRIAL) then
+        xchg_phase(icomp) = 1
+        xchg_ncall(icomp) = 0
+     end if
+
+  ! ===== Phase 1: Accumulate K-Section timing, then decide =====
+  else if(xchg_phase(icomp) == 1) then
+     xchg_time_ksec(icomp) = xchg_time_ksec(icomp) + elapsed
+     if(xchg_ncall(icomp) >= XCHG_NTRIAL) then
+        t_p2p_avg  = xchg_time_p2p(icomp)  / XCHG_NTRIAL
+        t_ksec_avg = xchg_time_ksec(icomp) / XCHG_NTRIAL
+
+#ifndef WITHOUTMPI
+        local_times(1) = t_p2p_avg
+        local_times(2) = t_ksec_avg
+        call MPI_ALLREDUCE(local_times, global_times, 2, &
+             MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+        if(global_times(2) < global_times(1)) then
+           xchg_chosen(icomp) = 1  ! K-Section faster
+           xchg_ema(icomp) = global_times(2) / ncpu
+        else
+           xchg_chosen(icomp) = 0  ! P2P faster
+           xchg_ema(icomp) = global_times(1) / ncpu
+        end if
+#else
+        if(t_ksec_avg < t_p2p_avg) then
+           xchg_chosen(icomp) = 1
+           xchg_ema(icomp) = t_ksec_avg
+        else
+           xchg_chosen(icomp) = 0
+           xchg_ema(icomp) = t_p2p_avg
+        end if
+#endif
+        xchg_phase(icomp) = 2
+        xchg_ncall(icomp) = 0
+        xchg_run_count(icomp) = 0
+        xchg_recheck_interval(icomp) = XCHG_NRECHECK
+
+        if(myid == 1) then
+           method_str = merge('ksection','P2P     ', xchg_chosen(icomp)==1)
+           write(*,'(A,A,A,ES10.3,A,ES10.3,A,A)') &
+                ' [xchg auto-tune] ', trim(comp_names(icomp)), &
+                ': P2P=', t_p2p_avg*1d3, 'ms Ksec=', t_ksec_avg*1d3, &
+                'ms -> ', trim(method_str)
+        end if
+     end if
+
+  ! ===== Phase 2: Running with chosen method, tracking EMA =====
+  else if(xchg_phase(icomp) == 2) then
+     ! Update EMA locally (no MPI in hot path)
+     if(xchg_ema(icomp) > 0.0) then
+        xchg_ema(icomp) = XCHG_EMA_ALPHA * elapsed + &
+             (1.0d0 - XCHG_EMA_ALPHA) * xchg_ema(icomp)
+     else
+        xchg_ema(icomp) = elapsed
+     end if
+
+     xchg_run_count(icomp) = xchg_run_count(icomp) + 1
+
+     ! Time to re-check? Sync EMA and enter Phase 3
+     if(xchg_run_count(icomp) >= xchg_recheck_interval(icomp)) then
+#ifndef WITHOUTMPI
+        local_val = xchg_ema(icomp)
+        call MPI_ALLREDUCE(local_val, global_val, 1, &
+             MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+        xchg_ema(icomp) = global_val / ncpu
+#endif
+        xchg_phase(icomp) = 3
+        xchg_ncall(icomp) = 0
+        xchg_probe_sum(icomp) = 0.0
+     end if
+
+  ! ===== Phase 3: Probing alternative method =====
+  else if(xchg_phase(icomp) == 3) then
+     xchg_probe_sum(icomp) = xchg_probe_sum(icomp) + elapsed
+     if(xchg_ncall(icomp) >= XCHG_NPROBE) then
+        probe_avg = xchg_probe_sum(icomp) / XCHG_NPROBE
+
+        ! Sync probe result across ranks
+#ifndef WITHOUTMPI
+        local_val = probe_avg
+        call MPI_ALLREDUCE(local_val, global_val, 1, &
+             MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, ierr)
+        probe_avg = global_val / ncpu
+#endif
+
+        ! Compare probe vs current EMA: switch if probe is faster by margin
+        old_chosen = xchg_chosen(icomp)
+        if(probe_avg < xchg_ema(icomp) * (1.0d0 - XCHG_SWITCH_MARGIN)) then
+           ! Switch to alternative method
+           xchg_chosen(icomp) = 1 - xchg_chosen(icomp)
+           xchg_ema(icomp) = probe_avg  ! reset EMA to probe value
+           xchg_nswitch(icomp) = xchg_nswitch(icomp) + 1
+           ! Backoff: double the re-check interval (max 16x base)
+           xchg_recheck_interval(icomp) = min( &
+                xchg_recheck_interval(icomp) * 2, XCHG_NRECHECK * 16)
+
+           if(myid == 1) then
+              method_str = merge('ksection','P2P     ', xchg_chosen(icomp)==1)
+              write(*,'(A,A,A,A,A,ES10.3,A,ES10.3,A)') &
+                   ' [xchg re-tune] ', trim(comp_names(icomp)), &
+                   ': switch to ', trim(method_str), &
+                   ' (probe=', probe_avg*1d3, &
+                   'ms ema=', xchg_ema(icomp)*1d3, 'ms)'
+           end if
+        else
+           ! No switch: reset interval to base (probe didn't beat current)
+           xchg_recheck_interval(icomp) = XCHG_NRECHECK
+        end if
+
+        ! Return to Phase 2
+        xchg_phase(icomp) = 2
+        xchg_ncall(icomp) = 0
+        xchg_run_count(icomp) = 0
+     end if
+  end if
+
+end subroutine xchg_autotune_update
 !################################################################
 !################################################################
 !################################################################

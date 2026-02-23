@@ -438,7 +438,9 @@ subroutine cmp_new_cpu_map
   integer::info,icpu,jcpu,isub,idom,jdom
   integer::nxny,ix,iy,iz,iskip
   integer::ind_long
+  integer::isink,igrid_sink,ind_sink,icell_sink,isubcell_sink
   integer,dimension(1:nvector)::ind_grid,ind_cell
+  integer,allocatable::sink_per_grid(:)
 
   real(dp)::dx,scale,weight
   real(dp),dimension(1:twotondim,1:3)::xc
@@ -478,10 +480,40 @@ subroutine cmp_new_cpu_map
 
   if(.not.use_cpubox_decomp) then      ! begin if not bisection/ksection
 
+  ! Build per-grid sink particle count for cost weighting
+  if(memory_balance .and. sink .and. nsink > 0 .and. mem_weight_sink > 0) then
+     allocate(sink_per_grid(1:ngridmax))
+     sink_per_grid = 0
+     do isink = 1, nsink
+        ix = int(xsink(isink,1) / scale)
+        iy = int(xsink(isink,2) / scale)
+        iz = int(xsink(isink,3) / scale)
+        ix = min(max(ix, 0), nx-1)
+        iy = min(max(iy, 0), ny-1)
+        iz = min(max(iz, 0), nz-1)
+        icell_sink = 1 + ix + iy*nx + iz*nxny
+        do while(son(icell_sink) > 0)
+           igrid_sink = son(icell_sink)
+           ind_sink = 1
+           if(xsink(isink,1) >= xg(igrid_sink,1)) ind_sink = ind_sink + 1
+           if(xsink(isink,2) >= xg(igrid_sink,2)) ind_sink = ind_sink + 2
+           if(ndim > 2) then
+              if(xsink(isink,3) >= xg(igrid_sink,3)) ind_sink = ind_sink + 4
+           end if
+           icell_sink = igrid_sink + ncoarse + (ind_sink-1)*ngridmax
+        end do
+        if(icell_sink > ncoarse) then
+           isubcell_sink = ((icell_sink - ncoarse) / ngridmax) + 1
+           igrid_sink = icell_sink - ncoarse - ngridmax * (isubcell_sink - 1)
+           sink_per_grid(igrid_sink) = sink_per_grid(igrid_sink) + 1
+        end if
+     end do
+  end if
+
   !----------------------------------------
   ! Compute cell ordering and cost
   ! for leaf cells with cpu map = myid.
-  ! Store cost in flag1 and MAXIMUM  
+  ! Store cost in flag1 and MAXIMUM
   ! ordering key in hilbert_key of kind=16
   !----------------------------------------
   ncell=0
@@ -578,6 +610,9 @@ subroutine cmp_new_cpu_map
                     if(pic)then
                        flag1(ncell)=flag1(ncell)+numbp(ind_grid(i))
                     endif
+                    if(allocated(sink_per_grid))then
+                       flag1(ncell)=flag1(ncell)+sink_per_grid(ind_grid(i))*mem_weight_sink
+                    endif
                     wflag = flag1(ncell)*niter_cost(ilevel)
                     if (wflag > 2147483647) then 
                        write(*,*) ' wrong type for flag1 --> change to integer kind=8: ',wflag
@@ -596,6 +631,9 @@ subroutine cmp_new_cpu_map
      ! End loop over cpus
   end do
   ! End loop over levels
+
+  ! Clean up sink cost array
+  if(allocated(sink_per_grid)) deallocate(sink_per_grid)
 
   !------------------------------------------------
   ! Sort ordering key and store new index in flag2

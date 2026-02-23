@@ -67,15 +67,13 @@ replaces the traditional Hilbert curve ordering with a hierarchical
 spatial partitioning.  This approach eliminates all global
 \code{MPI\_ALLTOALL} calls and dramatically reduces the message
 complexity per ghost-zone exchange, demonstrating highly efficient
-strong scaling.
-
+strong scaling. 
 To address critical memory constraints at scale, we introduce a Morton
 key hash table for octree neighbour lookup alongside on-demand array
 allocation, successfully reducing the memory footprint by over 1\,GB
 per MPI rank.  Furthermore, a novel spatial hash binning algorithm
 accelerates supernova and AGN feedback routines by up to two orders of
-magnitude (${\sim}260\times$ speedup).
-
+magnitude (${\sim}260\times$ speedup). 
 For heterogeneous architectures, we implement a hybrid CPU/GPU dispatch
 model utilizing GPU-resident mesh data and halo-only PCIe transfers.
 This optimization effectively reduces host--device communication
@@ -460,29 +458,68 @@ frequency of these expensive global operations has a disproportionate
 impact on total runtime.
 
 
-\section{HIERARCHICAL MPI COMMUNICATION}
+\section{AUTO-TUNING MPI COMMUNICATIONS}
 \label{sec:ksec_exchange}
 
-The tree structure described in Section~\ref{sec:ksec_tree} enables
-a hierarchical exchange protocol that replaces the global
-\code{MPI\_ALLTOALL} with a sequence of level-by-level correspondent
-exchanges. We implement two variants.
+Ghost-zone (virtual boundary) exchange is the most
+communication-intensive operation in \ramses, invoked multiple times
+per fine time step for hydro variables, gravitational potential,
+particle flags, and density contributions. Each exchange involves
+the same algorithmic pattern---pack data from local grids, transfer to
+remote ranks, unpack into ghost zones---but the underlying MPI
+transport can be realised in fundamentally different ways.
+\curamses\ implements three exchange backends and selects among them
+adaptively at runtime.
 
-\subsection{Exclusive Exchange}
-\label{sec:ksec_exclusive}
+\subsection{Exchange Backends}
+\label{sec:exchange_backends}
 
-In the exclusive exchange, each item
-has a unique destination rank. The algorithm walks the \ksec\ tree
-from root to leaf, where each \emph{node} represents a contiguous
-group of MPI ranks at a given tree level. The \emph{root} node
-encompasses all $\ncpu$ ranks and represents the entire computational
-domain. At each level~$l$, a node is partitioned into $k_l$ child
-nodes; the leaf nodes at the bottom of the tree correspond to
-individual MPI ranks.  Algorithm~\ref{alg:exclusive} summarises the
-procedure:
+\subsubsection{Point-to-point (P2P)}
+\label{sec:backend_p2p}
+
+The P2P backend follows the original \ramses\ communication pattern.
+Each rank maintains \emph{emission} and \emph{reception} arrays
+that list, for every remote rank, the local grids whose data must
+be sent or received. The exchange proceeds in three stages:
+(i) post non-blocking receives (\code{MPI\_IRECV}) for all remote
+ranks that have reception grids; (ii) pack and post non-blocking
+sends (\code{MPI\_ISEND}) to each emission partner; (iii) wait for
+all transfers to complete (\code{MPI\_WAITALL}). The number of
+communication partners is determined by the domain geometry---typically
+6--8 for three-dimensional cubic sub-domains---so the partner count is
+independent of $\ncpu$. The P2P backend has low latency for sparse
+neighbour sets and is the best choice when each rank communicates with
+only a few neighbours.
+
+\subsubsection{MPI\_ALLTOALLV}
+\label{sec:backend_alltoall}
+
+The \code{MPI\_ALLTOALLV} collective exchanges variable-length
+messages among all ranks in a single call. This backend packs all
+emission data into a contiguous buffer with displacements computed
+from per-rank send counts, invokes \code{MPI\_ALLTOALLV}, and unpacks
+the received data. Although it involves all $\ncpu$ ranks (with zero
+counts for non-neighbours), high-quality MPI implementations exploit
+the sparsity internally and can outperform explicit P2P on certain
+interconnects, particularly for small messages on fat-tree topologies.
+However, the implicit global synchronisation and $\Olog{\ncpu}$ memory
+overhead make it less attractive at very large rank counts.
+
+\subsubsection{Hierarchical K-Section Exchange}
+\label{sec:backend_ksection}
+
+The \ksec\ backend replaces the global communication pattern with a
+hierarchical tree walk using the domain decomposition tree described
+in Section~\ref{sec:ksec_tree}.  The algorithm walks the tree from
+root to leaf, where each node represents a contiguous group of MPI
+ranks (Algorithm~\ref{alg:exclusive}).  At each level~$l$, a node is
+partitioned into $k_l$ child nodes; each rank communicates with at
+most $k_l - 1$ correspondents (one per sibling subtree), chosen as
+$\min(\text{my\_pos},\, s-1)$ within each sibling of size $s$ to
+distribute load evenly.
 
 \begin{algorithm}[H]
-\caption{Exclusive hierarchical exchange}
+\caption{Hierarchical \ksec\ exchange}
 \label{alg:exclusive}
 \begin{algorithmic}[1]
 \REQUIRE Send buffer $\mathbf{S}$ with $N$ items, destination ranks $\mathbf{d}$
@@ -504,19 +541,14 @@ procedure:
 \end{algorithmic}
 \end{algorithm}
 
-At each level, each rank communicates with at most $k_l - 1$
-correspondent ranks (one from each sibling subtree). The
-correspondent in a sibling subtree of size $s$ is chosen as
-$\min(\text{my\_pos}, s-1)$ to distribute load evenly. The total
-number of messages per rank per exchange is
+The total number of messages per rank per exchange is
 \begin{equation}
 N_{\rm msg} = \sum_{l=1}^{L} (k_l - 1) = \sum_i m_i (p_i - 1),
 \label{eq:msg_count}
 \end{equation}
-which for $\ncpu = 1024 = 2^{10}$ gives $N_{\rm msg} = 10$ --- two
-orders of magnitude fewer than the ${\sim}1024$ messages required in
-the original all-to-all pattern.
-
+which for $\ncpu = 1024 = 2^{10}$ gives $N_{\rm msg} = 10$---two
+orders of magnitude fewer than the ${\sim}1024$ messages in an
+all-to-all pattern.
 Figure~\ref{fig:hier_exchange} illustrates the communication pattern
 for $\ncpu = 12\,(= 3 \times 2 \times 2)$. At level~1 ($k_1 = 3$),
 the 12 ranks are grouped into three children of four ranks each. Each
@@ -538,37 +570,22 @@ messages per exchange, independent of $\ncpu$.
 
 The pairing structure at each tree level follows directly from the
 branching factor. When a node has $p$ children, data from every child
-must reach every other child. This is accomplished in $p - 1$
-sequential steps. In step~$s$ ($s = 1, \ldots, p-1$), child~$s+1$ is
-paired with each of the children $1, \ldots, s$: each rank in
-child~$s+1$ exchanges data with its correspondent in child~$c$ for
-$c = 1, \ldots, s$, yielding $s$ concurrent point-to-point exchanges.
-After step~$s$, every child $1$ through $s+1$ holds the aggregate of
-all data originating from children $1$ through $s+1$. In particular,
-after all $p - 1$ steps, every child possesses the complete data set
-of the entire subtree. For the $\ncpu = 12$ example in
-Figure~\ref{fig:hier_exchange}, level~1 has $k_1 = 3$, giving
-$3 - 1 = 2$ steps: step~1 pairs child~2 with child~1 ($1 \times 4$
-exchanges), and step~2 pairs child~3 with both children~1 and~2
-($2 \times 4$ exchanges). Levels~2 and~3 each have $k = 2$, requiring
-only $2 - 1 = 1$ step per level.
+must reach every other child, accomplished in $p - 1$ sequential
+steps. In step~$s$ ($s = 1, \ldots, p-1$), child~$s+1$ exchanges
+with each of the children $1, \ldots, s$, yielding $s$ concurrent
+point-to-point communications. After all $p - 1$ steps, every child
+possesses the complete data set of the entire subtree.
 
-A trade-off of the hierarchical routing is that the total data volume
-transmitted per rank exceeds that of a direct \code{MPI\_ALLTOALL}.
-In the all-to-all pattern, each rank sends each item exactly once to
-its destination. In the hierarchical exchange, an item may be
-forwarded through multiple tree levels before reaching its final
-destination, so the same data can traverse several hops. In the worst
-case, a rank's entire send buffer is relayed at every level,
-giving a per-rank volume of at most $L \times V_{\rm local}$, where
-$V_{\rm local}$ is the rank's data size. However, this upper bound is
-rarely approached in practice because items are filtered by child
-index at each level: only the subset destined for a sibling subtree
-is actually transmitted, and successive levels operate on
-progressively smaller subsets. The key advantage, reducing the number
-of communication partners from $\Olog{\ncpu}$ to $\Olog{\sum_l k_l}$,
-more than compensates for the modest increase in aggregate volume,
-particularly at large $\ncpu$ where message startup latency dominates.
+A trade-off is that the total data volume per rank exceeds that of
+direct P2P or \code{MPI\_ALLTOALLV}, since items may be forwarded
+through multiple tree levels. In the worst case, a rank relays its
+entire buffer at every level, giving at most $L \times V_{\rm local}$.
+In practice, items are filtered by child index at each level, and
+successive levels operate on progressively smaller subsets. The key
+advantage---reducing the number of communication partners from
+$\Olog{\ncpu}$ to $\Olog{\sum_l k_l}$---more than compensates for the
+modest volume increase, particularly at large $\ncpu$ where message
+startup latency dominates.
 
 \begin{figure}
 \centering
@@ -588,107 +605,115 @@ $N_{\rm msg} = (3{-}1) + (2{-}1) + (2{-}1) = 4$.}
 \label{fig:hier_exchange}
 \end{figure}
 
-Working buffers are managed with Fortran 2003 \code{move\_alloc} for
-zero-copy buffer swaps at each level, and per-level arrays (child
-counts, peer lists, MPI request handles) are pre-allocated with
-\code{save} attributes to eliminate allocation/deallocation overhead
-on repeated calls.
-
-
-\subsection{Ghost-Zone Exchange via K-Section}
-\label{sec:ksec_ghostzone}
-
-The ghost-zone (virtual boundary) exchange is the most
-communication-intensive operation in \ramses, called multiple times per
-fine time step for hydro, gravity, and particle updates. We replace
-the standard all-to-all pattern with four \ksec-based variants.
-First, a forward exchange sends data from emission grids to reception
-grids, and a corresponding reverse accumulation adds received values
-back into the emission grids. Because the hierarchical routing
-internally uses double-precision buffers, an integer variant packs
-integer data (e.g.\ \code{cpu\_map}, \code{flag1}) into
-double-precision words before transport and unpacks them on receipt,
-reusing the same tree-walk machinery without a separate integer
-communication path.
-
-The data packing format for each ghost grid is:
-\begin{equation}
-\text{sendbuf}(1:\twotondim+2,\, i) = \bigl\{
-u_1, \ldots, u_{\twotondim},\, \text{sender\_id},\, \text{index}
-\bigr\},
-\label{eq:sendbuf_format}
-\end{equation}
-where $u_j$ are the cell data values, \code{sender\_id} identifies the
-source rank, and \code{index} is the emission or reception array index
-used for scatter at the receiver. This self-describing format enables
-the receiver to place incoming data without maintaining separate
-communication tables.
-
-
-For multi-variable exchanges (e.g.\ all hydro conserved variables), we
-provide bulk variants that pack all $N_{\rm var}$ columns of a 2D
-array into a single \ksec\ exchange call:
-\begin{equation}
-\text{sendbuf}\bigl((v-1)\twotondim + j,\, i\bigr) =
-\text{xx}(v,\, \text{cell}_{i,j}),
-\label{eq:bulk_format}
-\end{equation}
-for $v = 1, \ldots, N_{\rm var}$ and $j = 1, \ldots, \twotondim$,
-plus two metadata entries. This amortises the tree-walk overhead and
-MPI latency over $N_{\rm var}$ variables, yielding a significant
-reduction in the number of exchange calls per time step (from
-$N_{\rm var}$ individual calls to a single bulk call at each of the
-five call sites in \code{amr\_step}).
-
-
-\subsection{Communication Structure Construction}
-\label{sec:ksec_buildcomm}
-
-The construction of the communication structure, which determines
-which grids must be exchanged as ghost zones, was itself based on
-\code{MPI\_ALLTOALL} in the original \ramses. We replace this with a
-\ksec\ exchange: each rank packs its reception grids as triplets
-(sender identifier, reception index, grid address), sends them via
-the exclusive hierarchical exchange, and the receiver reconstructs
-its emission arrays from the incoming data. This eliminates the last
-remaining all-to-all communication pattern in the AMR infrastructure.
-
-The \ksec\ exchange routines and virtual boundary functions contain
-numerous small arrays (child counts, peer lists, MPI request handles,
-receive buffers) that are allocated and deallocated on every call. At
-100+ calls per time step, the cumulative allocation overhead becomes
-non-negligible. We convert these to \code{save} variables with
-grow-only semantics: the buffer is allocated on first use and grown
-(but never shrunk) when a larger size is needed. The receive buffer's
-first dimension must match the \code{nprops} parameter exactly (for
-correct MPI stride), so reallocation is triggered when either the
-capacity or the property count changes. This optimization eliminates
-approximately 100 allocation/deallocation pairs per exchange call.
-
-
-\subsection{Complexity Analysis}
-\label{sec:ksec_complexity}
-
-Table~\ref{tab:complexity} summarizes the communication complexity of
-the original \ramses\ and \curamses.
+Table~\ref{tab:complexity} compares the communication complexity of
+the three backends. The \ksec\ exchange also extends to
+ghost-zone operations (forward, reverse, integer, and bulk variants),
+communication structure construction (replacing the original
+\code{MPI\_ALLTOALL}-based build\_comm), and feedback collectives,
+eliminating all global communication patterns from the AMR
+infrastructure.
+Working buffers use Fortran 2003 \code{move\_alloc} for
+zero-copy swaps, and per-level arrays are pre-allocated with
+\code{save} attributes and grow-only semantics to eliminate
+allocation overhead on the 100+ exchange calls per time step.
 
 \begin{table}
 \centering
-\caption{Communication complexity per ghost-zone exchange operation.
+\caption{Communication complexity per exchange operation.
 $N_{\rm ghost}$ is the total number of ghost grids per rank; $k_l$
 are the branching factors at tree level $l$.}
 \label{tab:complexity}
-\begin{tabular}{lcc}
+\begin{tabular}{lccc}
 \toprule
-& Original \ramses & \curamses \\
+& P2P & \code{ALLTOALLV} & \ksec \\
 \midrule
-Message count & $\Olog{\ncpu}$ & $\Olog{\sum_l k_l}$ \\
-Buffer memory & $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
+Message count & $\Olog{N_{\rm nbr}}$ & $\Olog{\ncpu}$ & $\Olog{\sum_l k_l}$ \\
+Buffer memory & $\Olog{N_{\rm nbr} \cdot N_{\rm ghost}}$ &
+  $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
   $\Olog{k_{\rm max} \cdot N_{\rm ghost}}$ \\
-\code{MPI\_ALLTOALL} calls & $\geq 1$ per exchange & 0 \\
+Synchronisation & none & implicit barrier & none \\
 \bottomrule
 \end{tabular}
 \end{table}
+
+
+\subsection{Adaptive Method Selection}
+\label{sec:autotune}
+
+No single backend dominates across all exchange types, rank counts,
+and simulation stages. During the initial mesh setup and I/O phases,
+communication is sparse and P2P excels; after load rebalancing, the
+neighbour topology changes and a previously inferior method may become
+optimal; as the simulation evolves and AMR levels deepen, ghost-zone
+volumes grow and the relative cost of each backend shifts.
+\curamses\ therefore implements a continuous per-component auto-tuning
+framework that adapts to the evolving communication pattern throughout
+the simulation.
+
+\subsubsection{Exchange components}
+\label{sec:autotune_components}
+
+Seven independent exchange components are identified, each with its
+own data size and call frequency:
+(i) \code{fine\_dp}---forward double-precision ghost exchange (hydro,
+potential);
+(ii) \code{fine\_int}---forward integer ghost exchange (\code{cpu\_map},
+flags);
+(iii) \code{reverse\_dp}---reverse accumulation (density);
+(iv) \code{reverse\_int}---reverse integer accumulation;
+(v) \code{pair\_int}---paired integer exchange;
+(vi) \code{bulk\_dp}---bulk forward exchange ($N_{\rm var}$ variables
+in one call);
+(vii) \code{bulk\_rev\_dp}---bulk reverse accumulation.
+Each component maintains its own auto-tune state, so a method that is
+optimal for small integer exchanges need not be the same as for large
+bulk hydro transfers.
+
+\subsubsection{Four-phase auto-tune protocol}
+\label{sec:autotune_protocol}
+
+Each component independently progresses through four phases:
+
+\begin{description}
+\item[Phase~0 (P2P trial)]  The first $N_{\rm trial} = 50$ calls use
+  the P2P backend, accumulating the total elapsed wall-clock time.
+\item[Phase~1 (\ksec\ trial)]  The next $N_{\rm trial}$ calls use
+  the \ksec\ backend. At the end of this phase, each rank computes
+  its per-call average for both methods. An \code{MPI\_ALLREDUCE(SUM)}
+  synchronises the global average, and all ranks make a consistent
+  initial decision: the backend with the smaller global mean is
+  selected, and the per-call average is used to initialise the
+  exponential moving average (EMA).
+\item[Phase~2 (running)]  The selected backend is used for production
+  exchanges.  After each call, the local EMA is updated as
+  \begin{equation}
+  \bar{t}_{n+1} = \alpha\, t_n + (1 - \alpha)\, \bar{t}_n,
+  \qquad \alpha = 0.05,
+  \label{eq:ema}
+  \end{equation}
+  where $t_n$ is the elapsed time of the current call.  After
+  $N_{\rm recheck}$ calls (initially 500), the local EMAs are
+  synchronised via \code{MPI\_ALLREDUCE(SUM)} and the system enters
+  Phase~3 to probe the alternative.
+\item[Phase~3 (probing)]  The alternative backend is exercised for
+  $N_{\rm probe} = 20$ calls, and its average time is synchronised
+  across ranks.  If the probe average is faster than the current EMA
+  by more than a switching margin ($\delta = 20$\,per\,cent),
+  the component switches methods.  Otherwise, the current method is
+  retained and Phase~2 resumes.
+\end{description}
+
+To prevent excessive oscillation when two backends have similar
+performance, an exponential back-off doubles the re-check interval
+after each switch, up to a maximum of $16 \times N_{\rm recheck}$
+($= 8000$~calls). When a probe does \emph{not} trigger a switch, the
+interval resets to the base value~$N_{\rm recheck}$, ensuring that
+genuinely changed conditions are still detected promptly.
+
+The namelist parameter \code{exchange\_method} controls the behaviour:
+\code{'auto'} enables per-component adaptive selection (the default),
+while \code{'p2p'} or \code{'ksection'} forces a single backend
+globally for diagnostic or benchmarking purposes.
 
 
 % ===================================================================

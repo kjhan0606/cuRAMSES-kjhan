@@ -27,10 +27,11 @@ subroutine read_params
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
        & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,ordering &
        & ,bisec_tol,static,geom,overload,cost_weighting,aton &
-       & ,memory_balance,mem_weight_grid,mem_weight_part &
+       & ,memory_balance,mem_weight_grid,mem_weight_part,mem_weight_sink &
        & ,jobcontrolfile &
        & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
-       & ,use_fftw
+       & ,use_fftw &
+       & ,exchange_method
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
@@ -220,6 +221,13 @@ subroutine read_params
      write(*,'(A)') ' FFTW3 CPU direct Poisson solver enabled (use_fftw=T)'
   end if
 #endif
+
+  !-------------------------------------------------
+  ! Exchange method auto-tune
+  !-------------------------------------------------
+  if(ordering=='ksection' .and. myid==1) then
+     write(*,'(A,A)') ' Exchange method: ', trim(exchange_method)
+  end if
 
   !-------------------------------------------------
   ! Compute time step for outputs
