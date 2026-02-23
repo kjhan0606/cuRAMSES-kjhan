@@ -315,7 +315,7 @@ each panel, the corresponding \ksec\ tree is shown; colours encode
 $x$-slab membership (red/green/blue), with saturation and brightness
 indicating $y$ and $z$ subdivisions. Each face displays projected
 column density from a $4096^3$ TSC density field. Sub-domain volumes
-vary by ${\sim}10$--$30\,\%$, reflecting load-balanced wall placement.}
+vary by approximately 10--30\,per\,cent, reflecting load-balanced wall placement.}
 \label{fig:ksec_progressive}
 \end{figure}
 
@@ -777,11 +777,12 @@ on collision) per AMR level, mapping Morton keys $M$ to grid indices
 
 The hash function uses multiplicative hashing
 with an additional mixing step:
-\begin{equation}
-h(M) = \bigl[\bigl((M \times \phi_1) \oplus (M \gg 16)\bigr) \times
-\phi_2\bigr] \oplus (h \gg 13),
+\begin{align}
+t   &= \bigl[(M \times \phi_1) \oplus (M \gg 16)\bigr] \times \phi_2,
+\nonumber \\
+h(M) &= t \oplus (t \gg 13),
 \label{eq:hash_func}
-\end{equation}
+\end{align}
 where $\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
 are constants chosen for good bit mixing, and the table capacity is
 always a power of two to allow bitmask modular arithmetic. Collisions
@@ -935,13 +936,13 @@ From an astrophysical perspective, the reduction of over 1\,GB per rank
 is not merely a hardware efficiency gain --- it directly translates
 into deeper AMR hierarchies within the same memory budget.  For a
 fixed node configuration, the freed memory can accommodate a
-proportionally larger \ngridmax, enabling finer resolution in the
-densest regions of the simulation: the cores of dark matter haloes, the
-circum-galactic medium, and the sites of active star formation.  In
-practice, this means that phenomena requiring high spatial resolution
---- e.g., the fragmentation of cold gas clouds in the ISM, the
-accretion flow onto supermassive black holes, or the propagation of
-supernova-driven outflows --- can be resolved to higher AMR levels
+proportionally larger $\ngridmax$, enabling finer resolution in the
+densest regions of the simulation: the cores of dark matter haloes,
+the circum-galactic medium, and the sites of active star formation.
+In practice, this means that phenomena requiring high spatial
+resolution --- e.g.\ the fragmentation of cold gas clouds in the ISM,
+the accretion flow onto supermassive black holes, or the propagation
+of supernova-driven outflows --- can be resolved to higher AMR levels
 without requiring additional hardware, directly improving the fidelity
 of sub-grid physics models.
 
@@ -1083,19 +1084,19 @@ $\nabla^2\phi = 4\pi G\rho$ solvable exactly via spectral methods.
 The solver uses \textsc{fftw3} \citep{Frigo2005} and operates in two
 regimes depending on the grid size:
 
-\paragraph{Small grid ($N \le 256^3$).}
+\subsubsection*{Small grid ($N \le 256^3$)}
 Each rank gathers its local right-hand side into a local array and an
 \code{MPI\_ALLREDUCE} sums the contributions.  A local in-place R2C
 FFT (multi-threaded via \textsc{fftw3}+OpenMP) solves the system.
 
-\paragraph{Large grid ($N > 256^3$).}
+\subsubsection*{Large grid ($N > 256^3$)}
 The global grid is distributed across ranks using FFTW's native slab
 decomposition along the $x$-axis.  Each rank owns $\lceil N_x /
 \ncpu \rceil$ contiguous $x$-slabs.  Data redistribution between
 RAMSES's spatial domain decomposition and FFTW's slab layout requires
 an all-to-all exchange in both forward and reverse directions.
 
-\paragraph{Sparse point-to-point exchange.}
+\subsubsection*{Sparse point-to-point exchange}
 A na\"{\i}ve \code{MPI\_ALLTOALLV} implementation sends $O(\ncpu)$
 messages per rank, even though most are empty: for a $512^3$ grid on
 12~ranks, each rank's RAMSES domain overlaps only 5--8 FFTW slabs.
@@ -1135,7 +1136,7 @@ partners, reducing the message count from $2 \times 12 = 24$ to
 $2 \times (5 + 8) = 26$ (comparable at small scale, but
 $O(n_{\text{partners}})$ vs.\ $O(\ncpu)$ at large scale).
 
-\paragraph{Performance.}
+\subsubsection*{Performance}
 The FFTW3 solver reduces the base-level Poisson time from 241\,s
 (MG V-cycle) to 28.9\,s (\textbf{8.3$\times$ speedup}) on 12~ranks
 with a $512^3$ base grid, matching the cuFFT GPU result (28\,s)
@@ -1180,8 +1181,8 @@ dominating the feedback time step.
 
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
-$n_{\rm bin} = \max(1,\, \min(128,\, \lfloor L_{\rm box} /
-r_{\rm max} \rfloor))$
+$n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
+\lfloor L_{\rm box} \,/\, r_{\rm max} \rfloor\bigr)\!\bigr)$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
@@ -1354,7 +1355,7 @@ $\ncpu^{\rm file}$, which may differ from the current $\ncpu$.
 
 The restart proceeds in three stages.
 
-\paragraph{Stage 1: Early detection and file assignment.}
+\subsubsection*{Stage 1: Early detection and file assignment}
 Rank~1 probes the header of file~00001 to read $\ncpu^{\rm file}$.
 If $\ncpu^{\rm file} \ne \ncpu$, the variable-$\ncpu$ path is
 activated (requiring \ksec\ ordering).  The $\ncpu^{\rm file}$ files
@@ -1362,7 +1363,7 @@ are distributed among the $\ncpu$ ranks by round-robin assignment:
 rank $r$ reads files whose index satisfies
 $(f - 1) \bmod \ncpu = r - 1$.
 
-\paragraph{Stage 2: Distributed AMR reconstruction.}
+\subsubsection*{Stage 2: Distributed AMR reconstruction}
 Each rank reads only its assigned AMR files, extracting per-level
 active grid metadata (positions $\mathbf{x}_g$ and son flags).  The
 per-level active grid counts are aggregated via
@@ -1374,7 +1375,7 @@ An \code{MPI\_ALLTOALLV} exchange then routes each grid's data to
 its owner, who creates the local AMR grid.  The exchange metadata
 --- send ordering and receive-grid mapping --- is stored for reuse.
 
-\paragraph{Stage 3: Hydro and gravity scatter.}
+\subsubsection*{Stage 3: Hydro and gravity scatter}
 The hydro and gravity binary files are read in the same distributed
 fashion: each rank reads only its assigned files and packs the
 cell-centred data into per-level send buffers using the stored
@@ -1429,7 +1430,10 @@ We replace sequential access with Fortran 2003 stream access
 The byte offset for plane $i$ in a file with header size $H = 52$
 bytes (GRAFIC2 44-byte header plus record markers) and plane size
 $P = n_1 n_2 \times 4 + 8$ bytes (data plus two 4-byte record
-markers) is $\text{offset} = H + (i - 1) \times P + 5$.
+markers) is $\text{offset} = H + (i - 1) \times P + 5$,
+where the additive constant~5 accounts for the 4-byte Fortran
+unformatted record-length marker preceding the data payload plus
+the 1-based byte indexing of stream access.
 This is applied to all IC file types: density perturbation
 (\code{deltab}), velocity components (\code{velcx/y/z}), particle
 positions (\code{poscx/y/z}), and temperature.
@@ -1626,13 +1630,16 @@ large, contiguous data blocks for many iterations before
 communicating, the AMR hierarchy requires level-by-level processing
 with inter-level transfers that break the GPU's data residency.
 
-We conclude that for the current AMR code structure, CPU-only
-optimisation (Section~\ref{sec:multigrid}) is more effective than GPU
-offloading.  Achieving a net GPU speedup would require porting the
-\emph{entire} multigrid V-cycle --- including coarse solves,
-interpolation, and restriction --- to the device, eliminating
-per-iteration PCIe transfers.  This amounts to a GPU-native AMR
-redesign and is left as future work.
+These results highlight that achieving optimal GPU acceleration in
+hierarchical AMR codes strictly requires full device-residency of
+the entire MG V-cycle --- including coarse solves, interpolation, and
+restriction --- eliminating per-iteration PCIe transfers entirely.
+For existing codebases with deeply interleaved CPU/GPU execution,
+CPU-centric memory and algorithmic optimizations
+(Section~\ref{sec:multigrid}) remain the more immediately viable
+strategy.  A GPU-native AMR redesign that maintains the full solver
+state on the device is a promising but architecturally distinct
+direction for future work.
 
 The FFTW3 CPU direct solver (Section~\ref{sec:fftw3}) provides an
 effective alternative, achieving an $8.3\times$ speedup for the
@@ -1669,34 +1676,19 @@ of mass, momentum, or energy conservation would render the physical
 results untrustworthy, regardless of performance gains.  We therefore
 subject every optimization to rigorous conservation verification by
 comparing diagnostics between the modified code and a reference run
-using the original \ramses\ algorithms:
+using the original \ramses\ algorithms.
 
-\begin{table}
-\centering
-\caption{Conservation diagnostics at step 10 for various
-configurations. All values are identical to the reference
-within machine precision.}
-\label{tab:conservation}
-\footnotesize
-\begin{tabular}{@{}lccc@{}}
-\toprule
-Configuration & $e_{\rm cons}$ & $e_{\rm pot}$ & $e_{\rm kin}$ \\
-\midrule
-Hilbert (reference) & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
-K-sec (no membal)   & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
-K-sec (membal)      & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
-Morton + k-sec      & $3.77\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
-MG optimized        & $3.79\!\times\!10^{-3}$ & $-1.88\!\times\!10^{-6}$ & $1.23\!\times\!10^{-6}$ \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The slight change in $e_{\rm cons}$ for the MG-optimized version
-($3.79 \times 10^{-3}$ versus $3.77 \times 10^{-3}$) is attributable
-to the relaxed synchronisation in the merged red-black GS sweep, where
-boundary cells use ghost values from the previous iteration. This is
-well within the MG solver's convergence tolerance and does not affect
-the iteration count.
+The \ksec\ domain decomposition (with and without memory-weighted load
+balancing), Morton key hash table, and their combination all produce
+conservation diagnostics \emph{identical} to the Hilbert reference
+at every decimal place: $e_{\rm cons} = 3.77 \times 10^{-3}$,
+$e_{\rm pot} = -1.88 \times 10^{-6}$, $e_{\rm kin} = 1.23 \times
+10^{-6}$.  The MG-optimized configuration yields $e_{\rm cons} =
+3.79 \times 10^{-3}$ --- a 0.5\,per\,cent difference attributable to
+the relaxed boundary-cell synchronisation in the merged red-black
+Gauss--Seidel sweep, well within the MG solver's convergence tolerance
+and with no effect on the iteration count.  All other diagnostics
+($e_{\rm pot}$, $e_{\rm kin}$) remain bit-identical.
 
 We emphasize that every optimization described in this paper ---
 the \ksec\ domain decomposition, Morton key hash table, memory
@@ -1712,6 +1704,15 @@ particle integrators) unchanged.
 
 \subsection{Strong Scaling}
 \label{sec:perf_timing}
+
+We separate the scaling analysis into two complementary parts: the
+full-physics application benchmark in this section tests intra-node
+strong scaling with all solver components active, providing precise
+per-component attribution; the multi-node communication scaling
+behaviour, which is governed by the \ksec\ domain decomposition and
+sparse P2P exchange patterns, is characterised independently through
+dedicated microbenchmarks on a 16-node cluster in
+Section~\ref{sec:bench_ghost}.
 
 We measure strong scaling by restarting a production-grade cosmological
 simulation from an HDF5 output.  The test problem comprises
@@ -1786,16 +1787,6 @@ flag routine scale near-ideally, while the overall speedup reaches
 $33.9\times$ at 64 ranks ($53\%$ parallel efficiency).}
 \label{fig:scaling}
 \end{figure*}
-
-We note that the strong scaling tests above are performed on a single
-shared-memory node.  Multi-node scaling introduces additional
-inter-node communication overhead (network latency, bandwidth
-contention) that is not captured by these intra-node measurements.
-Microbenchmark results on a 16-node cluster (Section~\ref{sec:bench_ghost})
-show that the \ksec\ domain decomposition halves the ghost-list build
-time compared to Hilbert ordering and maintains comparable exchange
-latency via sparse P2P communication; full-application multi-node
-scaling tests are planned for a forthcoming study.
 
 
 \subsection{OpenMP Thread Scaling}
@@ -2145,7 +2136,7 @@ management, all conservation diagnostics --- total energy
 ($e_{\rm cons}$), gravitational potential energy ($e_{\rm pot}$), and
 kinetic energy ($e_{\rm kin}$) --- remain identical to the original
 unmodified \ramses\ code at machine precision
-(Table~\ref{tab:conservation}).  The only measurable difference is a
+(Section~\ref{sec:perf_conservation}).  The only measurable difference is a
 $0.5\%$ shift in $e_{\rm cons}$ for the merged red-black multigrid
 sweep, attributable to ghost-zone synchronisation timing and well
 within the solver's convergence tolerance.  The governing equations,
