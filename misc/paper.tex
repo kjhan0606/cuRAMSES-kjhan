@@ -222,12 +222,7 @@ modifications to \ramses\ that addresses each of these challenges. We
 introduce a recursive \ksec\ domain decomposition
 (Section~\ref{sec:ksection}) that replaces Hilbert ordering with a
 hierarchical multi-way spatial partitioning, enabling MPI exchange with
-$\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table \citep{Morton1966}
-(Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely
-and, together with on-demand allocation of redundant large arrays,
-saves over 1\,GB of memory per rank. Algorithmic optimizations to the multigrid Poisson
-solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
-from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
+$\Olog{\sum_l k_l}$ messages per operation. A spatial hash binning
 scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
 AGN feedback by orders of magnitude. We also implement variable-$\ncpu$
 restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}).
@@ -370,11 +365,9 @@ The procedure operates level by level, top to bottom. At level $l$:
   \end{equation}
   where $n_m$ is the number of ranks assigned to partition $m$.
   Because $n$ ranks cannot always be divided evenly among $k_l$
-  partitions, $n_m = \lfloor n/k_l \rfloor + 1$ for the first
+  partitions, $n_m = \mathrm{int}(n/k_l) + 1$ for the first
   $n \bmod k_l$ partitions (which absorb the remainder), and
-  $n_m = \lfloor n/k_l \rfloor$ for the rest.
-  Here $\lfloor \cdot \rfloor$ denotes the floor function (the
-  largest integer not exceeding the argument).
+  $n_m = \mathrm{int}(n/k_l)$ for the rest.
 
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
   all $\ncpu$ ranks to obtain the global cumulative load at each wall
@@ -777,11 +770,10 @@ implemented with simple bit-shift loops.
 The integer coordinates of a grid at level $l$ are computed from its
 floating-point centre position $\mathbf{x}_g$ as
 \begin{equation}
-i_d = \lfloor x_{g,d} \cdot 2^{l-1} \rfloor, \quad d \in \{x, y, z\},
+i_d = \mathrm{int}(x_{g,d} \cdot 2^{l-1}), \quad d \in \{x, y, z\},
 \label{eq:grid_to_int}
 \end{equation}
-where $\lfloor \cdot \rfloor$ denotes the floor function and
-coordinates are in units of the coarse grid spacing.
+where coordinates are in units of the coarse grid spacing.
 Note that AMR does not populate all possible grid positions at a given
 level, since only regions that satisfy the refinement criteria contain grids.
 The Morton key therefore serves as a unique spatial address for each
@@ -1218,7 +1210,7 @@ dominating the feedback time step.
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
 $n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
-\lfloor L_{\rm box} \,/\, r_{\rm max} \rfloor\bigr)\!\bigr)$
+\mathrm{int}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
