@@ -143,7 +143,7 @@ integer function Omp_FoF_link(gndx, node, particle, np, foflink , linked, gindx,
 !             call EraseFromTree(node, particle,np, optr,ptr, node(-ptr)%sibling)
               ptr = node(-ptr)%sibling
            else
-              if(pfof_open(node, particle,np,gndx, ptr, foflink, boxsize).eq. .true.) then
+              if(pfof_open(node, particle,np,gndx, ptr, foflink, boxsize).eqv. .true.) then
                  optr = ptr
                  ptr = node(-ptr)%daughter
               else
@@ -152,8 +152,8 @@ integer function Omp_FoF_link(gndx, node, particle, np, foflink , linked, gindx,
               endif
            endif
         else if(ptr .gt.0) then
-!          if(particle(ptr)%included .eq. .true.) then
-           if(included(ptr) .eq. .true.) then
+!          if(particle(ptr)%included .eqv. .true.) then
+           if(included(ptr) .eqv. .true.) then
               nptr = particle(ptr)%sibling
 !             call EraseFromTree(node, particle,np, optr, ptr, nptr)
               ptr = nptr
@@ -356,7 +356,7 @@ integer function Omp_Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(g
   issink = issink + ssink -1
   ifsink = ifsink + ssink - 1
   do i = issink, ifsink
-     if(included(i) .eq. .false.) then
+     if(included(i) .eqv. .false.) then
         ii = i
         gindx = gindx + 1
         gnum = Omp_FoF_link(ii, node, particle, numsink, foflink, linked, gindx, boxsize, factG,included,gid)
@@ -366,7 +366,7 @@ integer function Omp_Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(g
               crossflag = .true.
            endif
         enddo
-        if(crossflag .eq. .false.) then
+        if(crossflag .eqv. .false.) then
            do j = 1, gnum
               ptmp(icount+j) = linked(j)
               gtmp(icount+j) = gindx
@@ -874,14 +874,14 @@ function Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
   allocate(particle(1:numsink))
   allocate(linked(1:numsink))
 
-  #ifdef _KJHAN_TEST                                                                                                                  
-    xbound(1:3) = (/1,1,1/)                                                                             
+#ifdef _KJHAN_TEST
+    xbound(1:3) = (/1,1,1/)
     scale = 1
-  #else
+#else
     xbound(1:3)=(/dble(nx),dble(ny),dble(nz)/)
     nx_loc=(icoarse_max-icoarse_min+1)
     scale=boxlen/dble(nx_loc)
-  #endif
+#endif
 
 
   foflink = sqrt(rmerge**2*dx_min2)
@@ -900,7 +900,7 @@ function Do_FoF_Tree(numsink, psink, gsink, dx_min2, factG) result(gindx)
   gindx = 0
   icount = 0
   do i = 1, numsink
-     if(particle(i)%included .eq. .false.) then
+     if(particle(i)%included .eqv. .false.) then
         ii = i
         gindx = gindx + 1
         gnum = FoF_link(ii, node, particle, numsink, foflink, linked, gindx, boxsize, factG)
@@ -931,7 +931,16 @@ subroutine Build_Tree(node, particle, np)
   integer:: np,i,j,k,iSpareNode
   TYPE(Tree_Node), dimension(1:np):: node
   TYPE(Tree_Particle), dimension(1:np):: particle
-  integer, external:: Make_Tree
+  interface
+     recursive function Make_Tree(node,particle,np,iworknode,iSpareNode0) result(iNextSpareNode)
+       use Tree_commons
+       integer:: np
+       TYPE(Tree_Node), target, dimension(1:np):: node
+       TYPE(Tree_Particle), dimension(1:np):: particle
+       integer:: iNextSpareNode
+       integer, intent(in):: iSpareNode0, iworknode
+     end function Make_Tree
+  end interface
   integer:: iworknode, iSpareNode0
 
 
@@ -940,7 +949,7 @@ subroutine Build_Tree(node, particle, np)
      node(i)%sibling = 0
      node(i)%daughter = 0
   enddo
-  particle(np).sibling = 0
+  particle(np)%sibling = 0
   node(1)%daughter = 1
   node(1)%nump = np
 
@@ -1045,9 +1054,9 @@ recursive function Make_Tree(node,particle,np,iworknode, iSpareNode0) result(iNe
         node(-iNowDaughter)%daughter = tmpnode(i)%daughter
         node(-iNowDaughter)%nump = tmpnode(i)%nump
         if(iLeftSibling .gt. 0) then
-           particle(iLeftSibling).sibling = iNowDaughter
+           particle(iLeftSibling)%sibling = iNowDaughter
         else if (iLeftSibling .lt. 0) then
-           node(-iLeftSibling).sibling = iNowDaughter
+           node(-iLeftSibling)%sibling = iNowDaughter
         endif
         iLeftSibling = iNowDaughter
         iNowDaughter = iNowDaughter -1
@@ -1055,9 +1064,9 @@ recursive function Make_Tree(node,particle,np,iworknode, iSpareNode0) result(iNe
      else if (tmpnode(i)%nump .gt.0) then
         ntmp = tmpnode(i)%daughter
         if(iLeftSibling .gt. 0) then
-           particle(iLeftSibling).sibling = ntmp
+           particle(iLeftSibling)%sibling = ntmp
         else if (iLeftSibling .lt. 0) then
-           node(-iLeftSibling).sibling = ntmp
+           node(-iLeftSibling)%sibling = ntmp
         endif
         do while(ntmp .ne.0)
            iLeftSibling = ntmp
@@ -1076,7 +1085,7 @@ recursive function Make_Tree(node,particle,np,iworknode, iSpareNode0) result(iNe
 
   inextjobnode = iFirstDaughter
   do i = 0, 7
-     if(Division(worknode, tmpnode(i).nump)) then
+     if(Division(worknode, tmpnode(i)%nump)) then
         j = inextjobnode
         k = iSpareNode
         iSpareNode = Make_Tree(node, particle,np, j, k)

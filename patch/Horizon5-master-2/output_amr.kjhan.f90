@@ -41,8 +41,8 @@ subroutine dump_all
      if (.not.withoutmkdir) then 
 #ifdef NOSYSTEM
 !jhshin1
-        call PXFMKDIR(TRIM(filedirini),LEN(TRIM(filedirini)),O'775',info)
-        call PXFMKDIR(TRIM(filedir),LEN(TRIM(filedir)),O'775',info)
+        call PXFMKDIR(TRIM(filedirini),LEN(TRIM(filedirini)),int(O'775'),info)
+        call PXFMKDIR(TRIM(filedir),LEN(TRIM(filedir)),int(O'775'),info)
 !jhshin2
 #else
         call system(filecmd)

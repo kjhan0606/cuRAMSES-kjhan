@@ -108,9 +108,9 @@ subroutine init_part
 
      !Read the yield table
      open(33,file=trim(yieldtablefilename),status='old', form='formatted')
-     read(33,'(a8,I)')a1,nmetal
-     read(33,'(a8,I)')a1,nsteps
-     read(33,'(a11,I)')a1,nelt
+     read(33,'(a8,I10)')a1,nmetal
+     read(33,'(a8,I10)')a1,nsteps
+     read(33,'(a11,I10)')a1,nelt
      yieldtab%na=nsteps
      yieldtab%nz=nmetal
      allocate(elem_list(nelt))

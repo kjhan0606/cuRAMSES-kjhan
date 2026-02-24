@@ -5244,6 +5244,21 @@ subroutine AGN_feedback
   character(LEN=80)::filename,filedir,filecmd
   real(dp),allocatable,dimension(:)::xdp
   integer::nblock,nresidual,istart,iend,nsink_loc
+  interface
+     subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
+          & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
+       use amr_commons, only: dp
+       integer, intent(in) :: nAGN
+       real(dp),dimension(1:nAGN,1:3) :: xAGN, jAGN
+       real(dp),dimension(1:nAGN) :: dMBH_AGN, dMEd_AGN, mAGN, ZAGN
+       real(dp),dimension(1:nAGN) :: vol_gas, mass_gas, psy_norm
+       real(dp),dimension(1:nAGN) :: vol_blast, mass_blast
+       integer ,dimension(1:nAGN) :: ind_blast, iAGN_myid
+       logical ,dimension(1:nAGN) :: ok_blast_agn
+       real(dp),dimension(1:nAGN) :: EsaveAGN, dMsmbh_AGN
+       logical, intent(in), optional :: local_only
+     end subroutine average_AGN
+  end interface
 
   if(.not. hydro)return
   if(ndim.ne.3)return
@@ -5490,6 +5505,21 @@ subroutine AGN_feedback_ksec()
   ! Saved from Exchange 1 processing (for ind_blast lookup)
   integer, allocatable :: ind_blast_ex1(:), owner_cpu_ex1(:), owner_idx_ex1(:)
   integer :: nSN_ex1
+  interface
+     subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
+          & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
+       use amr_commons, only: dp
+       integer, intent(in) :: nAGN
+       real(dp),dimension(1:nAGN,1:3) :: xAGN, jAGN
+       real(dp),dimension(1:nAGN) :: dMBH_AGN, dMEd_AGN, mAGN, ZAGN
+       real(dp),dimension(1:nAGN) :: vol_gas, mass_gas, psy_norm
+       real(dp),dimension(1:nAGN) :: vol_blast, mass_blast
+       integer ,dimension(1:nAGN) :: ind_blast, iAGN_myid
+       logical ,dimension(1:nAGN) :: ok_blast_agn
+       real(dp),dimension(1:nAGN) :: EsaveAGN, dMsmbh_AGN
+       logical, intent(in), optional :: local_only
+     end subroutine average_AGN
+  end interface
 
   ! Owner aggregation arrays
   real(dp), allocatable :: vol_gas_agg(:), mass_gas_agg(:), psy_norm_agg(:)

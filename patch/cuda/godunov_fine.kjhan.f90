@@ -152,6 +152,13 @@ subroutine godunov_fine(ilevel)
   integer::i,ivar,igrid,ncache,ngrid,ic
   integer::nthreads,tid,it
   type(scatter_buf_t), allocatable :: cpu_scatter_bufs(:)
+  interface
+     subroutine godfine1(ilevel, jgrid, mgrid, sbuf)
+       use hydro_scatter_commons
+       integer, intent(in) :: ilevel, jgrid, mgrid
+       type(scatter_buf_t), intent(inout), optional :: sbuf
+     end subroutine godfine1
+  end interface
 #ifdef HYDRO_CUDA
   logical, save :: cuda_init_done = .false.
 #endif

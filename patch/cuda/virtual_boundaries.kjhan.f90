@@ -317,7 +317,7 @@ subroutine authorize_fine(ilevel)
   n_nbor(1:3)=(/1,2,3/)
   do ismooth=1,ndim
      ! Initialize flag1 to 0 in virtual cells
-!$omp parallel do firstprivate(icpu,ncache,igrid,ngrid,i,ind_grid,ind,iskip,ind_cell)
+!$omp parallel do private(icpu) firstprivate(ncache,igrid,ngrid,i,ind_grid,ind,iskip,ind_cell)
      do icpu=1,ncpu
         ncache=reception(icpu,ilevel)%ngrid
         do igrid=1,ncache,nvector
@@ -338,7 +338,7 @@ subroutine authorize_fine(ilevel)
      end do
 
      ! Count neighbors and set flag2 accordingly
-!$omp parallel do firstprivate(icpu,ncache,igrid,ngrid,i,ind_grid,ind,igridn)
+!$omp parallel do private(icpu) firstprivate(ncache,igrid,ngrid,i,ind_grid,ind,igridn)
      do icpu=1,ncpu
         ncache=reception(icpu,ilevel)%ngrid
         do igrid=1,ncache,nvector
@@ -354,7 +354,7 @@ subroutine authorize_fine(ilevel)
      end do
 
      ! Set flag2=1 for cells with flag1=1
-!$omp parallel do firstprivate(icpu,ncache,igrid,ngrid,i,ind_grid,ind,iskip,ind_cell)
+!$omp parallel do private(icpu) firstprivate(ncache,igrid,ngrid,i,ind_grid,ind,iskip,ind_cell)
      do icpu=1,ncpu
         ncache=reception(icpu,ilevel)%ngrid
         do igrid=1,ncache,nvector

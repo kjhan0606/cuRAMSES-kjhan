@@ -20,7 +20,7 @@ subroutine morton_hash_rebuild
 
   ! Check that coordinates fit in MORTON_MAXBITS
   do ilevel = 1, nlevelmax
-     if (nx * 2**(ilevel-1) > 2**MORTON_MAXBITS) then
+     if (int(nx, mkb) * 2_mkb**(ilevel-1) > 2_mkb**MORTON_MAXBITS) then
         if (myid==1) then
            write(*,*) 'Morton hash: ERROR - level', ilevel, &
                 ' exceeds coordinate range'

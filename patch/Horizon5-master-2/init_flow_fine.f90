@@ -101,9 +101,9 @@ subroutine init_flow_fine(ilevel)
   !---------------------------------------------
 
   open(34,file=trim(yieldtablefilename),status='old', form='formatted')
-  read(34,'(a8,I)')a1,dum
-  read(34,'(a8,I)')a1,dum
-  read(34,'(a11,I)')a1,nelt
+  read(34,'(a8,I10)')a1,dum
+  read(34,'(a8,I10)')a1,dum
+  read(34,'(a11,I10)')a1,nelt
   allocate(elem_list_local(dum))
   write(nelt_str,'(I2.2)') nelt
   if(nelt.gt.0)then

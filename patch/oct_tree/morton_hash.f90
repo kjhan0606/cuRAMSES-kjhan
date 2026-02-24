@@ -71,23 +71,26 @@ contains
   end subroutine morton_hash_destroy
 
   !--------------------------------------------------------------
-  ! Hash function: multiplicative hashing for 64-bit keys
+  ! Hash function: 128→64 XOR fold, then multiplicative hashing
   ! Returns 1-based slot index in [1, capacity]
   !--------------------------------------------------------------
   pure function morton_hash_func(key, capacity) result(slot)
     integer(mkb), intent(in) :: key
     integer, intent(in) :: capacity
     integer :: slot
-    integer(mkb) :: h
+    integer(8) :: h
+
+    ! XOR fold 128-bit key to 64-bit
+    h = ieor(int(key, 8), int(ishft(key, -64), 8))
 
     ! Multiplicative hash (Knuth's golden ratio method)
-    h = key * 2654435761_mkb
+    h = h * 2654435761_8
     h = ieor(h, ishft(h, -16))
-    h = h * (-7046029254386353131_mkb)  ! 0x9E3779B97F4A7C15
+    h = h * (-7046029254386353131_8)  ! 0x9E3779B97F4A7C15
     h = ieor(h, ishft(h, -13))
 
     ! Map to [1, capacity]  (capacity is power of 2)
-    slot = int(iand(h, int(capacity - 1, mkb))) + 1
+    slot = int(iand(h, int(capacity - 1, 8))) + 1
   end function morton_hash_func
 
   !--------------------------------------------------------------
@@ -228,12 +231,12 @@ contains
     use amr_commons, only: nx, ny, nz
     integer, intent(in) :: igrid, ilevel, j
     integer :: igridn
-    integer :: nmax_x, nmax_y, nmax_z
+    integer(mkb) :: nmax_x, nmax_y, nmax_z
     integer(mkb) :: mkey, nkey
 
-    nmax_x = nx * 2**(ilevel-1)
-    nmax_y = ny * 2**(ilevel-1)
-    nmax_z = nz * 2**(ilevel-1)
+    nmax_x = int(nx, mkb) * 2_mkb**(ilevel-1)
+    nmax_y = int(ny, mkb) * 2_mkb**(ilevel-1)
+    nmax_z = int(nz, mkb) * 2_mkb**(ilevel-1)
 
     mkey = grid_to_morton(igrid, ilevel)
     nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
@@ -254,13 +257,14 @@ contains
     use amr_commons, only: nx, ny, nz, ncoarse, ngridmax
     integer, intent(in) :: igrid, ilevel, j
     integer :: icell
-    integer :: nmax_x, nmax_y, nmax_z
-    integer :: nix, niy, niz, pix, piy, piz, ind_oct, igrid_parent
+    integer(mkb) :: nmax_x, nmax_y, nmax_z
+    integer(mkb) :: nix, niy, niz, pix, piy, piz
+    integer :: ind_oct, igrid_parent
     integer(mkb) :: mkey, nkey, pkey
 
-    nmax_x = nx * 2**(ilevel-1)
-    nmax_y = ny * 2**(ilevel-1)
-    nmax_z = nz * 2**(ilevel-1)
+    nmax_x = int(nx, mkb) * 2_mkb**(ilevel-1)
+    nmax_y = int(ny, mkb) * 2_mkb**(ilevel-1)
+    nmax_z = int(nz, mkb) * 2_mkb**(ilevel-1)
 
     mkey = grid_to_morton(igrid, ilevel)
     nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
@@ -273,14 +277,14 @@ contains
     call morton_decode(nkey, nix, niy, niz)
 
     if (ilevel == 1) then
-       ! Coarse cell
-       icell = 1 + nix + niy*nx + niz*nx*ny
+       ! Coarse cell (safe downcast: level 1 coords always small)
+       icell = 1 + int(nix) + int(niy)*nx + int(niz)*nx*ny
     else
        ! Fine cell: find parent grid at level ilevel-1
-       pix = nix / 2
-       piy = niy / 2
-       piz = niz / 2
-       ind_oct = 1 + mod(nix,2) + 2*mod(niy,2) + 4*mod(niz,2)
+       pix = nix / 2_mkb
+       piy = niy / 2_mkb
+       piz = niz / 2_mkb
+       ind_oct = 1 + int(mod(nix, 2_mkb)) + 2*int(mod(niy, 2_mkb)) + 4*int(mod(niz, 2_mkb))
        pkey = morton_encode(pix, piy, piz)
        igrid_parent = morton_hash_lookup(mort_table(ilevel-1), pkey)
        if (igrid_parent > 0) then

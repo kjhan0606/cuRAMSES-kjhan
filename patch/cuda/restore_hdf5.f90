@@ -45,7 +45,8 @@ subroutine restore_amr_hdf5()
 
   ! Grid creation variables
   integer :: igrid_new, igrid_prev_cpu, igrid_father, ind_cell
-  integer :: ix, iy, iz, ix_p, iy_p, iz_p, nxny
+  integer(mkb) :: ix, iy, iz, ix_p, iy_p, iz_p
+  integer :: nxny
   integer :: ngrid_all_int, icpu, grid_offset
   integer(mkb) :: mkey
   real(dp) :: twotol
@@ -197,7 +198,7 @@ subroutine restore_amr_hdf5()
      do iz = kcoarse_min, kcoarse_max
      do iy = jcoarse_min, jcoarse_max
      do ix = icoarse_min, icoarse_max
-        ind = 1 + ix + iy * nx + iz * nxny
+        ind = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
         xx_cell(1,1) = (dble(ix) + 0.5d0 - dble(icoarse_min)) * scale
         xx_cell(1,2) = (dble(iy) + 0.5d0 - dble(jcoarse_min)) * scale
         xx_cell(1,3) = (dble(iz) + 0.5d0 - dble(kcoarse_min)) * scale
@@ -367,22 +368,22 @@ subroutine restore_amr_hdf5()
            ! Compute father cell index
            if(ilevel == 1) then
               twotol = 1.0d0
-              ix = int(xg_all(i, 1) * twotol)
-              iy = int(xg_all(i, 2) * twotol)
-              iz = int(xg_all(i, 3) * twotol)
-              father_cell = 1 + ix + iy * nx + iz * nxny
+              ix = int(xg_all(i, 1) * twotol, mkb)
+              iy = int(xg_all(i, 2) * twotol, mkb)
+              iz = int(xg_all(i, 3) * twotol, mkb)
+              father_cell = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
            else
               twotol = 2.0d0**(ilevel-1)
-              ix = int(xg_all(i, 1) * twotol)
-              iy = int(xg_all(i, 2) * twotol)
-              iz = int(xg_all(i, 3) * twotol)
-              ix_p = ix / 2
-              iy_p = iy / 2
-              iz_p = iz / 2
+              ix = int(xg_all(i, 1) * twotol, mkb)
+              iy = int(xg_all(i, 2) * twotol, mkb)
+              iz = int(xg_all(i, 3) * twotol, mkb)
+              ix_p = ix / 2_mkb
+              iy_p = iy / 2_mkb
+              iz_p = iz / 2_mkb
               mkey = morton_encode(ix_p, iy_p, iz_p)
               igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
               if(igrid_father == 0) cycle  ! Father not on this rank → not active
-              ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
+              ind_cell = 1 + int(mod(ix, 2_mkb)) + 2 * int(mod(iy, 2_mkb)) + 4 * int(mod(iz, 2_mkb))
               father_cell = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
            end if
 
@@ -587,18 +588,18 @@ subroutine restore_amr_hdf5()
               ! Set father pointer
               if(ilevel == 1) then
                  twotol = 1.0d0
-                 ix = int(xg_all(ind, 1) * twotol)
-                 iy = int(xg_all(ind, 2) * twotol)
-                 iz = int(xg_all(ind, 3) * twotol)
-                 father(igrid_new) = 1 + ix + iy * nx + iz * nxny
+                 ix = int(xg_all(ind, 1) * twotol, mkb)
+                 iy = int(xg_all(ind, 2) * twotol, mkb)
+                 iz = int(xg_all(ind, 3) * twotol, mkb)
+                 father(igrid_new) = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
               else
                  twotol = 2.0d0**(ilevel-1)
-                 ix = int(xg_all(ind, 1) * twotol)
-                 iy = int(xg_all(ind, 2) * twotol)
-                 iz = int(xg_all(ind, 3) * twotol)
-                 ix_p = ix / 2
-                 iy_p = iy / 2
-                 iz_p = iz / 2
+                 ix = int(xg_all(ind, 1) * twotol, mkb)
+                 iy = int(xg_all(ind, 2) * twotol, mkb)
+                 iz = int(xg_all(ind, 3) * twotol, mkb)
+                 ix_p = ix / 2_mkb
+                 iy_p = iy / 2_mkb
+                 iz_p = iz / 2_mkb
                  mkey = morton_encode(ix_p, iy_p, iz_p)
                  igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
                  if(igrid_father == 0) then
@@ -607,7 +608,7 @@ subroutine restore_amr_hdf5()
                          ' ix_p=', ix_p, ' iy_p=', iy_p, ' iz_p=', iz_p
                     call clean_stop
                  end if
-                 ind_cell = 1 + mod(ix, 2) + 2 * mod(iy, 2) + 4 * mod(iz, 2)
+                 ind_cell = 1 + int(mod(ix, 2_mkb)) + 2 * int(mod(iy, 2_mkb)) + 4 * int(mod(iz, 2_mkb))
                  father(igrid_new) = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
               end if
 

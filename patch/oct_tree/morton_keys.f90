@@ -8,48 +8,44 @@ module morton_keys
   ! Provides O(1) bit-operation neighbor finding to replace
   ! the nbor() array indirection.
   !
-  ! Morton key layout (64-bit signed integer, using bits 0-62):
+  ! Morton key layout (128-bit signed integer, using bits 0-125):
   !   bit 3*i+0 = x coordinate bit i
   !   bit 3*i+1 = y coordinate bit i
   !   bit 3*i+2 = z coordinate bit i
-  ! for i = 0..20  (21 bits per coordinate, 63 bits total)
+  ! for i = 0..41  (42 bits per coordinate, 126 bits total)
   !
-  ! Maximum coordinate value: 2^21 - 1 = 2,097,151
-  ! For nx=1: supports up to level 22
-  ! For nx=4: supports up to level 20
+  ! Maximum coordinate value: 2^42 - 1 = 4,398,046,511,103
+  ! For nx=1: supports up to level 43
+  ! For nx=4: supports up to level 41
   !--------------------------------------------------------------
   use amr_parameters, only: dp, ndim
   implicit none
 
-  ! Always use 8-byte integers for Morton keys
-  integer, parameter :: mkb = 8
+  ! Always use 16-byte integers for Morton keys (128-bit)
+  integer, parameter :: mkb = 16
 
-  ! Maximum bits per coordinate (21 bits → 63 total, fits in i8b)
-  integer, parameter :: MORTON_MAXBITS = 21
+  ! Maximum bits per coordinate (42 bits → 126 total, fits in i16b)
+  integer, parameter :: MORTON_MAXBITS = 42
 
 contains
 
   !--------------------------------------------------------------
-  ! Interleave bits of (ix, iy, iz) into a 63-bit Morton key
+  ! Interleave bits of (ix, iy, iz) into a 126-bit Morton key
   !--------------------------------------------------------------
   pure function morton_encode(ix, iy, iz) result(key)
-    integer, intent(in) :: ix, iy, iz
+    integer(mkb), intent(in) :: ix, iy, iz
     integer(mkb) :: key
-    integer(mkb) :: x, y, z
     integer :: i
 
     key = 0_mkb
-    x = int(ix, mkb)
-    y = int(iy, mkb)
-    z = int(iz, mkb)
 
     do i = 0, MORTON_MAXBITS - 1
        ! x bit i → position 3*i
-       key = ior(key, ishft(iand(ishft(x, -i), 1_mkb), 3*i))
+       key = ior(key, ishft(iand(ishft(ix, -i), 1_mkb), 3*i))
        ! y bit i → position 3*i+1
-       key = ior(key, ishft(iand(ishft(y, -i), 1_mkb), 3*i+1))
+       key = ior(key, ishft(iand(ishft(iy, -i), 1_mkb), 3*i+1))
        ! z bit i → position 3*i+2
-       key = ior(key, ishft(iand(ishft(z, -i), 1_mkb), 3*i+2))
+       key = ior(key, ishft(iand(ishft(iz, -i), 1_mkb), 3*i+2))
     end do
   end function morton_encode
 
@@ -58,19 +54,15 @@ contains
   !--------------------------------------------------------------
   pure subroutine morton_decode(key, ix, iy, iz)
     integer(mkb), intent(in) :: key
-    integer, intent(out) :: ix, iy, iz
-    integer(mkb) :: x, y, z
+    integer(mkb), intent(out) :: ix, iy, iz
     integer :: i
 
-    x = 0_mkb; y = 0_mkb; z = 0_mkb
+    ix = 0_mkb; iy = 0_mkb; iz = 0_mkb
     do i = 0, MORTON_MAXBITS - 1
-       x = ior(x, ishft(iand(ishft(key, -(3*i  )), 1_mkb), i))
-       y = ior(y, ishft(iand(ishft(key, -(3*i+1)), 1_mkb), i))
-       z = ior(z, ishft(iand(ishft(key, -(3*i+2)), 1_mkb), i))
+       ix = ior(ix, ishft(iand(ishft(key, -(3*i  )), 1_mkb), i))
+       iy = ior(iy, ishft(iand(ishft(key, -(3*i+1)), 1_mkb), i))
+       iz = ior(iz, ishft(iand(ishft(key, -(3*i+2)), 1_mkb), i))
     end do
-    ix = int(x)
-    iy = int(y)
-    iz = int(z)
   end subroutine morton_decode
 
   !--------------------------------------------------------------
@@ -82,9 +74,10 @@ contains
   !--------------------------------------------------------------
   pure function morton_neighbor(key, dir, nmax_x, nmax_y, nmax_z) result(nkey)
     integer(mkb), intent(in) :: key
-    integer, intent(in) :: dir, nmax_x, nmax_y, nmax_z
+    integer, intent(in) :: dir
+    integer(mkb), intent(in) :: nmax_x, nmax_y, nmax_z
     integer(mkb) :: nkey
-    integer :: ix, iy, iz
+    integer(mkb) :: ix, iy, iz
 
     call morton_decode(key, ix, iy, iz)
 
@@ -155,13 +148,13 @@ contains
     use amr_commons, only: xg
     integer, intent(in) :: igrid, ilevel
     integer(mkb) :: key
-    integer :: ix, iy, iz
+    integer(mkb) :: ix, iy, iz
     real(dp) :: twotol
 
     twotol = 2.0d0**(ilevel-1)
-    ix = int(xg(igrid, 1) * twotol)
-    iy = int(xg(igrid, 2) * twotol)
-    iz = int(xg(igrid, 3) * twotol)
+    ix = int(xg(igrid, 1) * twotol, mkb)
+    iy = int(xg(igrid, 2) * twotol, mkb)
+    iz = int(xg(igrid, 3) * twotol, mkb)
 
     key = morton_encode(ix, iy, iz)
   end function grid_to_morton

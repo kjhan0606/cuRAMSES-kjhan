@@ -1212,7 +1212,8 @@ subroutine precompute_nbor_active(ilevel)
   implicit none
   integer, intent(in) :: ilevel
   integer :: ncache, igrid, igrid_amr, j
-  integer :: l, nmax_x, nmax_y, nmax_z
+  integer :: l
+  integer(mkb) :: nmax_x, nmax_y, nmax_z
   integer(mkb) :: mkey, nkey
 
   ncache = active(ilevel)%ngrid
@@ -1222,9 +1223,9 @@ subroutine precompute_nbor_active(ilevel)
   allocate(nbor_active_cache(0:twondim, 1:ncache))
 
   l = ilevel
-  nmax_x = nx * 2**(l-1)
-  nmax_y = ny * 2**(l-1)
-  nmax_z = nz * 2**(l-1)
+  nmax_x = int(nx, mkb) * 2_mkb**(l-1)
+  nmax_y = int(ny, mkb) * 2_mkb**(l-1)
+  nmax_z = int(nz, mkb) * 2_mkb**(l-1)
 
 !$omp parallel do private(igrid, igrid_amr, j, mkey, nkey)
   do igrid = 1, ncache

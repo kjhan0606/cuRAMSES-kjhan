@@ -37,8 +37,10 @@ DEFINES = -DNVECTOR=$(NVECTOR) -DNDIM=$(NDIM) -DNPRE=$(NPRE) -DNENER=$(NENER) -D
 
 # --- MPI, ifort syntax ------------------------------
 #F90 = mpif90 -openmp #-xMIC-AVX512
-F90 = mpiifx -qopenmp -march=core-avx2
-FFLAGS = -cpp -O3 $(DEFINES) -DNOSYSTEM -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+#F90 = mpiifx -qopenmp -march=core-avx2
+# --- MPI, gfortran syntax (128-bit integer support) ---
+F90 = mpif90 -fopenmp -march=native
+FFLAGS = -cpp -Ofast -march=native -funroll-loops -ftree-vectorize -ffast-math -ffree-line-length-none -Wno-line-truncation -fno-range-check -std=legacy $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
 
 #############################################################################
 # HDF5 parallel I/O support (build with: make HDF5=1)
@@ -161,6 +163,9 @@ write_patch.o: FORCE
 	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
+# GCC ICE workaround: friedman() crashes with -Ofast
+init_time.o: init_time.f90
+	$(F90) $(subst -Ofast,-O2,$(FFLAGS)) -c $^ -o $@
 ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
