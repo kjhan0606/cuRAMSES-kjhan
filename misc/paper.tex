@@ -418,26 +418,7 @@ The parameter \code{nremap} controls the frequency of load-rebalancing
 operations (every \code{nremap} coarse steps). We changed the default
 from \code{nremap = 0} (rebalance every step) to \code{nremap = 5}
 based on systematic tests with $200\,\mathrm{M}$ particles on 12 ranks over
-10 coarse steps:
-
-\begin{table}
-\centering
-\caption{Effect of \code{nremap} on total runtime and load-balance
-overhead. All configurations produce identical physics results
-($e_{\rm cons} = 3.77 \times 10^{-3}$ at step 10).}
-\label{tab:nremap}
-\begin{tabular}{cccc}
-\toprule
-\code{nremap} & Total (s) & LB time (s) & LB fraction \\
-\midrule
-1  & 303.8 & 64.4 & 21.2\% \\
-3  & 269.9 & 24.7 &  9.1\% \\
-5  & 249.8 & 15.7 &  6.3\% \\
-10 & 258.6 & 11.6 &  4.5\% \\
-\bottomrule
-\end{tabular}
-\end{table}
-
+10 coarse steps.
 The optimal value \code{nremap = 5} balances the cost of rebalancing
 against the growing imbalance that accumulates between rebalancing
 steps. Higher values ($\code{nremap} = 10$) reduce LB overhead further
