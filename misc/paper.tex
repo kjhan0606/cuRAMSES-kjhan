@@ -265,8 +265,7 @@ ranks with non-zero counts; in the worst case, every rank communicates
 with every other rank, yielding $\Olog{\ncpu^2}$ total messages.
 Second, the Hilbert key computation requires a large per-rank array
 \code{hilbert\_key(1:ncell)} of 16 bytes per cell (when compiled with
-\code{QUADHILBERT}), totalling $\sim$640\,MB at $\ngridmax = 5 \times
-10^6$.
+\code{QUADHILBERT}), totalling $\sim$640\,MB at $\ngridmax = 5\,\mathrm{M}$.
 
 Our recursive \ksec\ decomposition replaces the one-dimensional Hilbert
 partitioning with a recursive spatial partitioning in the original
