@@ -497,36 +497,13 @@ The \ksec\ backend replaces the global communication pattern with a
 hierarchical tree walk using the domain decomposition tree described
 in Section~\ref{sec:ksec_tree}.  The algorithm walks the tree from
 root to leaf, where each node represents a contiguous group of MPI
-ranks (Algorithm~\ref{alg:exclusive}).  At each level~$l$, a node is
+ranks.  At each level~$l$, a node is
 partitioned into $k_l$ child nodes; each rank communicates with at
 most $k_l - 1$ correspondents (one per sibling subtree).  Within a
 sibling of size $s$, the correspondent is the rank at offset
 $\min(p,\, s-1)$, where $p$ is the calling rank's position inside its
 own child group; this spreads the communication load evenly across the
 sibling rather than funnelling all traffic to a single rank.
-
-\begin{algorithm}[H]
-\caption{Hierarchical \ksec\ exchange}
-\label{alg:exclusive}
-\begin{algorithmic}[1]
-\REQUIRE Send buffer $\mathbf{S}$ with $N$ items, destination ranks $\mathbf{d}$
-\ENSURE Receive buffer $\mathbf{R}$ with items destined for this rank
-\STATE $\mathbf{W} \leftarrow \mathbf{S}$; $\mathbf{D} \leftarrow \mathbf{d}$; node $\leftarrow$ root
-\FOR{$l = 1$ \TO $L$}
-  \STATE $k \leftarrow k_l$; my\_child $\leftarrow$ \code{ksec\_cpu\_path}(myid, $l$)
-  \STATE Classify items in $\mathbf{W}$ by child index (counting sort on $\mathbf{D}$)
-  \STATE Identify $k-1$ correspondent ranks (one per sibling child)
-  \FOR{each correspondent $p$}
-    \STATE Exchange count: \code{MPI\_ISEND/IRECV} (tag $100+l$)
-    \STATE Exchange data: \code{MPI\_ISEND/IRECV} (tags $200+l$, $300+l$)
-  \ENDFOR
-  \STATE \code{MPI\_WAITALL}
-  \STATE $\mathbf{W} \leftarrow$ merge(my\_child items, received items)
-  \STATE node $\leftarrow$ \code{ksec\_next}(node, my\_child)
-\ENDFOR
-\STATE $\mathbf{R} \leftarrow \mathbf{W}$
-\end{algorithmic}
-\end{algorithm}
 
 The total number of messages per rank per exchange is
 \begin{equation}

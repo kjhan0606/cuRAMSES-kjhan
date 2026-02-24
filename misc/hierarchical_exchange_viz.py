@@ -174,7 +174,7 @@ stages = [
             {'pair': (8, 9),   'color': '#4444AA'},
             {'pair': (10, 11), 'color': '#4444AA'},
         ],
-        'groups': groups_lv2,
+        'groups': [],
     },
 ]
 
