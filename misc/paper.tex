@@ -540,6 +540,10 @@ internally optimises \code{MPI\_ALLTOALLV} to skip zero-length
 messages, a rank with six neighbours must still perform at least six
 pairwise transfers (and often more on non-ideal interconnects), so the
 \ksec\ message count of $\Olog{\sum_l k_l}$ remains competitive.
+Crucially, $N_{\rm msg}$ depends only on the prime factorization of
+$\ncpu$ and is completely independent of the degree of particle
+clustering or the AMR refinement level, so the communication topology
+remains fixed regardless of how complex the simulation becomes.
 Figure~\ref{fig:hier_exchange} illustrates the communication pattern
 for $\ncpu = 12\,(= 3 \times 2 \times 2)$. At level~1 ($k_1 = 3$),
 the 12 ranks are grouped into three children of four ranks each. Each
