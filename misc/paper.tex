@@ -222,7 +222,12 @@ modifications to \ramses\ that addresses each of these challenges. We
 introduce a recursive \ksec\ domain decomposition
 (Section~\ref{sec:ksection}) that replaces Hilbert ordering with a
 hierarchical multi-way spatial partitioning, enabling MPI exchange with
-$\Olog{\sum_l k_l}$ messages per operation. A spatial hash binning
+$\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table \citep{Morton1966}
+(Section~\ref{sec:morton}) eliminates the \code{nbor} array entirely
+and, together with on-demand allocation of redundant large arrays,
+saves over 1\,GB of memory per rank. Algorithmic optimizations to the multigrid Poisson
+solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
+from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
 scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
 AGN feedback by orders of magnitude. We also implement variable-$\ncpu$
 restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}).
