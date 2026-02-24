@@ -432,19 +432,11 @@ steps. Higher values ($\code{nremap} = 10$) reduce LB overhead further
 but allow imbalance to grow enough to slow other operations, resulting
 in a net increase in total runtime.
 
-To identify bottlenecks in the load-balancing procedure, we added
-internal timing instrumentation that reports the wall-clock time of
-each phase:
-(i) \code{numbp\_sync} (MPI synchronization of particle counts for
-virtual grids),
-(ii) \code{cmp\_new\_cpu\_map} (histogram construction and wall
-finding),
-(iii) \code{expand\_pass} (ghost-zone expansion after grid migration),
-(iv) \code{grid\_migration} (actual grid transfer between ranks),
-(v) \code{allreduce+cpumap\_update} (global reduction and CPU map
-reconstruction), and
-(vi) \code{shrink\_pass} (removal of migrated grids from source rank).
-Profiling reveals that \code{allreduce+cpumap\_update} dominates,
+Internal timing instrumentation breaks the load-balancing cost into
+two categories: \emph{communication} (MPI synchronization, global
+reductions, and grid migration between ranks) and \emph{local
+computation} (histogram construction, ghost-zone expansion, and grid
+bookkeeping updates). Profiling shows that communication dominates,
 consuming approximately 50\,per\,cent of the total load-balance time.
 This motivates the \code{nremap = 5} default, as reducing the
 frequency of these expensive global operations has a disproportionate
@@ -461,10 +453,10 @@ particle flags, and density contributions. Each exchange involves
 the same algorithmic pattern (pack data from local grids, transfer to
 remote ranks, unpack into ghost zones), but the underlying MPI
 transport can be realised in fundamentally different ways.
-\curamses\ implements three exchange backends and selects among them
+\curamses\ implements three exchange methods and selects among them
 adaptively at runtime.
 
-\subsection{Exchange Backends}
+\subsection{Exchange Methods}
 \label{sec:exchange_backends}
 
 \subsubsection{Point-to-point (P2P)}
@@ -482,7 +474,7 @@ communication partners is determined by the domain geometry (typically
 6--8 for three-dimensional cubic sub-domains), so the partner count is
 independent of $\ncpu$. The P2P backend has low latency for sparse
 neighbour sets and is the best choice when each rank communicates with
-only a few neighbours.
+only a few neighbours when the clustering is not strong or the AMR level is not high.
 
 \subsubsection{MPI\_ALLTOALLV}
 \label{sec:backend_alltoall}
