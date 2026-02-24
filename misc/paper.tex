@@ -710,7 +710,7 @@ source of code complexity and a potential source of bugs.
 \subsection{Morton Key Encoding and Neighbour Arithmetic}
 \label{sec:morton_encoding}
 
-A Morton key (also known as a Z-order key) is a 64-bit integer formed
+A Morton key (also known as a Z-order key) is a 128-bit integer formed
 by interleaving the bits of the three-dimensional integer coordinates
 $(i_x, i_y, i_z)$ of a grid at its AMR level:
 \begin{equation}
@@ -722,14 +722,14 @@ M(i_x, i_y, i_z) = \sum_{b=0}^{B-1}
 \Bigr],
 \label{eq:morton_encode}
 \end{equation}
-where $B = 21$ bits per coordinate and $\text{bit}_b(n)$
+where $B = 42$ bits per coordinate and $\text{bit}_b(n)$
 extracts bit $b$ of integer $n$. Here $n_x$ denotes the number of
 coarse-level grid cells per dimension (a \ramses\ parameter, typically
 1--4). At AMR level $l$, there are $n_x \cdot 2^{l-1}$ grid cells
 per dimension, so the integer coordinate range is $[0,\, n_x \cdot
-2^{l-1})$. With $B = 21$ bits the maximum representable coordinate is
-$2^{21} - 1 = 2\,097\,151$, which accommodates up to level 22 for
-$n_x = 1$ or level 20 for $n_x = 4$. The encoding and decoding
+2^{l-1})$. With $B = 42$ bits the maximum representable coordinate is
+$2^{42} - 1 \approx 4.4 \times 10^{12}$, which accommodates up to level 43 for
+$n_x = 1$ or level 41 for $n_x = 4$. The encoding and decoding
 (the inverse map $(i_x, i_y, i_z) = M^{-1}(\text{key})$) are
 implemented with simple bit-shift loops.
 
@@ -821,11 +821,11 @@ with any remaining references.
   original \code{nbor} array.  Left: the eliminated
   \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5\,\mathrm{M}$).
   Right: the replacement workflow, where grid cell coordinates
-  $(i_x, i_y, i_z)$ are bit-interleaved into a 64-bit Morton key $M$,
+  $(i_x, i_y, i_z)$ are bit-interleaved into a 128-bit Morton key $M$,
   which is mapped to a grid index \code{igrid} via a per-level
   open-addressing hash table with multiplicative hashing.  The hash
-  table memory footprint is $\approx 17\,N_{\rm grids}$ bytes
-  (typically $<$50\,MB), yielding a net saving of $>$190\,MB per rank.}
+  table memory footprint is $\approx 29\,N_{\rm grids}$ bytes
+  (typically $<$90\,MB), yielding a net saving of $>$150\,MB per rank.}
 \label{fig:morton_hash}
 \end{figure*}
 
@@ -861,11 +861,11 @@ vast majority of the simulation.
 The memory cost of the hash table is
 \begin{equation}
 M_{\rm hash} \approx \frac{N_{\rm grids}}{0.7} \times
-(8 + 4) \text{ bytes} \approx 17\,N_{\rm grids} \text{ bytes},
+(16 + 4) \text{ bytes} \approx 29\,N_{\rm grids} \text{ bytes},
 \label{eq:hash_memory}
 \end{equation}
 where $N_{\rm grids}$ is the actual number of grids (typically much
-less than $\ngridmax$), 8 bytes per key, 4 bytes per grid index, and
+less than $\ngridmax$), 16 bytes per key, 4 bytes per grid index, and
 a load factor of 0.7 accounts for empty slots. The
 \code{grid\_level} array adds $4 \times \ngridmax$ bytes.
 
@@ -2522,14 +2522,14 @@ position to its owning MPI rank by walking the \ksec\ tree.
 \label{app:morton}
 
 The Morton key interleaving for a single coordinate value $v$ with
-$B = 21$ bits is computed by the following bit-manipulation loop:
+$B = 42$ bits is computed by the following bit-manipulation loop:
 
 \begin{algorithm}[H]
 \caption{Morton key encoding of $(i_x, i_y, i_z)$}
 \label{alg:morton_encode}
 \begin{algorithmic}[1]
 \REQUIRE Integer coordinates $(i_x, i_y, i_z)$
-\ENSURE 63-bit Morton key $M$
+\ENSURE 126-bit Morton key $M$
 \STATE $M \leftarrow 0$
 \FOR{$b = 0$ \TO $B - 1$}
   \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_x) \ll 3b)$
