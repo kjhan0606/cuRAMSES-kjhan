@@ -546,10 +546,31 @@ The \texttt{nbor} array (6 neighbor pointers per grid) was replaced with a Morto
 
 \section{Morton Key}
 
-A 64-bit Morton key is computed by interleaving the 3D integer coordinates (21 bits per dimension):
+A Morton key is computed by interleaving the 3D integer coordinates:
 \[
 \text{key} = \text{interleave}\bigl(\lfloor x_g \cdot 2^{l-1} \rfloor,\; \lfloor y_g \cdot 2^{l-1} \rfloor,\; \lfloor z_g \cdot 2^{l-1} \rfloor\bigr)
 \]
+
+Two precision modes are available, selected at compile time:
+
+\begin{center}
+\begin{tabular}{lcccc}
+\hline
+Mode & Key size & Bits/coord & Max level ($n_x=1$) & Compiler \\
+\hline
+64-bit (default) & 8 bytes & 21 & 22 & ifx or gfortran \\
+128-bit (\texttt{MORTON128=1}) & 16 bytes & 42 & 43 & gfortran only \\
+\hline
+\end{tabular}
+\end{center}
+
+\noindent Build commands:
+\begin{verbatim}
+make HDF5=1                 # 64-bit Morton (ifx, ~2.5x faster)
+make HDF5=1 MORTON128=1     # 128-bit Morton (gfortran)
+\end{verbatim}
+
+\noindent For $n_x=4$ (e.g., HR5), the maximum level is reduced by 2: \texttt{levelmax}$\le$20 (64-bit) or $\le$41 (128-bit). All routines use the parametric kind \texttt{mkb}, so no code changes are needed beyond the preprocessor flag.
 
 \section{Hash Table}
 

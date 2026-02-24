@@ -710,7 +710,7 @@ source of code complexity and a potential source of bugs.
 \subsection{Morton Key Encoding and Neighbour Arithmetic}
 \label{sec:morton_encoding}
 
-A Morton key (also known as a Z-order key) is a 128-bit integer formed
+A Morton key (also known as a Z-order key) is an integer formed
 by interleaving the bits of the three-dimensional integer coordinates
 $(i_x, i_y, i_z)$ of a grid at its AMR level:
 \begin{equation}
@@ -722,14 +722,23 @@ M(i_x, i_y, i_z) = \sum_{b=0}^{B-1}
 \Bigr],
 \label{eq:morton_encode}
 \end{equation}
-where $B = 42$ bits per coordinate and $\text{bit}_b(n)$
-extracts bit $b$ of integer $n$. Here $n_x$ denotes the number of
+where $B$ is the number of bits per coordinate and $\text{bit}_b(n)$
+extracts bit $b$ of integer $n$.
+Two key widths are supported via a compile-time flag:
+a 64-bit key with $B = 21$ (default, compatible with the Intel \texttt{ifx}
+compiler), and a 128-bit key with $B = 42$ (requiring \texttt{gfortran}
+for its \texttt{integer(16)} support).
+Here $n_x$ denotes the number of
 coarse-level grid cells per dimension (a \ramses\ parameter, typically
 1--4). At AMR level $l$, there are $n_x \cdot 2^{l-1}$ grid cells
 per dimension, so the integer coordinate range is $[0,\, n_x \cdot
-2^{l-1})$. With $B = 42$ bits the maximum representable coordinate is
-$2^{42} - 1 \approx 4.4 \times 10^{12}$, which accommodates up to level 43 for
-$n_x = 1$ or level 41 for $n_x = 4$. The encoding and decoding
+2^{l-1})$. With $B = 21$ the maximum level is 22 for $n_x = 1$ or
+20 for $n_x = 4$; with $B = 42$ it increases to level 43 or 41,
+respectively.
+All Morton key routines use a parametric kind parameter
+\code{mkb} (8 or 16 bytes), so the same source code handles both
+widths without modification.
+The encoding and decoding
 (the inverse map $(i_x, i_y, i_z) = M^{-1}(\text{key})$) are
 implemented with simple bit-shift loops.
 
@@ -758,8 +767,8 @@ obtained by:
   $[0, n_d \cdot 2^{l-1})$;
 (iv) re-encoding to obtain the neighbour's Morton key.
 The parent key is obtained by a 3-bit right shift: $M_{\rm parent} =
-M \gg 3$. A child key is obtained by a 3-bit left shift plus the
-child index (0--7): $M_{\rm child} = (M \ll 3) \,|\, i_{\rm child}$.
+M \text{\texttt{>>}} 3$. A child key is obtained by a 3-bit left shift plus the
+child index (0--7): $M_{\rm child} = (M \text{\texttt{<<}} 3) \,|\, i_{\rm child}$.
 
 
 \subsection{Per-Level Hash Table and Replacement Functions}
@@ -769,15 +778,18 @@ We maintain one open-addressing hash table (probing consecutive slots
 on collision) per AMR level, mapping Morton keys $M$ to grid indices
 \code{igrid}.
 
-The hash function uses multiplicative hashing
+The hash function first reduces the key to 64 bits (for
+128-bit keys, an XOR fold of the upper and lower halves; for 64-bit
+keys, a direct cast), then applies multiplicative hashing
 with an additional mixing step:
 \begin{align}
-t   &= \bigl[(M \times \phi_1) \oplus (M \gg 16)\bigr] \times \phi_2,
+t   &= \bigl[(h \times \phi_1) \oplus (h \text{\texttt{>>}} 16)\bigr] \times \phi_2,
 \nonumber \\
-h(M) &= t \oplus (t \gg 13),
+h(M) &= t \oplus (t \text{\texttt{>>}} 13),
 \label{eq:hash_func}
 \end{align}
-where $\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
+where $h$ is the 64-bit reduced key,
+$\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
 are constants chosen for good bit mixing, and the table capacity is
 always a power of two to allow bitmask modular arithmetic. Collisions
 are resolved by linear probing; the load factor is kept below 0.7 by
@@ -821,7 +833,7 @@ with any remaining references.
   original \code{nbor} array.  Left: the eliminated
   \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5\,\mathrm{M}$).
   Right: the replacement workflow, where grid cell coordinates
-  $(i_x, i_y, i_z)$ are bit-interleaved into a 128-bit Morton key $M$,
+  $(i_x, i_y, i_z)$ are bit-interleaved into a Morton key $M$ (64 or 128 bits),
   which is mapped to a grid index \code{igrid} via a per-level
   open-addressing hash table with multiplicative hashing.  The hash
   table memory footprint is $\approx 29\,N_{\rm grids}$ bytes
@@ -2522,19 +2534,20 @@ position to its owning MPI rank by walking the \ksec\ tree.
 \label{app:morton}
 
 The Morton key interleaving for a single coordinate value $v$ with
-$B = 42$ bits is computed by the following bit-manipulation loop:
+$B$ bits per coordinate ($B = 21$ for 64-bit keys, $B = 42$ for 128-bit keys)
+is computed by the following bit-manipulation loop:
 
 \begin{algorithm}[H]
 \caption{Morton key encoding of $(i_x, i_y, i_z)$}
 \label{alg:morton_encode}
 \begin{algorithmic}[1]
 \REQUIRE Integer coordinates $(i_x, i_y, i_z)$
-\ENSURE 126-bit Morton key $M$
+\ENSURE $3B$-bit Morton key $M$
 \STATE $M \leftarrow 0$
 \FOR{$b = 0$ \TO $B - 1$}
-  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_x) \ll 3b)$
-  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_y) \ll (3b+1))$
-  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_z) \ll (3b+2))$
+  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_x) \text{\texttt{<<}} 3b)$
+  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_y) \text{\texttt{<<}} (3b+1))$
+  \STATE $M \leftarrow M \,|\, (\text{bit}_b(i_z) \text{\texttt{<<}} (3b+2))$
 \ENDFOR
 \end{algorithmic}
 \end{algorithm}

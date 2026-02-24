@@ -8,24 +8,20 @@ module morton_keys
   ! Provides O(1) bit-operation neighbor finding to replace
   ! the nbor() array indirection.
   !
-  ! Morton key layout (128-bit signed integer, using bits 0-125):
-  !   bit 3*i+0 = x coordinate bit i
-  !   bit 3*i+1 = y coordinate bit i
-  !   bit 3*i+2 = z coordinate bit i
-  ! for i = 0..41  (42 bits per coordinate, 126 bits total)
-  !
-  ! Maximum coordinate value: 2^42 - 1 = 4,398,046,511,103
-  ! For nx=1: supports up to level 43
-  ! For nx=4: supports up to level 41
+  ! Compile with -DMORTON128 for 128-bit keys (42 bits/coord,
+  ! level 43, requires gfortran), default is 64-bit keys
+  ! (21 bits/coord, level 22, works with ifx and gfortran).
   !--------------------------------------------------------------
   use amr_parameters, only: dp, ndim
   implicit none
 
-  ! Always use 16-byte integers for Morton keys (128-bit)
-  integer, parameter :: mkb = 16
-
-  ! Maximum bits per coordinate (42 bits → 126 total, fits in i16b)
-  integer, parameter :: MORTON_MAXBITS = 42
+#ifdef MORTON128
+  integer, parameter :: mkb = 16            ! 128-bit Morton key
+  integer, parameter :: MORTON_MAXBITS = 42 ! 42 bits/coord, level 43 (nx=1)
+#else
+  integer, parameter :: mkb = 8             ! 64-bit Morton key
+  integer, parameter :: MORTON_MAXBITS = 21 ! 21 bits/coord, level 22 (nx=1)
+#endif
 
 contains
 

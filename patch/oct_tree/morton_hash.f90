@@ -71,7 +71,7 @@ contains
   end subroutine morton_hash_destroy
 
   !--------------------------------------------------------------
-  ! Hash function: 128→64 XOR fold, then multiplicative hashing
+  ! Hash function: multiplicative hashing with XOR mixing
   ! Returns 1-based slot index in [1, capacity]
   !--------------------------------------------------------------
   pure function morton_hash_func(key, capacity) result(slot)
@@ -80,8 +80,12 @@ contains
     integer :: slot
     integer(8) :: h
 
+#ifdef MORTON128
     ! XOR fold 128-bit key to 64-bit
     h = ieor(int(key, 8), int(ishft(key, -64), 8))
+#else
+    h = int(key, 8)
+#endif
 
     ! Multiplicative hash (Knuth's golden ratio method)
     h = h * 2654435761_8

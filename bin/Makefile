@@ -29,18 +29,21 @@ BUILDDATE = $(shell date +"%D-%T")
 DEFINES = -DNVECTOR=$(NVECTOR) -DNDIM=$(NDIM) -DNPRE=$(NPRE) -DNENER=$(NENER) -DNVAR=$(NVAR) \
           -DSOLVER=$(SOLVER)
 #############################################################################
-# Fortran compiler options and directives
-
-# --- MPI, pgf90 syntax ------------------------------
-#F90 = mpif90 -O3
-#FFLAGS = -Mpreprocess $(DEFINES) -Mbackslash
-
-# --- MPI, ifort syntax ------------------------------
-#F90 = mpif90 -openmp #-xMIC-AVX512
-#F90 = mpiifx -qopenmp -march=core-avx2
-# --- MPI, gfortran syntax (128-bit integer support) ---
-F90 = mpif90 -fopenmp -march=native
-FFLAGS = -cpp -Ofast -march=native -funroll-loops -ftree-vectorize -ffast-math -ffree-line-length-none -Wno-line-truncation -fno-range-check -std=legacy $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+# Fortran compiler selection
+#   Default:      Intel ifx  (64-bit Morton key, ~2.5x faster)
+#   MORTON128=1:  gfortran   (128-bit Morton key, level > 22)
+#############################################################################
+ifdef MORTON128
+  # --- gfortran (128-bit integer(16) support) ---
+  F90 = mpif90 -fopenmp -march=native
+  FFLAGS = -cpp -Ofast -march=native -funroll-loops -ftree-vectorize -ffast-math \
+           -ffree-line-length-none -Wno-line-truncation -fno-range-check -std=legacy \
+           $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL -DMORTON128
+else
+  # --- Intel ifx (fast, no integer(16)) ---
+  F90 = mpiifx -qopenmp
+  FFLAGS = -fpp -O3 $(DEFINES) -DLONGINT -DQUADHILBERT -DOUTPUT_PARTICLE_POTENTIAL
+endif
 
 #############################################################################
 # HDF5 parallel I/O support (build with: make HDF5=1)
@@ -163,9 +166,11 @@ write_patch.o: FORCE
 	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
-# GCC ICE workaround: friedman() crashes with -Ofast
+# GCC ICE workaround: friedman() crashes with -Ofast (gfortran only)
+ifdef MORTON128
 init_time.o: init_time.f90
 	$(F90) $(subst -Ofast,-O2,$(FFLAGS)) -c $^ -o $@
+endif
 ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
