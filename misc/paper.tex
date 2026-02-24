@@ -781,7 +781,7 @@ neighbour look-up (Appendix~\ref{app:hashtable}).
 When using \ksec\ ordering, the Hilbert key array
 \code{hilbert\_key(1:ncell)} is no longer needed for domain
 decomposition. We replace it with \code{allocate(hilbert\_key(1:1))},
-saving $16 \times \ngridmax \times \twotondim$ bytes
+saving $16\,\ngridmax\,\twotondim$ bytes
 under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
 For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
 
@@ -791,11 +791,11 @@ allocated only during the defragmentation pass and immediately
 deallocated.
 
 Similarly, the arrays \code{bisec\_ind\_cell} and \code{cell\_level},
-each of size $\ngridmax \times \twotondim$ integers (8 bytes), are used
+each of size $\ngridmax\,\twotondim$ integers (8 bytes), are used
 exclusively during load balancing to build the bisection histogram.
 We allocate them on entry to \code{init\_bisection\_histogram} and
 deallocate them after \code{cmp\_new\_cpu\_map} returns, saving
-$2 \times 8 \times \ngridmax \times \twotondim \approx 320$\,MB
+$16\,\ngridmax\,\twotondim \approx 320$\,MB
 for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
 every \code{nremap} coarse steps, these arrays are absent during the
 vast majority of the simulation.
@@ -806,16 +806,16 @@ vast majority of the simulation.
 
 The memory cost of the hash table is
 \begin{equation}
-M_{\rm hash} \approx \frac{N_{\rm grids}}{0.7} \times
-(16 + 4) \text{ bytes} \approx 29\,N_{\rm grids} \text{ bytes},
+M_{\rm hash} \approx 1.4\,N_{\rm grids}
+\cdot (16 + 4) \text{ bytes} \approx 29\,N_{\rm grids} \text{ bytes},
 \label{eq:hash_memory}
 \end{equation}
 where $N_{\rm grids}$ is the actual number of grids (typically much
 less than $\ngridmax$), 16 bytes per key, 4 bytes per grid index, and
 a load factor of 0.7 accounts for empty slots. The
-\code{grid\_level} array adds $4 \times \ngridmax$ bytes.
+\code{grid\_level} array adds $4\,\ngridmax$ bytes.
 
-Compared to the original \code{nbor} cost of $48 \times \ngridmax$
+Compared to the original \code{nbor} cost of $48\,\ngridmax$
 bytes, the net savings are approximately
 $44\,\ngridmax - 17\,N_{\rm grids}$.
 Since $N_{\rm grids} \ll \ngridmax$ in practice (typical occupancy is
@@ -1472,8 +1472,8 @@ We replace sequential access with Fortran 2003 stream access
 (\code{ACCESS='STREAM'}), which allows direct byte-offset positioning.
 The byte offset for plane $i$ in a file with header size $H = 52$
 bytes (GRAFIC2 44-byte header plus record markers) and plane size
-$P = n_1 n_2 \times 4 + 8$ bytes (data plus two 4-byte record
-markers) is $\text{offset} = H + (i - 1) \times P + 5$,
+$P = 4\,n_1 n_2 + 8$ bytes (data plus two 4-byte record
+markers) is $\text{offset} = H + (i - 1)\,P + 5$,
 where the additive constant~5 accounts for the 4-byte Fortran
 unformatted record-length marker preceding the data payload plus
 the 1-based byte indexing of stream access.
