@@ -521,6 +521,7 @@ Crucially, $N_{\rm msg}$ depends only on the prime factorization of
 $\ncpu$ and is completely independent of the degree of particle
 clustering or the AMR refinement level, so the communication topology
 remains fixed regardless of how complex the simulation becomes.
+
 Figure~\ref{fig:hier_exchange} illustrates the communication pattern
 for $\ncpu = 12\,(= 3 \times 2 \times 2)$. At level~1 ($k_1 = 3$),
 the 12 ranks are grouped into three children of four ranks each. Each
@@ -584,26 +585,22 @@ communication structure construction (replacing the original
 \code{MPI\_ALLTOALL}-based build\_comm), and feedback collectives,
 eliminating all global communication patterns from the AMR
 infrastructure.
-Working buffers use Fortran 2003 \code{move\_alloc} for
-zero-copy swaps, and per-level arrays are pre-allocated with
-\code{save} attributes and grow-only semantics to eliminate
-allocation overhead on the 100+ exchange calls per time step.
 
 \begin{table}
 \centering
 \caption{Communication complexity per exchange operation.
-$N_{\rm ghost}$ is the total number of ghost grids per rank; $k_l$
-are the branching factors at tree level $l$.}
+$N_{\rm nb}$: number of neighbour ranks;
+$N_{\rm gh}$: ghost grids per rank;
+$k_l$: branching factor at tree level $l$;
+$k_{\rm max} = \max(k_l)$.}
 \label{tab:complexity}
 \begin{tabular}{lccc}
 \toprule
 & P2P & \code{ALLTOALLV} & \ksec \\
 \midrule
-Message count & $\Olog{N_{\rm nbr}}$ & $\Olog{\ncpu}$ & $\Olog{\sum_l k_l}$ \\
-Buffer memory & $\Olog{N_{\rm nbr} \cdot N_{\rm ghost}}$ &
-  $\Olog{\ncpu \cdot N_{\rm ghost}}$ &
-  $\Olog{k_{\rm max} \cdot N_{\rm ghost}}$ \\
-Synchronisation & none & implicit barrier & none \\
+Msgs   & $N_{\rm nb}$          & $\ncpu$                        & $\sum_l k_l$ \\
+Buffer & $N_{\rm nb} N_{\rm gh}$ & $\ncpu N_{\rm gh}$           & $k_{\rm max} N_{\rm gh}$ \\
+Sync.  & none                    & barrier                      & none \\
 \bottomrule
 \end{tabular}
 \end{table}
