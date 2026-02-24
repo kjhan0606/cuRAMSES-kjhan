@@ -598,8 +598,8 @@ $k_{\rm max} = \max(k_l)$.}
 \toprule
 & P2P & \code{ALLTOALLV} & \ksec \\
 \midrule
-Msgs   & $N_{\rm nb}$          & $\ncpu$                        & $\sum_l k_l$ \\
-Buffer & $N_{\rm nb} N_{\rm gh}$ & $\ncpu N_{\rm gh}$           & $k_{\rm max} N_{\rm gh}$ \\
+Msgs   & $\Olog{N_{\rm nb}}$          & $\Olog{\ncpu}$                        & $\Olog{\sum_l k_l}$ \\
+Buffer & $\Olog{N_{\rm nb} N_{\rm gh}}$ & $\Olog{\ncpu N_{\rm gh}}$           & $\Olog{k_{\rm max} N_{\rm gh}}$ \\
 Sync.  & none                    & barrier                      & none \\
 \bottomrule
 \end{tabular}
@@ -660,7 +660,8 @@ Each component independently progresses through four phases:
   \qquad \alpha = 0.05,
   \label{eq:ema}
   \end{equation}
-  where $t_n$ is the elapsed time of the current call.  After
+  where $t_n$ is the elapsed time of the current call and
+  $\bar{t}_n$ is the running EMA from the previous step.  After
   $N_{\rm recheck}$ calls (initially 500), the local EMAs are
   synchronised via \code{MPI\_ALLREDUCE(SUM)} and the system enters
   Phase~3 to probe the alternative.
@@ -735,7 +736,7 @@ implemented with simple bit-shift loops.
 The integer coordinates of a grid at level $l$ are computed from its
 floating-point centre position $\mathbf{x}_g$ as
 \begin{equation}
-i_d = \mathrm{int}(x_{g,d} \cdot 2^{l-1}), \quad d \in \{x, y, z\},
+i_d = \mathrm{INT}(x_{g,d} \cdot 2^{l-1}), \quad d \in \{x, y, z\},
 \label{eq:grid_to_int}
 \end{equation}
 where coordinates are in units of the coarse grid spacing.
@@ -1175,7 +1176,7 @@ dominating the feedback time step.
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
 $n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
-\mathrm{int}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
+\mathrm{INT}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
