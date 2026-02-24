@@ -32,8 +32,7 @@
 \newcommand{\code}[1]{\texttt{#1}}
 
 \title[cuRAMSES: Scalable AMR Optimizations for Cosmological Simulations]
-{cuRAMSES: Scalable Domain Decomposition, Solver Optimizations, and
-Hybrid CPU/GPU Strategies for Cosmological AMR Simulations}
+{cuRAMSES: Scalable Hybrid CPU/GPU AMR for Cosmological Simulations}
 
 \author[J.~Kim]{
 Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
@@ -2102,9 +2101,15 @@ on 64--1024~MPI ranks.  Key findings:
   all-to-all collectives become prohibitive; on this uniform-grid test
   its overhead is expected.
 \item The average number of communication partners is constant at 6.0
-  for \ksec\ across all rank counts, compared to 6.0--7.5 for Hilbert,
+  for \ksec\ across all rank counts, compared to 6.0--9.1 for Hilbert.
+  Non-power-of-two rank counts (96, 192, 320, 448) increase the Hilbert
+  neighbour count to 8.4--9.1, while \ksec\ remains at exactly 6,
   reflecting the compact cuboid sub-domains produced by recursive
   bisection.
+\item The surface-to-volume ratio is consistently lower for \ksec\
+  than for Hilbert at non-power-of-two ranks (e.g.\ 0.027 vs.\ 0.033
+  at 96~ranks), confirming that the cuboid decomposition minimises
+  ghost volume.
 \end{itemize}
 
 \begin{table}
@@ -2127,6 +2132,13 @@ $\ncpu$ & DD & Build\,(s) & SV & Nbr & Method & Exch\,(ms) \\
      &           &       &       &     & A2AV      & $26.9\pm1.0$ \\
      &           &       &       &     & K-Sec     & $364.8\pm4.0$ \\
 \hline
+  96 & Hilbert   & 455.3 & 0.033 & 8.7 & P2P       & $47.5\pm2.1$ \\
+     &           &       &       &     & A2AV      & $43.9\pm1.6$ \\
+     &           &       &       &     & K-Sec     & $424.4\pm2.1$ \\
+     & K-Section & 200.4 & 0.027 & 6.0 & P2P       & $34.4\pm0.7$ \\
+     &           &       &       &     & A2AV      & $23.3\pm0.1$ \\
+     &           &       &       &     & K-Sec     & $332.2\pm3.7$ \\
+\hline
  128 & Hilbert   & 455.6 & 0.031 & 7.4 & P2P       & $24.9\pm3.4$ \\
      &           &       &       &     & A2AV      & $18.4\pm0.2$ \\
      &           &       &       &     & K-Sec     & $248.3\pm4.7$ \\
@@ -2134,12 +2146,33 @@ $\ncpu$ & DD & Build\,(s) & SV & Nbr & Method & Exch\,(ms) \\
      &           &       &       &     & A2AV      & $18.4\pm0.2$ \\
      &           &       &       &     & K-Sec     & $235.3\pm0.5$ \\
 \hline
+ 192 & Hilbert   & 496.9 & 0.039 & 8.4 & P2P       & $29.3\pm6.3$ \\
+     &           &       &       &     & A2AV      & $21.0\pm0.4$ \\
+     &           &       &       &     & K-Sec     & $260.5\pm0.9$ \\
+     & K-Section & 237.3 & 0.035 & 6.0 & P2P       & $23.0\pm0.7$ \\
+     &           &       &       &     & A2AV      & $16.4\pm0.3$ \\
+     &           &       &       &     & K-Sec     & $218.4\pm0.7$ \\
+\hline
  256 & Hilbert   & 456.0 & 0.039 & 6.8 & P2P       & $17.1\pm1.9$ \\
      &           &       &       &     & A2AV      & $15.7\pm2.1$ \\
      &           &       &       &     & K-Sec     & $218.4\pm1.7$ \\
      & K-Section & 288.2 & 0.039 & 6.0 & P2P       & $18.8\pm2.6$ \\
      &           &       &       &     & A2AV      & $14.7\pm0.1$ \\
      &           &       &       &     & K-Sec     & $201.7\pm0.3$ \\
+\hline
+ 320 & Hilbert   & 476.9 & 0.049 & 8.8 & P2P       & $18.1\pm0.4$ \\
+     &           &       &       &     & A2AV      & $16.3\pm0.3$ \\
+     &           &       &       &     & K-Sec     & $185.8\pm0.6$ \\
+     & K-Section & 242.9 & 0.041 & 6.0 & P2P       & $16.2\pm2.0$ \\
+     &           &       &       &     & A2AV      & $12.8\pm0.0$ \\
+     &           &       &       &     & K-Sec     & $142.4\pm0.3$ \\
+\hline
+ 448 & Hilbert   & 478.3 & 0.055 & 9.1 & P2P       & $14.7\pm0.4$ \\
+     &           &       &       &     & A2AV      & $13.2\pm0.2$ \\
+     &           &       &       &     & K-Sec     & $159.1\pm1.4$ \\
+     & K-Section & 238.3 & 0.045 & 6.0 & P2P       & $13.4\pm0.2$ \\
+     &           &       &       &     & A2AV      & $11.6\pm0.2$ \\
+     &           &       &       &     & K-Sec     & $110.7\pm8.4$ \\
 \hline
  512 & Hilbert   & 462.2 & 0.047 & 6.0 & P2P       & $17.6\pm5.4$ \\
      &           &       &       &     & A2AV      & $10.4\pm2.0$ \\
