@@ -150,9 +150,9 @@ strategy. Space-filling curves (SFCs), particularly the Hilbert
 \citep{Warren1993,Springel2005}. The Hilbert curve maps the
 three-dimensional computational domain to a one-dimensional index,
 preserving spatial locality so that cells close in physical space
-remain close along the curve.  In practice, each rank's subdomain
-borders on average 6--8 neighbours in three dimensions
-\citep{Springel2005,Springel2021}. This enables a simple and effective
+remain close along the curve.  For equal-volume partitioning, each
+rank's subdomain typically borders 6--8 neighbours in three dimensions.
+This enables a simple and effective
 partitioning where the one-dimensional index range is divided into
 $\ncpu$ contiguous segments, each assigned to an MPI rank. The resulting
 decomposition naturally produces compact subdomains with relatively
