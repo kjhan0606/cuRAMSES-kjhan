@@ -499,9 +499,11 @@ in Section~\ref{sec:ksec_tree}.  The algorithm walks the tree from
 root to leaf, where each node represents a contiguous group of MPI
 ranks (Algorithm~\ref{alg:exclusive}).  At each level~$l$, a node is
 partitioned into $k_l$ child nodes; each rank communicates with at
-most $k_l - 1$ correspondents (one per sibling subtree), chosen as
-$\min(\text{my\_pos},\, s-1)$ within each sibling of size $s$ to
-distribute load evenly.
+most $k_l - 1$ correspondents (one per sibling subtree).  Within a
+sibling of size $s$, the correspondent is the rank at offset
+$\min(p,\, s-1)$, where $p$ is the calling rank's position inside its
+own child group; this spreads the communication load evenly across the
+sibling rather than funnelling all traffic to a single rank.
 
 \begin{algorithm}[H]
 \caption{Hierarchical \ksec\ exchange}
