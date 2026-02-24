@@ -861,7 +861,7 @@ with any remaining references.
 \includegraphics[width=\textwidth]{fig_morton_hash.pdf}
 \caption{Schematic of the Morton key hash table that replaces the
   original \code{nbor} array.  Left: the eliminated
-  \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5$\,M).
+  \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5\,\mathrm{M}$).
   Right: the replacement workflow, where grid cell coordinates
   $(i_x, i_y, i_z)$ are bit-interleaved into a 64-bit Morton key $M$,
   which is mapped to a grid index \code{igrid} via a per-level
@@ -959,7 +959,7 @@ contributions.
 \begin{figure*}
 \centering
 \includegraphics[width=\textwidth]{fig_memory_savings.pdf}
-\caption{Per-rank memory savings breakdown for $\ngridmax = 5$\,M.
+\caption{Per-rank memory savings breakdown for $\ngridmax = 5\,\mathrm{M}$.
   Solid bars denote unconditional savings (always available); hatched
   bars denote savings available only between load-balance steps or
   defragmentation passes.  The red segment shows the hash table
