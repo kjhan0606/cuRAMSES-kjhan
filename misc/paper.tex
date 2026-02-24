@@ -390,15 +390,22 @@ The default \ramses\ load balancer weights all cells equally.
 \curamses\ supports an optional memory-weighted cost function:
 \begin{equation}
 C_{\rm cell} = 2^{-N_{\rm dim}}\bigl(w_{\rm grid} +
-n_{\rm part}({\rm igrid}) \cdot w_{\rm part}\bigr),
+n_{\rm part}({\rm igrid}) \cdot w_{\rm part} +
+n_{\rm sink}({\rm igrid}) \cdot w_{\rm sink}\bigr),
 \label{eq:cost_function}
 \end{equation}
 where $w_{\rm grid}$ is the memory cost per grid slot (default 270
 bytes, accounting for hydro, gravity, and AMR bookkeeping arrays),
 $w_{\rm part}$ is the memory cost per particle slot (default 12 bytes
-for position, velocity, mass, and linked-list pointers), and
-$n_{\rm part}({\rm igrid})$ is the number of particles attached to
-grid \code{igrid}. The division by $\twotondim$ distributes the grid
+for position, velocity, mass, and linked-list pointers),
+$n_{\rm part}({\rm igrid})$ is the number of dark matter and star
+particles (both sharing the same memory layout) attached to grid
+\code{igrid}, and $w_{\rm sink}$ is a computational weight per sink
+particle (default 500) that accounts for the expensive feedback and
+accretion operations associated with each sink. The sink count
+$n_{\rm sink}({\rm igrid})$ is obtained by descending the AMR tree
+from each sink position to its leaf cell.
+The division by $\twotondim$ distributes the grid
 cost evenly among its eight cells.
 
 This cost function ensures that ranks hosting dense haloes (many
