@@ -2636,7 +2636,7 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   pi=twopi/2d0
   factG=1d0
   if(cosmo)factG=3d0/8d0/pi*omega_m*aexp
-  fudge=4d0*twopi*factG**2
+  fudge=2d0*twopi*factG**2
   d_star=1d100
   if (star)then
      d_star=n_star/scale_nH
@@ -4673,7 +4673,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 				   ekk=0.5d0*d*(u*u+v*v+w*w)
 				   eint=uold(ind_blast(iAGN),5)-ekk
 				   vol_blast  (iAGN)=vol_loc
-				   mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN),0.25d0*d*vol_loc)
+				   mAGN(iAGN)=min(mloadAGN*dMsmbh_AGN(iAGN),0.25d0*d*vol_loc)
 				   if(metal)then
 				      ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
 				      uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &

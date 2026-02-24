@@ -752,7 +752,7 @@ where coordinates are in units of the coarse grid spacing.
 Note that AMR does not populate all possible grid positions at a given
 level, since only regions that satisfy the refinement criteria contain grids.
 The Morton key therefore serves as a unique spatial address for each
-\emph{existing} grid; the hash table (Section~\ref{sec:morton_hashtable})
+\emph{existing} grid; the hash table (Appendix~\ref{app:hashtable})
 stores only the grids that are actually allocated, making the
 look-up cost independent of the total number of potential grid
 positions at that level.
@@ -771,75 +771,9 @@ M \text{\texttt{>>}} 3$. A child key is obtained by a 3-bit left shift plus the
 child index (0--7): $M_{\rm child} = (M \text{\texttt{<<}} 3) \,|\, i_{\rm child}$.
 
 
-\subsection{Per-Level Hash Table and Replacement Functions}
-\label{sec:morton_hashtable}
-
-We maintain one open-addressing hash table (probing consecutive slots
-on collision) per AMR level, mapping Morton keys $M$ to grid indices
-\code{igrid}.
-
-The hash function first reduces the key to 64 bits (for
-128-bit keys, an XOR fold of the upper and lower halves; for 64-bit
-keys, a direct cast), then applies multiplicative hashing
-with an additional mixing step:
-\begin{align}
-t   &= \bigl[(h \times \phi_1) \oplus (h \text{\texttt{>>}} 16)\bigr] \times \phi_2,
-\nonumber \\
-h(M) &= t \oplus (t \text{\texttt{>>}} 13),
-\label{eq:hash_func}
-\end{align}
-where $h$ is the 64-bit reduced key,
-$\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
-are constants chosen for good bit mixing, and the table capacity is
-always a power of two to allow bitmask modular arithmetic. Collisions
-are resolved by linear probing; the load factor is kept below 0.7 by
-automatic rehashing (doubling capacity).
-
-The hash table is maintained incrementally:
-\begin{itemize}
-\item \code{morton\_hash\_insert}: called during \code{make\_grid\_coarse} and \code{make\_grid\_fine};
-\item \code{morton\_hash\_delete}: called during \code{kill\_grid};
-\item Full rebuild after defragmentation (\code{morton\_hash\_rebuild}).
-\end{itemize}
-
-A companion array \code{grid\_level(igrid)} stores the AMR level of
-each grid, enabling Morton key computation from the grid index alone.
-
-Two wrapper functions provide drop-in replacements for the original
-\code{nbor}-based access patterns:
-
-\begin{itemize}
-\item \code{morton\_nbor\_grid(igrid, ilevel, j)}: returns the grid
-  index of the same-level neighbour in direction $j$, replacing the
-  pattern \code{son(nbor(igrid, j))}. Implemented as: compute Morton
-  key, shift by direction, look up in hash table.
-
-\item \code{morton\_nbor\_cell(igrid, ilevel, j)}: returns the father
-  cell index of the neighbour, replacing the pattern
-  \code{nbor(igrid, j)}. For level 1, returns the coarse cell index
-  directly; for finer levels, computes the parent grid via the
-  hash table at level $l-1$ and the octant index from the coordinate
-  parity.
-\end{itemize}
-
-The \code{nbor} array is reduced to \code{allocate(nbor(1:1, 1:1))}
-, effectively eliminated while maintaining compilation compatibility
-with any remaining references.
-
-\begin{figure*}
-\centering
-\includegraphics[width=\textwidth]{fig_morton_hash.pdf}
-\caption{Schematic of the Morton key hash table that replaces the
-  original \code{nbor} array.  Left: the eliminated
-  \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5\,\mathrm{M}$).
-  Right: the replacement workflow, where grid cell coordinates
-  $(i_x, i_y, i_z)$ are bit-interleaved into a Morton key $M$ (64 or 128 bits),
-  which is mapped to a grid index \code{igrid} via a per-level
-  open-addressing hash table with multiplicative hashing.  The hash
-  table memory footprint is $\approx 29\,N_{\rm grids}$ bytes
-  (typically $<$90\,MB), yielding a net saving of $>$150\,MB per rank.}
-\label{fig:morton_hash}
-\end{figure*}
+The Morton keys are stored in a per-level open-addressing hash table
+that maps keys to grid indices, providing $\Olog{1}$ amortised
+neighbour look-up (Appendix~\ref{app:hashtable}).
 
 \subsection{Hilbert Key and Histogram Array Elimination}
 \label{sec:mem_hilbert}
@@ -2567,6 +2501,79 @@ coordinate, applies periodic wrapping, and re-encodes:
 \STATE $M' \leftarrow$ \textsc{Encode}$(i_x, i_y, i_z)$
 \end{algorithmic}
 \end{algorithm}
+
+
+\section{PER-LEVEL HASH TABLE AND REPLACEMENT FUNCTIONS}
+\label{app:hashtable}
+
+We maintain one open-addressing hash table (probing consecutive slots
+on collision) per AMR level, mapping Morton keys $M$ to grid indices
+\code{igrid}.
+
+The hash function first reduces the key to 64 bits (for
+128-bit keys, an XOR fold of the upper and lower halves; for 64-bit
+keys, a direct cast), then applies multiplicative hashing
+with an additional mixing step:
+\begin{align}
+t   &= \bigl[(h \times \phi_1) \text{\texttt{\textasciicircum}} (h \text{\texttt{>>}} 16)\bigr] \times \phi_2,
+\nonumber \\
+h(M) &= t \text{\texttt{\textasciicircum}} (t \text{\texttt{>>}} 13),
+\label{eq:hash_func}
+\end{align}
+where $h$ is the 64-bit reduced key,
+$\text{\texttt{\textasciicircum}}$ is bitwise XOR,
+$\text{\texttt{>>}}$ is a logical right bit-shift,
+$\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
+are constants chosen for good bit mixing, and the table capacity is
+always a power of two to allow bitmask modular arithmetic. Collisions
+are resolved by linear probing; the load factor is kept below 0.7 by
+automatic rehashing (doubling capacity).
+
+The hash table is maintained incrementally:
+\begin{itemize}
+\item \code{morton\_hash\_insert}: called during \code{make\_grid\_coarse} and \code{make\_grid\_fine};
+\item \code{morton\_hash\_delete}: called during \code{kill\_grid};
+\item Full rebuild after defragmentation (\code{morton\_hash\_rebuild}).
+\end{itemize}
+
+A companion array \code{grid\_level(igrid)} stores the AMR level of
+each grid, enabling Morton key computation from the grid index alone.
+
+Two wrapper functions provide drop-in replacements for the original
+\code{nbor}-based access patterns:
+
+\begin{itemize}
+\item \code{morton\_nbor\_grid(igrid, ilevel, j)}: returns the grid
+  index of the same-level neighbour in direction $j$, replacing the
+  pattern \code{son(nbor(igrid, j))}. Implemented as: compute Morton
+  key, shift by direction, look up in hash table.
+
+\item \code{morton\_nbor\_cell(igrid, ilevel, j)}: returns the father
+  cell index of the neighbour, replacing the pattern
+  \code{nbor(igrid, j)}. For level 1, returns the coarse cell index
+  directly; for finer levels, computes the parent grid via the
+  hash table at level $l-1$ and the octant index from the coordinate
+  parity.
+\end{itemize}
+
+The \code{nbor} array is reduced to \code{allocate(nbor(1:1, 1:1))}
+, effectively eliminated while maintaining compilation compatibility
+with any remaining references.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_morton_hash.pdf}
+\caption{Schematic of the Morton key hash table that replaces the
+  original \code{nbor} array.  Left: the eliminated
+  \code{nbor($\ngridmax$, 6)} array (240\,MB for $\ngridmax = 5\,\mathrm{M}$).
+  Right: the replacement workflow, where grid cell coordinates
+  $(i_x, i_y, i_z)$ are bit-interleaved into a Morton key $M$ (64 or 128 bits),
+  which is mapped to a grid index \code{igrid} via a per-level
+  open-addressing hash table with multiplicative hashing.  The hash
+  table memory footprint is $\approx 29\,N_{\rm grids}$ bytes
+  (typically $<$90\,MB), yielding a net saving of $>$150\,MB per rank.}
+\label{fig:morton_hash}
+\end{figure*}
 
 
 \section{DETAILED SCALING TABLES}
