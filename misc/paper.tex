@@ -192,7 +192,9 @@ $\ngridmax$. For example, the neighbour-pointer array \code{nbor($\ngridmax$, 6)
 alone consumes $48\,\ngridmax$ bytes \citep{Teyssier2002}, and the
 Hilbert key array adds another $16\,\ngridmax$ bytes (when compiled
 with \code{QUADHILBERT}), together approaching 1\,GB per rank for
-production configurations with $\ngridmax \sim 5\,\mathrm{M}$. The
+production configurations with $\ngridmax \sim 5\,\mathrm{M}$, a value
+typical of medium- to large-scale cosmological runs
+\citep{RamsesManual}. The
 multigrid Poisson solver \citep{Guillet2011} typically dominates
 runtime, its per-iteration cost driven by frequent ghost-zone exchanges
 and repeated hash table lookups for neighbour grids. Finally, \ramses\ writes one file per MPI
@@ -2489,6 +2491,10 @@ Nelson D., et al., 2019, Comput.\ Astrophys.\ Cosmol., 6, 2
 
 \bibitem[\protect\citeauthoryear{Pillepich et al.}{Pillepich et al.}{2018}]{Pillepich2018}
 Pillepich A., et al., 2018, MNRAS, 473, 4077
+
+\bibitem[\protect\citeauthoryear{{RAMSES Team}}{{RAMSES Team}}{2024}]{RamsesManual}
+{RAMSES Team}, 2024, RAMSES User's Guide,
+\url{https://ramses-organisation.readthedocs.io}
 
 \bibitem[\protect\citeauthoryear{Schaye et al.}{Schaye et al.}{2015}]{Schaye2015}
 Schaye J., et al., 2015, MNRAS, 446, 521
