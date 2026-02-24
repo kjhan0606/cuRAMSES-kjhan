@@ -369,10 +369,6 @@ The procedure operates level by level, top to bottom. At level $l$:
   \label{eq:target_frac}
   \end{equation}
   where $n_m$ is the number of ranks assigned to partition $m$.
-  Because $n$ ranks cannot always be divided evenly among $k_l$
-  partitions, $n_m = \mathrm{int}(n/k_l) + 1$ for the first
-  $n \bmod k_l$ partitions (which absorb the remainder), and
-  $n_m = \mathrm{int}(n/k_l)$ for the rest.
 
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
   all $\ncpu$ ranks to obtain the global cumulative load at each wall
