@@ -686,9 +686,9 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
 
   ! Grid creation variables
   integer :: igrid_new, igrid_prev_cpu, igrid_father, ind_cell
-  integer(mkb) :: ix, iy, iz, ix_p, iy_p, iz_p
+  integer(8) :: ix, iy, iz, ix_p, iy_p, iz_p
   integer :: nxny, nx_loc, iskip
-  integer(mkb) :: mkey
+  type(mkey_t) :: mkey
   real(dp) :: twotol, dx, scale, xx_cell(1,3), xx_father(1,3), xg_recv(3)
   integer :: c_tmp(1)
   real(dp) :: mass_sph2
@@ -1040,9 +1040,9 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
      allocate(dest(max(nlocal,1)))
      do i = 1, nlocal
         twotol = 2.0d0**(ilevel-1)
-        ix = int(my_lvl(ilevel)%xg(i, 1) * twotol, mkb)
-        iy = int(my_lvl(ilevel)%xg(i, 2) * twotol, mkb)
-        iz = int(my_lvl(ilevel)%xg(i, 3) * twotol, mkb)
+        ix = int(my_lvl(ilevel)%xg(i, 1) * twotol, 8)
+        iy = int(my_lvl(ilevel)%xg(i, 2) * twotol, 8)
+        iz = int(my_lvl(ilevel)%xg(i, 3) * twotol, 8)
         xx_father(1,1) = ((dble(ix) + 0.5d0) / twotol - dble(icoarse_min)) * scale
         xx_father(1,2) = ((dble(iy) + 0.5d0) / twotol - dble(jcoarse_min)) * scale
         xx_father(1,3) = ((dble(iz) + 0.5d0) / twotol - dble(kcoarse_min)) * scale
@@ -1133,25 +1133,25 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
 
         ! Find father cell
         if(ilevel == 1) then
-           ix = int(xg_recv(1), mkb)
-           iy = int(xg_recv(2), mkb)
-           iz = int(xg_recv(3), mkb)
+           ix = int(xg_recv(1), 8)
+           iy = int(xg_recv(2), 8)
+           iz = int(xg_recv(3), 8)
            igrid_father = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
         else
            twotol = 2.0d0**(ilevel-1)
-           ix = int(xg_recv(1) * twotol, mkb)
-           iy = int(xg_recv(2) * twotol, mkb)
-           iz = int(xg_recv(3) * twotol, mkb)
-           ix_p = ix / 2_mkb
-           iy_p = iy / 2_mkb
-           iz_p = iz / 2_mkb
+           ix = int(xg_recv(1) * twotol, 8)
+           iy = int(xg_recv(2) * twotol, 8)
+           iz = int(xg_recv(3) * twotol, 8)
+           ix_p = ix / 2_8
+           iy_p = iy / 2_8
+           iz_p = iz / 2_8
            mkey = morton_encode(ix_p, iy_p, iz_p)
            igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
            if(igrid_father == 0) then
               varcpu_exc(ilevel)%recv_igrid(i) = 0
               cycle  ! Father not in hash (virtual); handled by refine_fine
            end if
-           ind_cell = 1 + int(mod(ix, 2_mkb)) + 2 * int(mod(iy, 2_mkb)) + 4 * int(mod(iz, 2_mkb))
+           ind_cell = 1 + int(mod(ix, 2_8)) + 2 * int(mod(iy, 2_8)) + 4 * int(mod(iz, 2_8))
            igrid_father = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
         end if
 

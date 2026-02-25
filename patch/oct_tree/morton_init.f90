@@ -16,11 +16,11 @@ subroutine morton_hash_rebuild
 
   integer :: ilevel, icpu, igrid, i
   integer :: ngrids_level
-  integer(mkb) :: mkey
+  type(mkey_t) :: mkey
 
   ! Check that coordinates fit in MORTON_MAXBITS
   do ilevel = 1, nlevelmax
-     if (int(nx, mkb) * 2_mkb**(ilevel-1) > 2_mkb**MORTON_MAXBITS) then
+     if (int(nx, 8) * 2_8**(ilevel-1) > 2_8**MORTON_MAXBITS) then
         if (myid==1) then
            write(*,*) 'Morton hash: ERROR - level', ilevel, &
                 ' exceeds coordinate range'
@@ -83,7 +83,7 @@ subroutine morton_hash_rebuild_level(ilevel)
   integer, intent(in) :: ilevel
   integer :: icpu, igrid, i
   integer :: ngrids_level
-  integer(mkb) :: mkey
+  type(mkey_t) :: mkey
 
   if (.not. allocated(mort_table)) return
   if (ilevel < 1 .or. ilevel > nlevelmax) return
@@ -135,7 +135,7 @@ subroutine morton_hash_verify(label)
   integer :: igrid_morton
   integer :: nmatch, nmismatch
   integer :: nmatch_all, nmismatch_all
-  integer(mkb) :: mkey
+  type(mkey_t) :: mkey
   integer :: info
 
   if (.not. allocated(mort_table)) return

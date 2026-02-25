@@ -243,13 +243,13 @@ subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
 
   ! Morton variables
   integer :: l, dx, dy, dz
-  integer(mkb) :: nmax_x, nmax_y, nmax_z
-  integer(mkb) :: nix, niy, niz
-  integer(mkb) :: nkey
+  integer(8) :: nmax_x, nmax_y, nmax_z
+  integer(8) :: nix, niy, niz
+  type(mkey_t) :: nkey
 #ifndef _OPENMP
-  integer(mkb),dimension(1:nvector),save::gix,giy,giz
+  integer(8),dimension(1:nvector),save::gix,giy,giz
 #else
-  integer(mkb),dimension(1:nvector)::gix,giy,giz
+  integer(8),dimension(1:nvector)::gix,giy,giz
 #endif
   logical :: use_morton
 
@@ -277,9 +277,9 @@ subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
   end if
 
   if (use_morton) then
-     nmax_x = int(nx, mkb) * 2_mkb**(l-1)
-     nmax_y = int(ny, mkb) * 2_mkb**(l-1)
-     nmax_z = int(nz, mkb) * 2_mkb**(l-1)
+     nmax_x = int(nx, 8) * 2_8**(l-1)
+     nmax_y = int(ny, 8) * 2_8**(l-1)
+     nmax_z = int(nz, 8) * 2_8**(l-1)
 
      ! Compute direction offsets from cell position index
      ! RAMSES directions: 1=-x, 2=+x, 3=-y, 4=+y, 5=-z, 6=+z
@@ -489,10 +489,10 @@ subroutine getnborfather(ind_cell,ind_father,ncell,ilevel)
 #endif
 
   ! Morton variables
-  integer(mkb) :: nmax_x, nmax_y, nmax_z
-  integer(mkb) :: nix, niy, niz, pix, piy, piz
+  integer(8) :: nmax_x, nmax_y, nmax_z
+  integer(8) :: nix, niy, niz, pix, piy, piz
   integer :: ind_oct, igrid_parent
-  integer(mkb) :: mkey, nkey, pkey
+  type(mkey_t) :: mkey, nkey, pkey
   logical :: use_morton
 
   nxny=nx*ny
@@ -592,15 +592,15 @@ subroutine getnborfather(ind_cell,ind_father,ncell,ilevel)
                     if(use_morton)then
                        ! Morton: compute father cell from neighbor coordinates
                        mkey = grid_to_morton(ind_grid_father(i), ilevel)
-                       nmax_x = int(nx, mkb) * 2_mkb**(ilevel-1)
-                       nmax_y = int(ny, mkb) * 2_mkb**(ilevel-1)
-                       nmax_z = int(nz, mkb) * 2_mkb**(ilevel-1)
+                       nmax_x = int(nx, 8) * 2_8**(ilevel-1)
+                       nmax_y = int(ny, 8) * 2_8**(ilevel-1)
+                       nmax_z = int(nz, 8) * 2_8**(ilevel-1)
                        nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
                        call morton_decode(nkey, nix, niy, niz)
-                       pix = nix / 2_mkb
-                       piy = niy / 2_mkb
-                       piz = niz / 2_mkb
-                       ind_oct = 1 + int(mod(nix, 2_mkb)) + 2*int(mod(niy, 2_mkb)) + 4*int(mod(niz, 2_mkb))
+                       pix = nix / 2_8
+                       piy = niy / 2_8
+                       piz = niz / 2_8
+                       ind_oct = 1 + int(mod(nix, 2_8)) + 2*int(mod(niy, 2_8)) + 4*int(mod(niz, 2_8))
                        if (ilevel == 2) then
                           ! Parent is coarse cell (safe downcast)
                           ind_father(i,j) = 1 + int(pix) + int(piy)*nx + int(piz)*nxny
@@ -647,12 +647,12 @@ subroutine getnborgrids(igrid,igridn,ngrid)
   ! the neighboring grids don't exist, then igridn(:,j) = 0.
   !---------------------------------------------------------
   integer::i,j,l
-  integer(mkb) :: nmax_x, nmax_y, nmax_z
-  integer(mkb) :: nkey
+  integer(8) :: nmax_x, nmax_y, nmax_z
+  type(mkey_t) :: nkey
 #ifndef _OPENMP
-  integer(mkb),dimension(1:nvector),save::mkeys
+  type(mkey_t),dimension(1:nvector),save::mkeys
 #else
-  integer(mkb),dimension(1:nvector)::mkeys
+  type(mkey_t),dimension(1:nvector)::mkeys
 #endif
   logical :: use_morton
 
@@ -676,9 +676,9 @@ subroutine getnborgrids(igrid,igridn,ngrid)
   end if
 
   if (use_morton) then
-     nmax_x = int(nx, mkb) * 2_mkb**(l-1)
-     nmax_y = int(ny, mkb) * 2_mkb**(l-1)
-     nmax_z = int(nz, mkb) * 2_mkb**(l-1)
+     nmax_x = int(nx, 8) * 2_8**(l-1)
+     nmax_y = int(ny, 8) * 2_8**(l-1)
+     nmax_z = int(nz, 8) * 2_8**(l-1)
 
      ! Pre-compute Morton keys
      do i = 1, ngrid
@@ -723,12 +723,12 @@ subroutine getnborgrids_check(igrid,igridn,ngrid)
   ! to avoid son(0) leading to crash.
   !---------------------------------------------------------
   integer::i,j,l
-  integer(mkb) :: nmax_x, nmax_y, nmax_z
-  integer(mkb) :: nkey
+  integer(8) :: nmax_x, nmax_y, nmax_z
+  type(mkey_t) :: nkey
 #ifndef _OPENMP
-  integer(mkb),dimension(1:nvector),save::mkeys
+  type(mkey_t),dimension(1:nvector),save::mkeys
 #else
-  integer(mkb),dimension(1:nvector)::mkeys
+  type(mkey_t),dimension(1:nvector)::mkeys
 #endif
   logical :: use_morton
 
@@ -751,9 +751,9 @@ subroutine getnborgrids_check(igrid,igridn,ngrid)
   end if
 
   if (use_morton) then
-     nmax_x = int(nx, mkb) * 2_mkb**(l-1)
-     nmax_y = int(ny, mkb) * 2_mkb**(l-1)
-     nmax_z = int(nz, mkb) * 2_mkb**(l-1)
+     nmax_x = int(nx, 8) * 2_8**(l-1)
+     nmax_y = int(ny, 8) * 2_8**(l-1)
+     nmax_z = int(nz, 8) * 2_8**(l-1)
 
      do i = 1, ngrid
         if (igrid(i) > 0) then

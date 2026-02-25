@@ -7,19 +7,21 @@ module morton_hash
   ! Open-addressing hash table for Morton key → igrid mapping.
   ! Per-level hash tables: mort_table(1:nlevelmax)
   !
-  ! Each table maps morton_key (integer(mkb)) → igrid (integer).
+  ! Each table maps type(mkey_t) → igrid (integer).
   ! Uses linear probing with power-of-2 capacity.
-  ! Sentinel values: MHASH_EMPTY = -1, MHASH_DELETED = -2
+  ! Sentinel values: MHASH_EMPTY = MK_MINUS1, MHASH_DELETED = MK_MINUS2
   !--------------------------------------------------------------
-  use morton_keys, only: mkb, grid_to_morton, morton_neighbor, &
-       morton_decode, morton_encode
+  use morton_keys, only: mkey_t, MK_ZERO, MK_MINUS1, MK_MINUS2, &
+       MORTON_MAXBITS, grid_to_morton, morton_neighbor, &
+       morton_decode, morton_encode, &
+       operator(==), operator(/=)
   implicit none
 
-  integer(mkb), parameter :: MHASH_EMPTY   = -1_mkb
-  integer(mkb), parameter :: MHASH_DELETED = -2_mkb
+  type(mkey_t), parameter :: MHASH_EMPTY   = MK_MINUS1
+  type(mkey_t), parameter :: MHASH_DELETED = MK_MINUS2
 
   type :: morton_hash_table
-     integer(mkb), allocatable :: keys(:)    ! Morton keys
+     type(mkey_t), allocatable :: keys(:)    ! Morton keys
      integer, allocatable      :: igrids(:)  ! Grid indices
      integer :: capacity  ! Always power of 2
      integer :: count     ! Number of entries
@@ -75,16 +77,16 @@ contains
   ! Returns 1-based slot index in [1, capacity]
   !--------------------------------------------------------------
   pure function morton_hash_func(key, capacity) result(slot)
-    integer(mkb), intent(in) :: key
+    type(mkey_t), intent(in) :: key
     integer, intent(in) :: capacity
     integer :: slot
     integer(8) :: h
 
 #ifdef MORTON128
     ! XOR fold 128-bit key to 64-bit
-    h = ieor(int(key, 8), int(ishft(key, -64), 8))
+    h = ieor(key%lo, key%hi)
 #else
-    h = int(key, 8)
+    h = key%lo
 #endif
 
     ! Multiplicative hash (Knuth's golden ratio method)
@@ -103,7 +105,7 @@ contains
   !--------------------------------------------------------------
   subroutine morton_hash_insert(table, key, igrid)
     type(morton_hash_table), intent(inout) :: table
-    integer(mkb), intent(in) :: key
+    type(mkey_t), intent(in) :: key
     integer, intent(in) :: igrid
     integer :: slot, i
 
@@ -115,7 +117,7 @@ contains
     slot = morton_hash_func(key, table%capacity)
 
     do i = 0, table%capacity - 1
-       slot = int(iand(int(slot - 1 + i, mkb), int(table%capacity - 1, mkb))) + 1
+       slot = iand(slot - 1 + i, table%capacity - 1) + 1
 
        if (table%keys(slot) == MHASH_EMPTY .or. &
            table%keys(slot) == MHASH_DELETED) then
@@ -141,13 +143,13 @@ contains
   !--------------------------------------------------------------
   subroutine morton_hash_delete(table, key)
     type(morton_hash_table), intent(inout) :: table
-    integer(mkb), intent(in) :: key
+    type(mkey_t), intent(in) :: key
     integer :: slot, i
 
     slot = morton_hash_func(key, table%capacity)
 
     do i = 0, table%capacity - 1
-       slot = int(iand(int(slot - 1 + i, mkb), int(table%capacity - 1, mkb))) + 1
+       slot = iand(slot - 1 + i, table%capacity - 1) + 1
 
        if (table%keys(slot) == MHASH_EMPTY) then
           ! Key not found
@@ -168,7 +170,7 @@ contains
   !--------------------------------------------------------------
   pure function morton_hash_lookup(table, key) result(igrid)
     type(morton_hash_table), intent(in) :: table
-    integer(mkb), intent(in) :: key
+    type(mkey_t), intent(in) :: key
     integer :: igrid
     integer :: slot, i
 
@@ -178,7 +180,7 @@ contains
     slot = morton_hash_func(key, table%capacity)
 
     do i = 0, table%capacity - 1
-       slot = int(iand(int(slot - 1 + i, mkb), int(table%capacity - 1, mkb))) + 1
+       slot = iand(slot - 1 + i, table%capacity - 1) + 1
 
        if (table%keys(slot) == MHASH_EMPTY) then
           ! Not found
@@ -197,7 +199,7 @@ contains
   !--------------------------------------------------------------
   subroutine morton_hash_rehash(table)
     type(morton_hash_table), intent(inout) :: table
-    integer(mkb), allocatable :: old_keys(:)
+    type(mkey_t), allocatable :: old_keys(:)
     integer, allocatable :: old_igrids(:)
     integer :: old_cap, i
 
@@ -235,16 +237,16 @@ contains
     use amr_commons, only: nx, ny, nz
     integer, intent(in) :: igrid, ilevel, j
     integer :: igridn
-    integer(mkb) :: nmax_x, nmax_y, nmax_z
-    integer(mkb) :: mkey, nkey
+    integer(8) :: nmax_x, nmax_y, nmax_z
+    type(mkey_t) :: mkey, nkey
 
-    nmax_x = int(nx, mkb) * 2_mkb**(ilevel-1)
-    nmax_y = int(ny, mkb) * 2_mkb**(ilevel-1)
-    nmax_z = int(nz, mkb) * 2_mkb**(ilevel-1)
+    nmax_x = int(nx, 8) * 2_8**(ilevel-1)
+    nmax_y = int(ny, 8) * 2_8**(ilevel-1)
+    nmax_z = int(nz, 8) * 2_8**(ilevel-1)
 
     mkey = grid_to_morton(igrid, ilevel)
     nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
-    if (nkey < 0) then
+    if (nkey == MK_MINUS1) then
        igridn = 0
     else
        igridn = morton_hash_lookup(mort_table(ilevel), nkey)
@@ -261,19 +263,19 @@ contains
     use amr_commons, only: nx, ny, nz, ncoarse, ngridmax
     integer, intent(in) :: igrid, ilevel, j
     integer :: icell
-    integer(mkb) :: nmax_x, nmax_y, nmax_z
-    integer(mkb) :: nix, niy, niz, pix, piy, piz
+    integer(8) :: nmax_x, nmax_y, nmax_z
+    integer(8) :: nix, niy, niz, pix, piy, piz
     integer :: ind_oct, igrid_parent
-    integer(mkb) :: mkey, nkey, pkey
+    type(mkey_t) :: mkey, nkey, pkey
 
-    nmax_x = int(nx, mkb) * 2_mkb**(ilevel-1)
-    nmax_y = int(ny, mkb) * 2_mkb**(ilevel-1)
-    nmax_z = int(nz, mkb) * 2_mkb**(ilevel-1)
+    nmax_x = int(nx, 8) * 2_8**(ilevel-1)
+    nmax_y = int(ny, 8) * 2_8**(ilevel-1)
+    nmax_z = int(nz, 8) * 2_8**(ilevel-1)
 
     mkey = grid_to_morton(igrid, ilevel)
     nkey = morton_neighbor(mkey, j, nmax_x, nmax_y, nmax_z)
 
-    if (nkey < 0) then
+    if (nkey == MK_MINUS1) then
        icell = 0
        return
     end if
@@ -285,10 +287,10 @@ contains
        icell = 1 + int(nix) + int(niy)*nx + int(niz)*nx*ny
     else
        ! Fine cell: find parent grid at level ilevel-1
-       pix = nix / 2_mkb
-       piy = niy / 2_mkb
-       piz = niz / 2_mkb
-       ind_oct = 1 + int(mod(nix, 2_mkb)) + 2*int(mod(niy, 2_mkb)) + 4*int(mod(niz, 2_mkb))
+       pix = nix / 2_8
+       piy = niy / 2_8
+       piz = niz / 2_8
+       ind_oct = 1 + int(mod(nix, 2_8)) + 2*int(mod(niy, 2_8)) + 4*int(mod(niz, 2_8))
        pkey = morton_encode(pix, piy, piz)
        igrid_parent = morton_hash_lookup(mort_table(ilevel-1), pkey)
        if (igrid_parent > 0) then

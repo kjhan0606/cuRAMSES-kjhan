@@ -45,10 +45,10 @@ subroutine restore_amr_hdf5()
 
   ! Grid creation variables
   integer :: igrid_new, igrid_prev_cpu, igrid_father, ind_cell
-  integer(mkb) :: ix, iy, iz, ix_p, iy_p, iz_p
+  integer(8) :: ix, iy, iz, ix_p, iy_p, iz_p
   integer :: nxny
   integer :: ngrid_all_int, icpu, grid_offset
-  integer(mkb) :: mkey
+  type(mkey_t) :: mkey
   real(dp) :: twotol
 
   ! Variable-ncpu specific variables
@@ -368,22 +368,22 @@ subroutine restore_amr_hdf5()
            ! Compute father cell index
            if(ilevel == 1) then
               twotol = 1.0d0
-              ix = int(xg_all(i, 1) * twotol, mkb)
-              iy = int(xg_all(i, 2) * twotol, mkb)
-              iz = int(xg_all(i, 3) * twotol, mkb)
+              ix = int(xg_all(i, 1) * twotol, 8)
+              iy = int(xg_all(i, 2) * twotol, 8)
+              iz = int(xg_all(i, 3) * twotol, 8)
               father_cell = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
            else
               twotol = 2.0d0**(ilevel-1)
-              ix = int(xg_all(i, 1) * twotol, mkb)
-              iy = int(xg_all(i, 2) * twotol, mkb)
-              iz = int(xg_all(i, 3) * twotol, mkb)
-              ix_p = ix / 2_mkb
-              iy_p = iy / 2_mkb
-              iz_p = iz / 2_mkb
+              ix = int(xg_all(i, 1) * twotol, 8)
+              iy = int(xg_all(i, 2) * twotol, 8)
+              iz = int(xg_all(i, 3) * twotol, 8)
+              ix_p = ix / 2_8
+              iy_p = iy / 2_8
+              iz_p = iz / 2_8
               mkey = morton_encode(ix_p, iy_p, iz_p)
               igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
               if(igrid_father == 0) cycle  ! Father not on this rank → not active
-              ind_cell = 1 + int(mod(ix, 2_mkb)) + 2 * int(mod(iy, 2_mkb)) + 4 * int(mod(iz, 2_mkb))
+              ind_cell = 1 + int(mod(ix, 2_8)) + 2 * int(mod(iy, 2_8)) + 4 * int(mod(iz, 2_8))
               father_cell = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
            end if
 
@@ -588,18 +588,18 @@ subroutine restore_amr_hdf5()
               ! Set father pointer
               if(ilevel == 1) then
                  twotol = 1.0d0
-                 ix = int(xg_all(ind, 1) * twotol, mkb)
-                 iy = int(xg_all(ind, 2) * twotol, mkb)
-                 iz = int(xg_all(ind, 3) * twotol, mkb)
+                 ix = int(xg_all(ind, 1) * twotol, 8)
+                 iy = int(xg_all(ind, 2) * twotol, 8)
+                 iz = int(xg_all(ind, 3) * twotol, 8)
                  father(igrid_new) = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
               else
                  twotol = 2.0d0**(ilevel-1)
-                 ix = int(xg_all(ind, 1) * twotol, mkb)
-                 iy = int(xg_all(ind, 2) * twotol, mkb)
-                 iz = int(xg_all(ind, 3) * twotol, mkb)
-                 ix_p = ix / 2_mkb
-                 iy_p = iy / 2_mkb
-                 iz_p = iz / 2_mkb
+                 ix = int(xg_all(ind, 1) * twotol, 8)
+                 iy = int(xg_all(ind, 2) * twotol, 8)
+                 iz = int(xg_all(ind, 3) * twotol, 8)
+                 ix_p = ix / 2_8
+                 iy_p = iy / 2_8
+                 iz_p = iz / 2_8
                  mkey = morton_encode(ix_p, iy_p, iz_p)
                  igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
                  if(igrid_father == 0) then
@@ -608,7 +608,7 @@ subroutine restore_amr_hdf5()
                          ' ix_p=', ix_p, ' iy_p=', iy_p, ' iz_p=', iz_p
                     call clean_stop
                  end if
-                 ind_cell = 1 + int(mod(ix, 2_mkb)) + 2 * int(mod(iy, 2_mkb)) + 4 * int(mod(iz, 2_mkb))
+                 ind_cell = 1 + int(mod(ix, 2_8)) + 2 * int(mod(iy, 2_8)) + 4 * int(mod(iz, 2_8))
                  father(igrid_new) = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
               end if
 
