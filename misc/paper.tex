@@ -65,7 +65,7 @@ The central innovation is a recursive \ksec\ domain decomposition that
 replaces the traditional Hilbert curve ordering with a hierarchical
 spatial partitioning.  This approach replaces global \code{MPI\_ALLTOALL} collectives with
 neighbour-only point-to-point communication and maintains a constant
-number of communication partners (6) regardless of the total rank
+number of communication partners regardless of the total rank
 count, improving strong scaling at high concurrency. 
 To address critical memory constraints at scale, we introduce a Morton
 key hash table for octree neighbour lookup alongside on-demand array

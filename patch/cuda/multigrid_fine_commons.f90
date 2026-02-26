@@ -323,8 +323,9 @@ subroutine multigrid_fine(ilevel,icount)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
-            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Black)
 #ifdef HYDRO_CUDA
          end if
 #endif
@@ -442,8 +443,9 @@ subroutine multigrid_fine(ilevel,icount)
          else
 #endif
             call gauss_seidel_mg_fine(ilevel,.true. )  ! Red step
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Red)
             call gauss_seidel_mg_fine(ilevel,.false.)  ! Black step
-            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi
+            call make_virtual_fine_dp(phi(1),ilevel)   ! Communicate phi (Black)
 #ifdef HYDRO_CUDA
          end if
 #endif
@@ -916,8 +918,9 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       ! Solve 'directly'
       do i=1,2*ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Red)
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Black)
       end do
       return
    end if
@@ -933,8 +936,9 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       ! Pre-smoothing
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Red)
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Black)
       end do
 
       ! Compute residual and restrict into upper level RHS
@@ -966,8 +970,9 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
       ! Post-smoothing
       do i=1,ngs_coarse
          call gauss_seidel_mg_coarse(ifinelevel,safe,.true. )  ! Red step
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Red)
          call gauss_seidel_mg_coarse(ifinelevel,safe,.false.)  ! Black step
-         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution
+         call make_virtual_mg_dp(1,ifinelevel)  ! Communicate solution (Black)
       end do
 
    end do
@@ -1633,7 +1638,13 @@ subroutine make_fine_bc_rhs(ilevel,icount)
    nx_loc = icoarse_max-icoarse_min+1
    scale  = boxlen/dble(nx_loc)
    fourpi = 4.D0*ACOS(-1.0D0)*scale
-   if(cosmo) fourpi = 1.5D0*omega_m*aexp*scale
+   if(cosmo) then
+      if(use_neutrino .and. omega_nu > 0.0d0) then
+         fourpi = 1.5D0*(omega_m - omega_nu)*aexp*scale
+      else
+         fourpi = 1.5D0*omega_m*aexp*scale
+      end if
+   end if
 
    dx  = 0.5d0**ilevel
    oneoverdx2 = 1.0d0/(dx*dx)
@@ -2765,6 +2776,8 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    use amr_commons
    use poisson_commons
    use poisson_parameters
+   use neutrino_commons, only: nu_table_loaded, read_neutrino_table, get_nu_ratio
+   use dark_energy_commons, only: compute_de_kspace_params
    use iso_c_binding
    use omp_lib
    implicit none
@@ -2822,6 +2835,12 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    real(dp) :: denom, twopi
    integer(i8b) :: idx_c
 
+   ! Neutrino linear response variables
+   real(dp) :: omega_cb_loc, nu_factor, R_nu_val, k_phys
+
+   ! DE perturbation variables
+   real(dp) :: de_kappa2, de_alpha, k_tilde_sq, de_factor
+
    ! MPI ALLTOALLV variables for large-grid path
    integer, allocatable :: sendcounts(:), sdispls(:)
    integer, allocatable :: recvcounts(:), rdispls(:)
@@ -2855,6 +2874,14 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
         ' FFTW3 Poisson: level=', ilevel, &
         ' grid=', fft_Nx, 'x', fft_Ny, 'x', fft_Nz, &
         ' N=', N_total, ' distributed=', use_distributed
+
+   ! ================================================================
+   ! Step 0b: Load neutrino table (once)
+   ! ================================================================
+   if(use_neutrino .and. .not. nu_table_loaded) then
+      call read_neutrino_table(trim(neutrino_table))
+      if(myid==1) write(*,'(A)') '   Neutrino transfer function table loaded'
+   end if
 
    ! ================================================================
    ! Step 1: FFTW initialization (once)
@@ -3226,11 +3253,51 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       ! --- Step 5: Forward R2C FFT ---
       call fftw_mpi_execute_dft_r2c(plan_r2c, rdata_fftw, cdata_fftw)
 
-      ! --- Step 6: Apply Green's function ---
+      ! --- Precompute DE kspace params if needed ---
+      if(de_perturb .and. cs2_de > 0.0d0) then
+         call compute_de_kspace_params(aexp, de_kappa2, de_alpha)
+      end if
+
+      ! --- Step 6: Apply Green's function (+ neutrino/DE corrections) ---
       N_complex = int(local_nx_fftw,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
-      do idx_c = 0, N_complex-1
-         cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c)
-      end do
+      if((use_neutrino .and. omega_nu > 0.0d0) .or. &
+         (de_perturb .and. cs2_de > 0.0d0)) then
+         if(use_neutrino .and. omega_nu > 0.0d0) omega_cb_loc = omega_m - omega_nu
+         do idx_c = 0, N_complex-1
+            ! Compute integer wave numbers for this mode
+            kx_i = int(nx_start_fftw) + int(idx_c / (int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b)))
+            ky_i = int(mod(idx_c / int(fft_Nz/2+1,i8b), int(fft_Ny,i8b)))
+            kz_i = int(mod(idx_c, int(fft_Nz/2+1,i8b)))
+            ! Fold to negative frequencies
+            if(kx_i > fft_Nx/2) kx_i = kx_i - fft_Nx
+            if(ky_i > fft_Ny/2) ky_i = ky_i - fft_Ny
+
+            ! Combined correction factors (default 1.0 = no change)
+            nu_factor = 1.0d0
+            de_factor = 1.0d0
+
+            ! Neutrino correction
+            if(use_neutrino .and. omega_nu > 0.0d0) then
+               k_phys = twopi * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+               if(k_phys > 0.0d0) then
+                  R_nu_val = get_nu_ratio(k_phys, aexp)
+                  nu_factor = 1.0d0 + (omega_nu / omega_cb_loc) * R_nu_val
+               end if
+            end if
+
+            ! DE perturbation correction: (k^2+kappa^2)/(k^2+kappa^2+alpha)
+            if(de_perturb .and. cs2_de > 0.0d0) then
+               k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
+               de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+            end if
+
+            cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c) * nu_factor * de_factor
+         end do
+      else
+         do idx_c = 0, N_complex-1
+            cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c)
+         end do
+      end if
 
       ! --- Step 7: Inverse C2R FFT ---
       call fftw_mpi_execute_dft_c2r(plan_c2r, cdata_fftw, rdata_fftw)
@@ -3352,11 +3419,49 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       ! --- Step 3: Forward R2C FFT ---
       call fftw_execute_dft_r2c(plan_r2c, rhs_3d, cdata)
 
-      ! --- Step 4: Apply Green's function ---
+      ! --- Precompute DE kspace params if needed ---
+      if(de_perturb .and. cs2_de > 0.0d0) then
+         call compute_de_kspace_params(aexp, de_kappa2, de_alpha)
+      end if
+
+      ! --- Step 4: Apply Green's function (+ neutrino/DE corrections) ---
       N_complex = int(fft_Nx,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
-      do idx_c = 0, N_complex-1
-         cdata(idx_c) = cdata(idx_c) * green(idx_c)
-      end do
+      if((use_neutrino .and. omega_nu > 0.0d0) .or. &
+         (de_perturb .and. cs2_de > 0.0d0)) then
+         if(use_neutrino .and. omega_nu > 0.0d0) omega_cb_loc = omega_m - omega_nu
+         do idx_c = 0, N_complex-1
+            kx_i = int(idx_c / (int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b)))
+            ky_i = int(mod(idx_c / int(fft_Nz/2+1,i8b), int(fft_Ny,i8b)))
+            kz_i = int(mod(idx_c, int(fft_Nz/2+1,i8b)))
+            if(kx_i > fft_Nx/2) kx_i = kx_i - fft_Nx
+            if(ky_i > fft_Ny/2) ky_i = ky_i - fft_Ny
+
+            ! Combined correction factors
+            nu_factor = 1.0d0
+            de_factor = 1.0d0
+
+            ! Neutrino correction
+            if(use_neutrino .and. omega_nu > 0.0d0) then
+               k_phys = twopi * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+               if(k_phys > 0.0d0) then
+                  R_nu_val = get_nu_ratio(k_phys, aexp)
+                  nu_factor = 1.0d0 + (omega_nu / omega_cb_loc) * R_nu_val
+               end if
+            end if
+
+            ! DE perturbation correction
+            if(de_perturb .and. cs2_de > 0.0d0) then
+               k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
+               de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+            end if
+
+            cdata(idx_c) = cdata(idx_c) * green(idx_c) * nu_factor * de_factor
+         end do
+      else
+         do idx_c = 0, N_complex-1
+            cdata(idx_c) = cdata(idx_c) * green(idx_c)
+         end do
+      end if
 
       ! --- Step 5: Inverse C2R FFT ---
       call fftw_execute_dft_c2r(plan_c2r, cdata, rhs_3d)

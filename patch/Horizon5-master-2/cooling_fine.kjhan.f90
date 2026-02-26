@@ -154,11 +154,11 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
 #ifdef RT
   integer::ii,ig,iNp,il
   real(kind=8),dimension(1:nvector):: ekk_new
-  logical,dimension(1:nvector)::cooling_on=.true.
+  logical,dimension(1:nvector)::cooling_on
   real(dp)::scale_Np,scale_Fp,work,Npc,fred,Npnew, kScIR, EIR, TR
   real(dp),dimension(1:ndim)::Fpnew
   real(dp),dimension(nIons, 1:nvector):: xion
-  real(dp),dimension(nGroups, 1:nvector):: Np, Np_boost=0d0, dNpdt=0d0
+  real(dp),dimension(nGroups, 1:nvector):: Np, Np_boost, dNpdt
   real(dp),dimension(ndim, nGroups, 1:nvector):: Fp, Fp_boost, dFpdt
   real(dp),dimension(ndim, 1:nvector):: p_gas, u_gas
   real(kind=8)::f_trap, NIRtot, EIR_trapped, unit_tau, tau, Np2Ep, aexp_loc
@@ -401,6 +401,14 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
 
 #ifdef RT
      if(neq_chem) then
+        ! Initialize RT arrays (avoid implicit SAVE with OpenMP)
+        cooling_on(1:nleaf)=.true.
+        do ig=1,nGroups
+           do i=1,nleaf
+              Np_boost(ig,i)=0d0
+              dNpdt(ig,i)=0d0
+           end do
+        end do
         ! Get the ionization fractions
         do ii=0,nIons-1
            do i=1,nleaf

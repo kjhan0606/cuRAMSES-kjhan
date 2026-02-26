@@ -47,7 +47,9 @@ subroutine create_sink
   ! Create new sink particles
   call kjhan_make_sink(nlevelmax)
   do ilevel=nlevelmax-1,1,-1
-     if(ilevel>=levelmin)call kjhan_make_sink(ilevel)
+     if(ilevel>=levelmin)then
+        call kjhan_make_sink(ilevel)
+     endif
      call merge_tree_fine(ilevel)
   end do
   call system_clock(cs_t3)
@@ -373,7 +375,7 @@ subroutine kjhan_make_sink(ilevel)
   ntot=0
   ! Loop over grids
   ncache=active(ilevel)%ngrid
-!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz, ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi ) reduction(+: ntot) schedule(static)
+!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz, ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi) reduction(+: ntot) schedule(static)
   do igrid=1,ncache,nvector
      ngrid=MIN(nvector,ncache-igrid+1)
      do i=1,ngrid
@@ -404,15 +406,12 @@ subroutine kjhan_make_sink(ilevel)
 
            ! Check if the stellar density is higher than a star formation threshold
            if(star.and.rho_star(ind_cell(i))<d_star)ok(i)=.false.
-!!$      ! Check if the star ratio is higher than a certain fraction
-!!$      if(star.and.star_ratio<star_ratio_floor)ok(i)=.false.
           ! Check if the density is higher than star formation threshold
           if(d      <d_star )ok(i)=.false.
           ! Check if gas is Jeans unstable
           if(d      <d_thres)ok(i)=.false.
           ! Quenching criterion
            if(flag2(ind_cell(i))==1)ok(i)=.false.
-
           if(ok(i).and.nsink>0)then
              x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
              y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
@@ -485,14 +484,12 @@ subroutine kjhan_make_sink(ilevel)
   end do
 
 
-
   ! Cleanup spatial bins
   if(nsink>0)then
      deallocate(bin_head_sink,sink_next)
   endif
 
   if(verbose)write(*,*)'Check multiple sink creation',ntot
-!  write(*,*)'Check multiple sink creation',myid,ntot
   !--------------------------------------------------------------------------------------
   !------NEW: This part avoids multiple sink creation at same coarse time step ----------
   !--------------------------------------------------------------------------------------
@@ -1892,10 +1889,13 @@ subroutine kjhan_mk_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   logical ,dimension(1:nvector),save::ok_true=.true.
 #else
   integer ,dimension(1:nvector)::ind_cloud
-  logical ,dimension(1:nvector)::ok_true=.true.
+  logical ,dimension(1:nvector)::ok_true
 #endif
   real(dp)::vol_min,dx
   integer::i,ijk,nall
+
+  ! Initialize ok_true (avoid implicit SAVE with OpenMP)
+  ok_true=.true.
 
   ! Mesh spacing in that level
   dx_loc=0.5D0**ilevel
@@ -4634,7 +4634,7 @@ subroutine cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   ! Particle-based arrays
   logical ,dimension(1:nvector)::ok
   real(dp),dimension(1:nvector)::mmm
-  real(dp),dimension(1:nvector)::ttt=0d0
+  real(dp),dimension(1:nvector)::ttt
   real(dp),dimension(1:nvector)::vol2
   real(dp),dimension(1:nvector,1:ndim)::x,dd,dg
   integer ,dimension(1:nvector,1:ndim)::ig,id,igg,igd,icg,icd
@@ -4692,6 +4692,9 @@ subroutine cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   end do
 
   ! Gather particle birth epoch
+  do j=1,nvector
+     ttt(j)=0d0
+  end do
   if(star)then
      do j=1,np
        ttt(j)=tp(ind_part(j))

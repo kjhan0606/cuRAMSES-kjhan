@@ -524,8 +524,8 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   ! Particle-based arrays
   logical ,dimension(1:nvector)::ok
   real(dp),dimension(1:nvector)::mmm
-  real(dp),dimension(1:nvector)::ttt=0d0
-  integer(i8b) ,dimension(1:nvector)::iii=0
+  real(dp),dimension(1:nvector)::ttt
+  integer(i8b) ,dimension(1:nvector)::iii
   real(dp),dimension(1:nvector)::vol2
   real(dp),dimension(1:nvector,1:ndim)::x,dd,dg
   integer ,dimension(1:nvector,1:ndim)::ig,id,igg,igd,icg,icd
@@ -585,6 +585,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   end if
 
 
+  ! Initialize ttt and iii (avoid implicit SAVE with OpenMP)
+  do j=1,nvector
+     ttt(j)=0d0
+  end do
+  do j=1,nvector
+     iii(j)=0
+  end do
   ! Gather particle birth epoch
   if(star)then
      do j=1,np
@@ -1589,7 +1596,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   ! Particle-based arrays
   logical ,dimension(1:nvector)::ok,abandoned
   real(dp),dimension(1:nvector)::mmm
-  real(dp),dimension(1:nvector)::ttt=0d0
+  real(dp),dimension(1:nvector)::ttt
   real(dp),dimension(1:nvector)::vol2
   real(dp),dimension(1:nvector,1:ndim)::x,cl,cr,cc,wl,wr,wc
   integer ,dimension(1:nvector,1:ndim)::igl,igr,igc,icl,icr,icc
@@ -1651,6 +1658,14 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      end do
   end if
 
+  ! Initialize ttt (avoid implicit SAVE with OpenMP)
+  do j=1,nvector
+     ttt(j)=0d0
+  end do
+  ! Initialize ttt (avoid undefined values for non-star particles)
+  do j=1,nvector
+     ttt(j)=0d0
+  end do
   ! Gather particle birth epoch
   if(star)then
      do j=1,np

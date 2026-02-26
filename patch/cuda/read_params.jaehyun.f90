@@ -31,8 +31,11 @@ subroutine read_params
        & ,jobcontrolfile &
        & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
        & ,use_fftw &
-       & ,exchange_method
-  namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de
+       & ,exchange_method &
+       & ,use_neutrino
+  namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de &
+       & ,de_perturb &
+       & ,omega_nu,neutrino_table
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
        & ,informat,outformat
@@ -227,6 +230,45 @@ subroutine read_params
   !-------------------------------------------------
   if(ordering=='ksection' .and. myid==1) then
      write(*,'(A,A)') ' Exchange method: ', trim(exchange_method)
+  end if
+
+  !-------------------------------------------------
+  ! DE perturbation (CPL, cs2_de > 0)
+  !-------------------------------------------------
+  if(de_perturb) then
+     if(cs2_de <= 0.0d0) then
+        if(myid==1) write(*,*) 'WARNING: de_perturb=T but cs2_de<=0, disabling'
+        de_perturb = .false.
+     else if(.not. cosmo) then
+        if(myid==1) write(*,*) 'WARNING: de_perturb=T but not cosmo run, disabling'
+        de_perturb = .false.
+     else
+        if(myid==1) then
+           write(*,'(A,ES10.3,A,F6.3,A,F6.3)') &
+                ' DE perturbation: cs2_de=', cs2_de, &
+                ' w0=', w0, ' wa=', wa
+        end if
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Neutrino linear response
+  !-------------------------------------------------
+  if(use_neutrino) then
+     if(omega_nu <= 0.0d0) then
+        if(myid==1) write(*,*) 'WARNING: use_neutrino=T but omega_nu<=0, disabling'
+        use_neutrino = .false.
+     else if(len_trim(neutrino_table) == 0) then
+        if(myid==1) write(*,*) 'WARNING: use_neutrino=T but neutrino_table not set, disabling'
+        use_neutrino = .false.
+     else
+        if(myid==1) then
+           write(*,'(A,F7.4,A,F7.4)') &
+                ' Neutrino linear response: omega_nu=', omega_nu, &
+                ' omega_cb=', omega_m - omega_nu
+           write(*,'(A,A)') '   table: ', trim(neutrino_table)
+        end if
+     end if
   end if
 
   !-------------------------------------------------
