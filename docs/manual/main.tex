@@ -2232,6 +2232,22 @@ Runtime control parameters.
 \multicolumn{4}{l}{\textit{FFTW3 direct Poisson solver (new)}} \\
 \midrule
 \texttt{use\_fftw} & logical & \texttt{.false.} & FFTW3 CPU direct FFT solve for uniform levels (Ch.~\ref{ch:fftw3}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Neutrino linear response (new)}} \\
+\midrule
+\texttt{use\_neutrino} & logical & \texttt{.false.} & Enable massive neutrino correction in Poisson solver (Ch.~\ref{ch:neutrino}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Exchange method auto-tuning (new)}} \\
+\midrule
+\texttt{exchange\_method} & char & \texttt{auto} & MPI exchange method: \texttt{auto}, \texttt{p2p}, \texttt{ksection} \\
+\midrule
+\multicolumn{4}{l}{\textit{GPU sink feedback (new)}} \\
+\midrule
+\texttt{gpu\_sink} & logical & \texttt{.false.} & GPU-accelerated AGN feedback kernels \\
+\midrule
+\multicolumn{4}{l}{\textit{Sink particle load balancing (new)}} \\
+\midrule
+\texttt{mem\_weight\_sink} & real(dp) & 500 & Computational cost weight per sink for memory-based LB \\
 \bottomrule
 \end{longtable}
 
@@ -2452,7 +2468,16 @@ description.
 \midrule
 \texttt{w0} & real(dp) & $-1$ & Present-day DE EoS: $w(a) = w_0 + w_a(1-a)$ \\
 \texttt{wa} & real(dp) & 0 & Time variation of DE EoS \\
-\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (reserved for future use) \\
+\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (for DE perturbation) \\
+\midrule
+\multicolumn{4}{l}{\textit{Dark energy perturbation (new)}} \\
+\midrule
+\texttt{de\_perturb} & logical & \texttt{.false.} & Enable DE density perturbation in FFT Poisson solver \\
+\midrule
+\multicolumn{4}{l}{\textit{Massive neutrino (new)}} \\
+\midrule
+\texttt{omega\_nu} & real(dp) & 0 & Neutrino density $\Omega_\nu$ ($\Omega_m$ includes $\Omega_\nu$) \\
+\texttt{neutrino\_table} & char(256) & \texttt{''} & Path to CAMB transfer function table \\
 \bottomrule
 \end{longtable}
 
@@ -2462,6 +2487,9 @@ description.
   \item $w_0$, $w_a$ are not stored in the GRAFIC2 IC header (fixed 44-byte layout).  They must be specified here when using CPL dark energy.
   \item Setting $w_0=-1$, $w_a=0$ (or omitting the block) produces results \textbf{bit-identical} to the original $\Lambda$CDM code.
   \item The cosmological parameters (\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, \texttt{h0}) in this block override values read from the IC header.
+  \item \texttt{omega\_nu}: $\Omega_\nu = \Sigma m_\nu / (93.14\,h^2\;\text{eV})$.  For the minimal mass ($\Sigma m_\nu = 0.06\,$eV, $h=0.6774$): $\Omega_\nu \approx 0.00140$.
+  \item \texttt{de\_perturb} requires \texttt{cs2\_de} $> 0$ and a cosmological run.
+  \item \texttt{neutrino\_table}: generate with \texttt{python3 misc/generate\_neutrino\_table.py}.
 \end{itemize}
 
 

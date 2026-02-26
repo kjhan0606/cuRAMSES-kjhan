@@ -3,6 +3,9 @@ recursive subroutine amr_step(ilevel,icount)
   use pm_commons
   use hydro_commons
   use poisson_commons
+#ifdef HYDRO_CUDA
+  use cuda_commons, only: cuda_pool_is_initialized_c
+#endif
 #ifdef RT
   use rt_hydro_commons
   use SED_module

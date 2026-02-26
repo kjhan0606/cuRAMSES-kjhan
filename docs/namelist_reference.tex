@@ -643,6 +643,113 @@ use_fftw = .true.
 ! Requires: make HDF5=1 USE_FFTW=1
 \end{lstlisting}
 
+% ------------------------------------------------------------------
+\paramheader{use\_neutrino}{logical}{.false.}
+\label{param:use_neutrino}
+
+\begin{quote}
+Enable massive neutrino linear response in the Poisson solver.  When
+\texttt{.true.}, the gravitational potential receives a scale-dependent
+correction from neutrino density perturbations, computed via the CAMB
+transfer function ratio $R_\nu(k,a) = T_\nu(k,a) / T_{\mathrm{cb}}(k,a)$.
+
+\textbf{FFT solver path} (uniform levels with \paramref{use_fftw} or
+\paramref{gpu_fft}): in Fourier space, the potential is modified as
+\[
+  \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
+  \Bigl[1 + \frac{\Omega_\nu}{\Omega_{\mathrm{cb}}} R_\nu(k, a)\Bigr]
+\]
+where $\Omega_{\mathrm{cb}} = \Omega_m - \Omega_\nu$.
+
+\textbf{Multigrid solver path} (AMR levels): the Poisson source term
+uses $\Omega_{\mathrm{cb}}$ instead of $\Omega_m$:
+\[
+  4\pi G \to \tfrac{3}{2}\,\Omega_{\mathrm{cb}}\,a
+\]
+The neutrino contribution to the uniform background is already captured
+by the Friedmann equation (where $\Omega_m$ includes neutrinos).
+
+\textbf{Requires:}
+\begin{itemize}[nosep]
+  \item \paramref{omega_nu} $> 0$ in \texttt{\&COSMO\_PARAMS}
+  \item \paramref{neutrino_table} pointing to a valid CAMB table file
+\end{itemize}
+
+If either is missing, the code prints a warning and disables neutrinos.
+
+\apinote{Generate the transfer function table with
+\texttt{python3 misc/generate\_neutrino\_table.py}.  This produces a
+200~$k$-point $\times$ 50~$a$-point table using CAMB (default:
+$\Sigma m_\nu = 0.06\,$eV).  When $\Omega_\nu = 0$, the code produces
+bit-identical results to a run without this flag.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{exchange\_method}{character}{`auto'}
+\label{param:exchange_method}
+
+\begin{quote}
+MPI exchange method for virtual boundary (ghost zone) communication.
+\begin{description}[style=nextline,leftmargin=2.5cm,font=\ttfamily]
+  \item[`auto'] Adaptive auto-tuning.  The code benchmarks both methods
+    during the first 50 calls for each of the 7 exchange components
+    (fine/reverse/pair/bulk, dp/int), then selects the faster method.
+    Periodic re-checks occur every 500 calls (with exponential backoff)
+    to adapt to evolving load patterns.
+  \item[`p2p'] Force point-to-point (\texttt{MPI\_ISEND/IRECV}) for all
+    exchanges.
+  \item[`ksection'] Force k-section tree routing for all exchanges.
+\end{description}
+
+\textbf{Requires} \paramref{ordering}\texttt{='ksection'} for the
+\texttt{'ksection'} and \texttt{'auto'} options.
+
+\apinote{The 7 exchange components tuned independently are:
+\texttt{fine\_dp}, \texttt{fine\_int}, \texttt{reverse\_dp},
+\texttt{reverse\_int}, \texttt{pair\_int}, \texttt{bulk\_dp}, and
+\texttt{bulk\_rev\_dp}.  Auto-tuning decisions are synchronised across
+all ranks via \texttt{MPI\_ALLREDUCE(SUM)} to ensure consistent
+communication patterns.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{gpu\_sink}{logical}{.false.}
+\label{param:gpu_sink}
+
+\begin{quote}
+Enable GPU-accelerated AGN feedback kernels (average\_AGN and
+AGN\_blast).  When \texttt{.true.}, sink particle feedback operations
+are offloaded to the GPU using flattened cell arrays and a 27-bin
+spatial binning kernel.
+
+\apinote{Benchmarks show CPU spatial binning is consistently faster than
+the GPU path ($1.8\,$s vs $8.0\,$s on A100).  The GPU auto-tuning
+framework (see Section~\ref{sec:run_params}) will correctly select the
+CPU path in most cases.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mem\_weight\_sink}{real(dp)}{500}
+\label{param:mem_weight_sink}
+
+\begin{quote}
+Computational cost weight per sink particle for memory-based load
+balancing.  When \paramref{memory_balance}\texttt{=.true.}, grids
+containing sink particles receive an additional cost proportional to
+this weight, so the bisection algorithm distributes sink-hosting grids
+more evenly across MPI processes.
+
+The total cell cost becomes:
+\[
+  C_{\text{cell}} = \frac{\texttt{mem\_weight\_grid}}{\texttt{twotondim}}
+                + n_{\text{part}} \times
+                  \frac{\texttt{mem\_weight\_part}}{\texttt{twotondim}}
+                + n_{\text{sink}} \times \texttt{mem\_weight\_sink}
+\]
+where $n_{\text{sink}}$ is the number of sink particles in the grid,
+determined by AMR tree descent from sink positions.
+\end{quote}
+
 
 %======================================================================
 \section{\texttt{\&AMR\_PARAMS} -- Adaptive Mesh Refinement}
@@ -1794,11 +1901,107 @@ observational constraints give $w_a \in [-1, 1]$.
 \label{param:cs2_de}
 
 \begin{quote}
-Dark energy sound speed squared $c_s^2$ (in units of $c^2$).  This
-parameter is declared for future use in dark energy perturbation
-theory (clustering dark energy) but is \textbf{not yet used} in the
-current code.  Set to~0 for the standard smooth dark energy
-assumption.
+Dark energy sound speed squared $c_s^2$ (in units of $c^2$).  Used
+in conjunction with \paramref{de_perturb}\texttt{=.true.}\ to include
+dark energy perturbations in the FFT Poisson solver.  Set to~0 for the
+standard smooth dark energy (cosmological constant) assumption.
+
+When $c_s^2 > 0$ and DE perturbations are enabled, the FFT solver
+applies a $k$-dependent correction factor:
+\[
+  \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
+  \frac{k^2 + \kappa^2}{k^2 + \kappa^2 + \alpha}
+\]
+where $\kappa^2$ and $\alpha$ are computed from $c_s^2$, $w(a)$, and
+the background DE density at the current scale factor.
+
+Typical values: $c_s^2 = 1$ (speed-of-light sound speed, most common
+in literature) or $c_s^2 \ll 1$ for clustering dark energy models.
+
+\apinote{Only effective in the FFT solver path (\paramref{use_fftw} or
+\paramref{gpu_fft}).  The multigrid V-cycle on AMR levels does not
+include DE perturbation corrections.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{de\_perturb}{logical}{.false.}
+\label{param:de_perturb}
+
+\begin{quote}
+Enable dark energy density perturbations in the Poisson solver.  When
+\texttt{.true.}\ and \paramref{cs2_de}~$> 0$, the FFT solver modifies
+the gravitational potential in Fourier space to account for the
+clustering of dark energy.
+
+\textbf{Requires:}
+\begin{itemize}[nosep]
+  \item \paramref{cosmo}\texttt{=.true.}
+  \item \paramref{cs2_de}~$> 0$
+  \item FFT solver active (\paramref{use_fftw} or \paramref{gpu_fft})
+\end{itemize}
+
+If \texttt{cs2\_de}~$\leq 0$ or the run is not cosmological, the code
+prints a warning and disables this flag.
+
+\apinote{Can be combined with \paramref{use_neutrino} --- both
+corrections are applied multiplicatively in Fourier space.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{omega\_nu}{real(dp)}{0}
+\label{param:omega_nu}
+
+\begin{quote}
+Massive neutrino density parameter $\Omega_\nu$.  The total matter
+density $\Omega_m$ is interpreted as CDM~+~baryons~+~neutrinos, so the
+CDM~+~baryon component is $\Omega_{\mathrm{cb}} = \Omega_m -
+\Omega_\nu$.
+
+For the standard minimal-mass normal hierarchy ($\Sigma m_\nu =
+0.06\,$eV):
+\[
+  \Omega_\nu = \frac{\Sigma m_\nu}{93.14\,h^2\;\text{eV}}
+  \approx 0.00140 \quad (h = 0.6774)
+\]
+
+Used by the neutrino linear response when
+\paramref{use_neutrino}\texttt{=.true.}\ (set in
+\texttt{\&RUN\_PARAMS}).
+
+\apinote{When $\Omega_\nu = 0$, the code produces bit-identical results
+regardless of \paramref{use_neutrino}.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{neutrino\_table}{character(256)}{'' (empty)}
+\label{param:neutrino_table}
+
+\begin{quote}
+Path to the CAMB transfer function ratio table for neutrino linear
+response.  The table contains $R_\nu(k, a) = T_\nu / T_{\mathrm{cb}}$
+on a $(N_k \times N_a)$ grid.
+
+\textbf{File format} (ASCII, space-separated):
+\begin{verbatim}
+Nk  Na
+k_1  k_2  ...  k_Nk          ! wavenumbers [h/Mpc]
+a_1  a_2  ...  a_Na          ! scale factors
+R(k_1,a_1) R(k_2,a_1) ...   ! ratio values, row-major
+R(k_1,a_2) R(k_2,a_2) ...
+...
+\end{verbatim}
+
+Generate with:
+\begin{verbatim}
+python3 misc/generate_neutrino_table.py
+\end{verbatim}
+This script uses CAMB to compute the transfer functions for a given
+neutrino mass sum (default $0.06\,$eV) and outputs a table with
+200~$k$-points (log-spaced, $10^{-4}$--$10\;h/$Mpc) and 50~$a$-points
+(log-spaced, $a_{\min}$--$1$).
+
+\textbf{Requires} \paramref{use_neutrino}\texttt{=.true.}\ and
+\paramref{omega_nu}~$> 0$.
 \end{quote}
 
 
@@ -1976,6 +2179,22 @@ should be set consistently.
 \texttt{ngridtot}
   & \texttt{nparttot}
   & Both determine per-process memory usage \\
+\addlinespace
+\texttt{use\_neutrino}
+  & \texttt{omega\_nu}, \texttt{neutrino\_table}
+  & All three must be set for neutrino response \\
+\addlinespace
+\texttt{de\_perturb}
+  & \texttt{cs2\_de}, \texttt{w0}, \texttt{wa}
+  & DE perturbation requires $c_s^2 > 0$ and CPL EOS \\
+\addlinespace
+\texttt{exchange\_method}
+  & \texttt{ordering}
+  & Auto-tune requires \texttt{ksection} ordering \\
+\addlinespace
+\texttt{memory\_balance}
+  & \texttt{mem\_weight\_sink}
+  & Sink cost weight for load balancing \\
 \end{longtable}
 
 
