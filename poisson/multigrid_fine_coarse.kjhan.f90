@@ -27,7 +27,7 @@ subroutine restrict_mask_coarse(ifinelevel,allmasked)
    logical, intent(out) :: allmasked
 
    integer :: ind_c_cell, ind_f_cell, cpu_amr
-   
+
    integer :: iskip_c_amr, iskip_c_mg
    integer :: igrid_c_amr, igrid_c_mg
    integer :: icell_c_amr, icell_c_mg
@@ -44,13 +44,12 @@ subroutine restrict_mask_coarse(ifinelevel,allmasked)
    allmasked=.true.
 
    ! Loop over coarse cells of the myid active comm
-      ! Loop over coarse grids of myid
-!$omp parallel do private(ind_c_cell, iskip_c_amr,iskip_c_mg,igrid_c_mg,igrid_c_amr,icell_c_amr,icell_c_mg,igrid_f_amr,cpu_amr,ngpmask,igrid_f_mg,ind_f_cell,iskip_f_mg,icell_f_mg) reduction(.and.: allmasked)
-   do igrid_c_mg=1,active_mg(myid,icoarselevel)%ngrid
-      do ind_c_cell=1,twotondim
-         iskip_c_amr=ncoarse+(ind_c_cell-1)*ngridmax
-         iskip_c_mg =(ind_c_cell-1)*active_mg(myid,icoarselevel)%ngrid
+   do ind_c_cell=1,twotondim
+      iskip_c_amr=ncoarse+(ind_c_cell-1)*ngridmax
+      iskip_c_mg =(ind_c_cell-1)*active_mg(myid,icoarselevel)%ngrid
 
+      ! Loop over coarse grids of myid
+      do igrid_c_mg=1,active_mg(myid,icoarselevel)%ngrid
          igrid_c_amr=active_mg(myid,icoarselevel)%igrid(igrid_c_mg)
          icell_c_amr=iskip_c_amr+igrid_c_amr
          icell_c_mg =iskip_c_mg +igrid_c_mg
@@ -98,7 +97,7 @@ subroutine restrict_mask_coarse_reverse(ifinelevel)
    integer, intent(in) :: ifinelevel
 
    integer :: ind_c_cell, ind_f_cell, cpu_amr
-   
+
    integer :: iskip_c_mg
    integer :: igrid_c_amr, igrid_c_mg
    integer :: icell_c_amr, icell_c_mg
@@ -113,12 +112,12 @@ subroutine restrict_mask_coarse_reverse(ifinelevel)
    integer :: icoarselevel
    icoarselevel=ifinelevel-1
 
-   ! Loop over fine grids of myid
-!$omp parallel do private(ind_f_cell,iskip_f_mg,igrid_f_mg,icell_f_mg,igrid_f_amr,icell_c_amr,ind_c_cell,igrid_c_amr,cpu_amr,igrid_c_mg,iskip_c_mg,icell_c_mg,ngpmask)
-   do igrid_f_mg=1,active_mg(myid,ifinelevel)%ngrid
-      ! Loop over fine cells of the myid active comm
-      do ind_f_cell=1,twotondim
-         iskip_f_mg =(ind_f_cell-1)*active_mg(myid,ifinelevel)%ngrid
+   ! Loop over fine cells of the myid active comm
+   do ind_f_cell=1,twotondim
+      iskip_f_mg =(ind_f_cell-1)*active_mg(myid,ifinelevel)%ngrid
+
+      ! Loop over fine grids of myid
+      do igrid_f_mg=1,active_mg(myid,ifinelevel)%ngrid
          icell_f_mg=iskip_f_mg+igrid_f_mg
          igrid_f_amr=active_mg(myid,ifinelevel)%igrid(igrid_f_mg)
          ! Get coarse grid AMR index and CPU id
@@ -147,18 +146,18 @@ subroutine cmp_residual_mg_coarse(ilevel)
    ! Computes the residual for pure MG levels, and stores it into active_mg(myid,ilevel)%u(:,3)
    use amr_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
 
    integer, dimension(1:3,1:2,1:8) :: iii, jjj
 
    real(dp) :: dx, oneoverdx2, phi_c, nb_sum
-   integer  :: ngrid, j
+   integer  :: ngrid
    integer  :: ind, igrid_mg, idim, inbor
    integer  :: icell_mg, iskip_mg, igrid_nbor_mg, icell_nbor_mg
    integer  :: igrid_amr, iskip_amr, cpu_nbor_amr
    integer  :: igshift, igrid_nbor_amr
-   integer  :: nbor_grids_cache(1:twondim), nbor_cpu_cache(1:twondim)
 
    real(dp) :: dtwondim = (twondim)
 
@@ -175,20 +174,16 @@ subroutine cmp_residual_mg_coarse(ilevel)
 
    ngrid=active_mg(myid,ilevel)%ngrid
 
-   ! Loop over active grids myid
-!$omp parallel do private(igrid_mg,ind,iskip_mg,iskip_amr,igrid_amr,icell_mg,phi_c,nb_sum,inbor,idim,igshift,igrid_nbor_amr,cpu_nbor_amr,igrid_nbor_mg,icell_nbor_mg,j,nbor_grids_cache,nbor_cpu_cache)
-   do igrid_mg=1,ngrid
-      igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
-      ! Use precomputed neighbor grids and CPUs from cache
-      do j=1,twondim
-         nbor_grids_cache(j) = nbor_mg_cache(ilevel)%grid(j, igrid_mg)
-         nbor_cpu_cache(j)   = nbor_mg_cache(ilevel)%cpu(j, igrid_mg)
-      end do
-      ! Loop over cells myid
-      do ind=1,twotondim
-         iskip_mg  = (ind-1)*ngrid
-         iskip_amr = ncoarse+(ind-1)*ngridmax
+   ! Loop over cells myid
+!$omp parallel default(firstprivate) shared(active_mg,son,cpu_map,lookup_mg)
+   do ind=1,twotondim
+      iskip_mg  = (ind-1)*ngrid
+      iskip_amr = ncoarse+(ind-1)*ngridmax
 
+      ! Loop over active grids myid
+!$omp do
+      do igrid_mg=1,ngrid
+         igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
          icell_mg = igrid_mg + iskip_mg
 
          phi_c = active_mg(myid,ilevel)%u(icell_mg,1)
@@ -198,14 +193,14 @@ subroutine cmp_residual_mg_coarse(ilevel)
          if(.not. btest(active_mg(myid,ilevel)%f(icell_mg,1),0)) then ! NO SCAN
             do inbor=1,2
                do idim=1,ndim
-                  ! Get neighbor grid (from cache)
+                  ! Get neighbor grid
                   igshift = iii(idim,inbor,ind)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                     cpu_nbor_amr   = nbor_cpu_cache(igshift)
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
                   igrid_nbor_mg = lookup_mg(igrid_nbor_amr)
                   ! Add up
@@ -220,16 +215,16 @@ subroutine cmp_residual_mg_coarse(ilevel)
                active_mg(myid,ilevel)%u(icell_mg,3)=0.0
                cycle
             end if
-            do idim=1,ndim
-               do inbor=1,2
-                  ! Get neighbor grid (from cache)
+            do inbor=1,2
+                do idim=1,ndim
+                  ! Get neighbor grid
                   igshift = iii(idim,inbor,ind)
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                     cpu_nbor_amr   = nbor_cpu_cache(igshift)
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -264,7 +259,9 @@ subroutine cmp_residual_mg_coarse(ilevel)
          active_mg(myid,ilevel)%u(icell_mg,3) = &
           -oneoverdx2*( nb_sum - dtwondim*phi_c )+active_mg(myid,ilevel)%u(icell_mg,2)
       end do
+!$omp end do nowait
    end do
+!$omp end parallel
 
 end subroutine cmp_residual_mg_coarse
 
@@ -288,12 +285,11 @@ subroutine cmp_uvar_norm2_coarse(ivar, ilevel, norm2)
    ngrid=active_mg(myid,ilevel)%ngrid
 
    norm2 = 0.0d0
-   ! Loop over active grids
-!$omp parallel do private(igrid_mg, ind, iskip_mg,icell_mg) reduction(+: norm2)
-   do igrid_mg=1,ngrid
-      ! Loop over cells
-      do ind=1,twotondim
-         iskip_mg = (ind-1)*ngrid
+   ! Loop over cells
+   do ind=1,twotondim
+      iskip_mg = (ind-1)*ngrid
+      ! Loop over active grids
+      do igrid_mg=1,ngrid
          icell_mg = iskip_mg + igrid_mg
          if(active_mg(myid,ilevel)%u(icell_mg,4)<=0.0 .and. ivar/=4) cycle
          norm2 = norm2 + active_mg(myid,ilevel)%u(icell_mg,ivar)**2
@@ -322,12 +318,11 @@ subroutine cmp_fvar_norm2_coarse(ivar, ilevel, norm2)
    ngrid=active_mg(myid,ilevel)%ngrid
 
    norm2 = 0.0d0
-   ! Loop over active grids
-!$omp parallel do private(igrid_mg, ind, iskip_mg,icell_mg) reduction(+: norm2)
-   do igrid_mg=1,ngrid
-      ! Loop over cells
-      do ind=1,twotondim
-         iskip_mg = (ind-1)*ngrid
+   ! Loop over cells
+   do ind=1,twotondim
+      iskip_mg = (ind-1)*ngrid
+      ! Loop over active grids
+      do igrid_mg=1,ngrid
          icell_mg = iskip_mg + igrid_mg
          if(active_mg(myid,ilevel)%u(icell_mg,4)<=0.0) cycle
          norm2 = norm2 + active_mg(myid,ilevel)%f(icell_mg,ivar)**2
@@ -344,6 +339,7 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
    use amr_commons
    use pm_commons
    use poisson_commons
+   use morton_hash
    implicit none
    integer, intent(in) :: ilevel
    logical, intent(in) :: safe
@@ -353,13 +349,12 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
    integer, dimension(1:3,1:4)     :: ired, iblack
 
    real(dp) :: dx2, nb_sum, weight
-   integer  :: ngrid, j
+   integer  :: ngrid
    integer  :: ind, ind0, igrid_mg, idim, inbor
    integer  :: igrid_amr, cpu_nbor_amr
    integer  :: iskip_mg, igrid_nbor_mg, icell_mg, icell_nbor_mg
    integer  :: igshift, igrid_nbor_amr
    real(dp) :: dtwondim = (twondim)
-   integer  :: nbor_grids_cache(1:twondim), nbor_cpu_cache(1:twondim)
 
    ! Set constants
    dx2  = (0.5d0**ilevel)**2
@@ -380,25 +375,21 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
 
    ngrid=active_mg(myid,ilevel)%ngrid
 
-   ! Loop over active grids
-!$omp parallel do private(igrid_mg,ind0,ind,iskip_mg,igrid_amr,icell_mg,nb_sum,inbor,idim,igshift,igrid_nbor_amr,cpu_nbor_amr,igrid_nbor_mg,icell_nbor_mg,weight,j,nbor_grids_cache,nbor_cpu_cache)
-   do igrid_mg=1,ngrid
-      igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
-      ! Use precomputed neighbor grids and CPUs from cache
-      do j=1,twondim
-         nbor_grids_cache(j) = nbor_mg_cache(ilevel)%grid(j, igrid_mg)
-         nbor_cpu_cache(j)   = nbor_mg_cache(ilevel)%cpu(j, igrid_mg)
-      end do
-      ! Loop over cells, with red/black ordering
-      do ind0=1,twotondim/2      ! Only half of the cells for a red or black sweep
-         if(redstep) then
-            ind = ired  (ndim,ind0)
-         else
-            ind = iblack(ndim,ind0)
-         end if
+   ! Loop over cells, with red/black ordering
+!$omp parallel default(firstprivate) shared(active_mg,son,cpu_map,lookup_mg)
+   do ind0=1,twotondim/2      ! Only half of the cells for a red or black sweep
+      if(redstep) then
+         ind = ired  (ndim,ind0)
+      else
+         ind = iblack(ndim,ind0)
+      end if
 
-         iskip_mg  = (ind-1)*ngrid
+      iskip_mg  = (ind-1)*ngrid
 
+      ! Loop over active grids
+!$omp do
+      do igrid_mg=1,ngrid
+         igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
          icell_mg  = iskip_mg  + igrid_mg
 
          nb_sum=0.0d0                       ! Sum of phi on neighbors
@@ -411,13 +402,13 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
                do idim=1,ndim
                   ! Get neighbor grid shift
                   igshift = iii(idim,inbor,ind)
-                  ! Get neighbor grid (from cache)
+                  ! Get neighbor grid
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                     cpu_nbor_amr   = nbor_cpu_cache(igshift)
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
                   ! Get neighbor cpu
                   igrid_nbor_mg  = lookup_mg(igrid_nbor_amr)
@@ -443,13 +434,13 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
                   ! Get neighbor grid shift
                   igshift = iii(idim,inbor,ind)
 
-                  ! Get neighbor grid (from cache)
+                  ! Get neighbor grid
                   if(igshift==0) then
                      igrid_nbor_amr = igrid_amr
                      cpu_nbor_amr   = myid
                   else
-                     igrid_nbor_amr = nbor_grids_cache(igshift)
-                     cpu_nbor_amr   = nbor_cpu_cache(igshift)
+                     igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
+                     cpu_nbor_amr   = cpu_map(morton_nbor_cell(igrid_amr,ilevel,igshift))
                   end if
 
                   if(igrid_nbor_amr==0) then
@@ -481,7 +472,9 @@ subroutine gauss_seidel_mg_coarse(ilevel,safe,redstep)
                      / (dtwondim - weight)
          end if
       end do
+!$omp end do nowait
    end do
+!$omp end parallel
 end subroutine gauss_seidel_mg_coarse
 
 ! ------------------------------------------------------------------------
@@ -507,13 +500,12 @@ subroutine restrict_residual_coarse(ifinelevel)
 
    ! Loop over coarse MG cells
    ngrid_c=active_mg(myid,icoarselevel)%ngrid
-!$omp parallel do private(igrid_c_mg,ind_c,iskip_c_amr,iskip_c_mg,igrid_c_amr,icell_c_amr,cpu_amr,icell_c_mg,igrid_f_amr,igrid_f_mg,val,w,ind_f,icell_f_mg) 
-   do igrid_c_mg=1,ngrid_c
-      igrid_c_amr = active_mg(myid,icoarselevel)%igrid(igrid_c_mg)
-      do ind_c=1,twotondim
-         iskip_c_amr = ncoarse + (ind_c-1)*ngridmax
-         iskip_c_mg  = (ind_c-1)*ngrid_c
+   do ind_c=1,twotondim
+      iskip_c_amr = ncoarse + (ind_c-1)*ngridmax
+      iskip_c_mg  = (ind_c-1)*ngrid_c
 
+      do igrid_c_mg=1,ngrid_c
+         igrid_c_amr = active_mg(myid,icoarselevel)%igrid(igrid_c_mg)
          icell_c_amr = igrid_c_amr + iskip_c_amr
          cpu_amr     = cpu_map(icell_c_amr)
          icell_c_mg  = igrid_c_mg  + iskip_c_mg
@@ -566,7 +558,7 @@ subroutine restrict_residual_coarse_reverse(ifinelevel)
    integer, intent(in) :: ifinelevel
 
    integer :: ind_c_cell, ind_f_cell, cpu_amr
-   
+
    integer :: iskip_c_mg
    integer :: igrid_c_amr, igrid_c_mg
    integer :: icell_c_amr, icell_c_mg
@@ -581,13 +573,14 @@ subroutine restrict_residual_coarse_reverse(ifinelevel)
    integer :: icoarselevel
    icoarselevel=ifinelevel-1
 
-   ! Loop over fine grids of myid
-!$omp parallel do private(igrid_f_mg,ind_f_cell,iskip_f_mg,icell_f_mg,igrid_f_amr,icell_c_amr,ind_c_cell,igrid_c_amr,cpu_amr,igrid_c_mg,iskip_c_mg,icell_c_mg,res)
-   do igrid_f_mg=1,active_mg(myid,ifinelevel)%ngrid
-      ! Loop over fine cells of the myid active comm
-      do ind_f_cell=1,twotondim
-         iskip_f_mg =(ind_f_cell-1)*active_mg(myid,ifinelevel)%ngrid
+   ! Loop over fine cells of the myid active comm
+!$omp parallel default(firstprivate) shared(active_mg,father,cpu_map,lookup_mg)
+   do ind_f_cell=1,twotondim
+      iskip_f_mg =(ind_f_cell-1)*active_mg(myid,ifinelevel)%ngrid
 
+      ! Loop over fine grids of myid
+!$omp do
+      do igrid_f_mg=1,active_mg(myid,ifinelevel)%ngrid
          icell_f_mg=iskip_f_mg+igrid_f_mg
          ! Is fine cell masked?
          if(active_mg(myid,ifinelevel)%u(icell_f_mg,4)<=0d0) cycle
@@ -612,7 +605,9 @@ subroutine restrict_residual_coarse_reverse(ifinelevel)
          active_mg(cpu_amr,icoarselevel)%u(icell_c_mg,2)=&
             active_mg(cpu_amr,icoarselevel)%u(icell_c_mg,2)+res
       end do
+!$omp end do
    end do
+!$omp end parallel
 
 end subroutine restrict_residual_coarse_reverse
 
@@ -634,41 +629,11 @@ subroutine interpolate_and_correct_coarse(ifinelevel)
    real(dp), dimension(1:8)     :: bbb
    integer,  dimension(1:8,1:8) :: ccc
 
-!  integer,  dimension(1:nvector), save                :: igrid_f_amr, icell_amr, cpu_amr
-!  integer,  dimension(1:nvector,1:threetondim), save  :: nbors_father_cells
-!  integer,  dimension(1:nvector,1:twotondim), save    :: nbors_father_grids
-!  real(dp), dimension(1:nvector), save                :: corr
-   integer,  dimension(:,:), target, allocatable:: Pigrid_f_amr, Picell_amr, Pcpu_amr
-   integer,  dimension(:,:,:),target, allocatable :: Pnbors_father_cells
-   integer,  dimension(:,:,:), target, allocatable:: Pnbors_father_grids
-   real(dp), dimension(:,:), target, allocatable:: Pcorr
-   integer,  dimension(:), pointer:: igrid_f_amr, icell_amr, cpu_amr
-   integer,  dimension(:,:),pointer:: nbors_father_cells
-   integer,  dimension(:,:), pointer:: nbors_father_grids
-   real(dp), dimension(:), pointer:: corr
-
-   common /omp_inter_and_corr_coarse/ igrid_f_amr, icell_amr, cpu_amr,nbors_father_cells, nbors_father_grids, corr
-!$omp threadprivate(/omp_inter_and_corr_coarse/)
-   integer:: mythread, nthreads
-   common /openmpthreads5/ mythread
-!$omp threadprivate(/openmpthreads5/)
-
-!$omp parallel
-   mythread = omp_get_thread_num()
-   if(mythread.eq.0) nthreads = omp_get_num_threads()
-!$omp end parallel
-   allocate(Pigrid_f_amr(1:nvector,0:nthreads-1),Picell_amr(1:nvector,0:nthreads-1),Pcpu_amr(1:nvector,0:nthreads-1))
-   allocate(Pnbors_father_cells(1:nvector,1:threetondim,0:nthreads-1))
-   allocate(Pnbors_father_grids(1:nvector,1:twotondim,0:nthreads-1))
-   allocate(Pcorr(1:nvector,0:nthreads-1))
-!$omp parallel
-   igrid_f_amr=>Pigrid_f_amr(:,mythread)
-   icell_amr=>Picell_amr(:,mythread)
-   cpu_amr=>Pcpu_amr(:,mythread)
-   nbors_father_cells=>Pnbors_father_cells(:,:,mythread)
-   nbors_father_grids=>Pnbors_father_grids(:,:,mythread)
-   corr=>Pcorr(:,mythread)
-!$omp end parallel
+   integer, parameter::nvector_mg=32
+   integer,  dimension(1:nvector_mg)                 :: igrid_f_amr, icell_amr, cpu_amr
+   integer,  dimension(1:nvector_mg,1:threetondim)  :: nbors_father_cells
+   integer,  dimension(1:nvector_mg,1:twotondim)    :: nbors_father_grids
+   real(dp), dimension(1:nvector_mg)                :: corr
 
    ! Local constants
    a = 1.0D0/4.0D0**ndim
@@ -690,11 +655,11 @@ subroutine interpolate_and_correct_coarse(ifinelevel)
 
    ! Loop over fine grids by vector sweeps
    ngrid_f=active_mg(myid,ifinelevel)%ngrid
-!$omp parallel do private(istart,nbatch,i,ind_f,iskip_f_amr,iskip_f_mg,ind_average, ind_father, coeff, icell_f_mg, icell_c_amr, ind_c, igrid_c_amr, igrid_c_mg, cpu_c_amr, icell_c_mg)
-   do istart=1,ngrid_f,nvector
+!$omp parallel do default(firstprivate) shared(active_mg,father,cpu_map,lookup_mg)
+   do istart=1,ngrid_f,nvector_mg
 
-      ! Gather nvector grids
-      nbatch=MIN(nvector,ngrid_f-istart+1)
+      ! Gather nvector_mg grids
+      nbatch=MIN(nvector_mg,ngrid_f-istart+1)
       do i=1,nbatch
          igrid_f_amr(i)=active_mg(myid,ifinelevel)%igrid(istart+i-1)
       end do
@@ -706,7 +671,7 @@ subroutine interpolate_and_correct_coarse(ifinelevel)
       end do
 
       ! Gather 3x3x3 neighboring parent cells
-      call get3cubefather(icell_amr,nbors_father_cells,nbors_father_grids,nbatch,ifinelevel)
+      call get3cubefather_mg(icell_amr,nbors_father_cells,nbors_father_grids,nbatch,ifinelevel)
 
       ! Update solution for fine grid cells
       do ind_f=1,twotondim
@@ -752,11 +717,6 @@ subroutine interpolate_and_correct_coarse(ifinelevel)
 
    end do
    ! End loop over grids
-
-   deallocate(Pigrid_f_amr,Picell_amr,Pcpu_amr)
-   deallocate(Pnbors_father_cells)
-   deallocate(Pnbors_father_grids)
-   deallocate(Pcorr)
 end subroutine interpolate_and_correct_coarse
 
 
@@ -789,12 +749,12 @@ subroutine set_scan_flag_coarse(ilevel)
 
    ngrid = active_mg(myid,ilevel)%ngrid
    if(ngrid==0) return
-!$omp parallel do private(igrid_mg,ind,iskip_mg,igrid_amr,icell_mg,inbor,igshift,igrid_nbor_amr,cpu_nbor_amr,scan_flag,igrid_nbor_mg,icell_nbor_mg)
-   do igrid_mg=1,ngrid
-      igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
-      ! Loop over cells and set coarse SCAN flag
-      do ind=1,twotondim
-         iskip_mg  = (ind-1)*ngrid
+
+   ! Loop over cells and set coarse SCAN flag
+   do ind=1,twotondim
+      iskip_mg  = (ind-1)*ngrid
+      do igrid_mg=1,ngrid
+         igrid_amr = active_mg(myid,ilevel)%igrid(igrid_mg)
          icell_mg  = iskip_mg  + igrid_mg
 
          if(active_mg(myid,ilevel)%u(icell_mg,4)==1d0) then
@@ -837,37 +797,320 @@ subroutine set_scan_flag_coarse(ilevel)
    end do
 end subroutine set_scan_flag_coarse
 
+subroutine get3cubefather_mg(ind_cell_father,nbors_father_cells,&
+     &                    nbors_father_grids,ncell,ilevel)
+  use amr_commons
+  implicit none
+  integer::ncell,ilevel
+  integer, parameter::nvector_cg=32
+  integer,dimension(1:nvector_cg)::ind_cell_father
+  integer,dimension(1:nvector_cg,1:threetondim)::nbors_father_cells
+  integer,dimension(1:nvector_cg,1:twotondim)::nbors_father_grids
+  !------------------------------------------------------------------
+  ! This subroutine determines the 3^ndim neighboring father cells
+  ! of the input father cell. According to the refinement rule,
+  ! they should be present anytime.
+  !------------------------------------------------------------------
+  integer::i,j,nxny,i1,j1,k1,ind,iok
+  integer::i1min,i1max,j1min,j1max,k1min,k1max,ind_father
+  integer,dimension(1:nvector_cg)::ix,iy,iz,iix,iiy,iiz
+  integer,dimension(1:nvector_cg)::pos,ind_grid_father,ind_grid_ok
+  integer,dimension(1:nvector_cg,1:threetondim)::nbors_father_ok
+  integer,dimension(1:nvector_cg,1:twotondim)::nbors_grids_ok
+  logical::oups
+
+  nxny=nx*ny
+
+  if(ilevel==1)then  ! Easy...
+
+             oups=.false.
+             do i=1,ncell
+        if(ind_cell_father(i)>ncoarse)oups=.true.
+     end do
+     if(oups)then
+        write(*,*)'get3cubefather_mg'
+        write(*,*)'oupsssss !'
+        call clean_stop
+     endif
+
+     do i=1,ncell
+        iz(i)=(ind_cell_father(i)-1)/nxny
+     end do
+     do i=1,ncell
+        iy(i)=(ind_cell_father(i)-1-iz(i)*nxny)/nx
+     end do
+     do i=1,ncell
+        ix(i)=(ind_cell_father(i)-1-iy(i)*nx-iz(i)*nxny)
+     end do
+
+
+     i1min=0; i1max=0
+     if(ndim > 0)i1max=2
+     j1min=0; j1max=0
+     if(ndim > 1)j1max=2
+     k1min=0; k1max=0
+     if(ndim > 2)k1max=2
+
+     ! Loop over 3^ndim neighboring father cells
+     do k1=k1min,k1max
+        iiz=iz
+        if(ndim > 2)then
+           do i=1,ncell
+              iiz(i)=iz(i)+k1-1
+              if(iiz(i) < 0   )iiz(i)=nz-1
+              if(iiz(i) > nz-1)iiz(i)=0
+           end do
+        end if
+        do j1=j1min,j1max
+           iiy=iy
+           if(ndim > 1)then
+              do i=1,ncell
+                 iiy(i)=iy(i)+2*j1-1
+                 if(iiy(i) < 0   )iiy(i)=ny-1
+                 if(iiy(i) > ny-1)iiy(i)=0
+              end do
+           end if
+           do i1=i1min,i1max
+              iix=ix
+              if(ndim > 0)then
+                 do i=1,ncell
+                    iix(i)=ix(i)+2*i1-1
+                    if(iix(i) < 0   )iix(i)=nx-1
+                    if(iix(i) > nx-1)iix(i)=0
+                 end do
+              end if
+              ind_father=1+i1+2*j1+4*k1
+              do i=1,ncell
+                 nbors_father_grids(i,ind_father)=1 &
+                      & +(ISHFT(iix(i), -1)) &
+                      & +(ISHFT(iiy(i), -1))*(ISHFT(nx,-1)) &
+                      & +(ISHFT(iiz(i),-1))*(ISHFT(nxny,-2))
+              end do
+           end do
+        end do
+     end do
+
+  else    ! else, more complicated...
+
+     ! Get father cell position in the grid
+     do i=1,ncell
+        pos(i)=(ind_cell_father(i)-ncoarse-1)/ngridmax+1
+     end do
+     ! Get father grid
+     do i=1,ncell
+        ind_grid_father(i)=ind_cell_father(i)-ncoarse-(pos(i)-1)*ngridmax
+     end do
+
+     ! Loop over position
+     do ind=1,twotondim
+
+        ! Select father cells that sit at position ind
+        iok=0
+        do i=1,ncell
+           if(pos(i)==ind)then
+              iok=iok+1
+              ind_grid_ok(iok)=ind_grid_father(i)
+           end if
+        end do
+
+        if(iok>0)&
+        & call get3cubepos_mg(ind_grid_ok,ind,nbors_father_ok,nbors_grids_ok,iok,ilevel-1)
+
+        ! Store neighboring father cells for selected cells
+        do j=1,threetondim
+           iok=0
+           do i=1,ncell
+              if(pos(i)==ind)then
+                 iok=iok+1
+                 nbors_father_cells(i,j)=nbors_father_ok(iok,j)
+              end if
+           end do
+        end do
+
+        ! Store neighboring father grids for selected cells
+        do j=1,twotondim
+           iok=0
+           do i=1,ncell
+              if(pos(i)==ind)then
+                 iok=iok+1
+                 nbors_father_grids(i,j)=nbors_grids_ok(iok,j)
+              end if
+           end do
+        end do
+
+     end do
+
+  end if
+
+end subroutine get3cubefather_mg
+
+subroutine get3cubepos_mg(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng,ilevel)
+  use amr_commons
+  use morton_hash
+  implicit none
+  integer::ng,ind,ilevel
+  integer, parameter::nvector_cg=32
+  integer,dimension(1:nvector_cg)::ind_grid
+  integer,dimension(1:nvector_cg,1:threetondim)::nbors_father_cells
+  integer,dimension(1:nvector_cg,1:twotondim)::nbors_father_grids
+  !--------------------------------------------------------------------
+  ! This subroutine determines the 3^ndim neighboring father cells
+  ! of the input cell at position ind in grid ind_grid. According to
+  ! the refinements rules and since the input cell is refined,
+  ! they should be present anytime.
+  !--------------------------------------------------------------------
+  integer::i,j,iskip
+  integer::ii,iimin,iimax
+  integer::jj,jjmin,jjmax
+  integer::kk,kkmin,kkmax
+  integer::icell,igrid,inbor
+  integer,dimension(1:8)::iii=(/1,2,1,2,1,2,1,2/)
+  integer,dimension(1:8)::jjj=(/3,3,4,4,3,3,4,4/)
+  integer,dimension(1:8)::kkk=(/5,5,5,5,6,6,6,6/)
+  integer,dimension(1:27,1:8,1:3)::lll,mmm
+  integer,dimension(1:nvector_cg)::ind_grid1,ind_grid2,ind_grid3
+  integer,dimension(1:nvector_cg,1:twotondim)::nbors_grids
+
+  lll=0; mmm=0
+  ! -> ndim=1
+  ! @ind =1
+  lll(1:3,1,1)=(/2,1,1/)
+  mmm(1:3,1,1)=(/2,1,2/)
+  ! @ind =2
+  lll(1:3,2,1)=(/1,1,2/)
+  mmm(1:3,2,1)=(/1,2,1/)
+
+  ! -> ndim=2
+  ! @ind =1
+  lll(1:9,1,2)=(/4,3,3,2,1,1,2,1,1/)
+  mmm(1:9,1,2)=(/4,3,4,2,1,2,4,3,4/)
+  ! @ind =2
+  lll(1:9,2,2)=(/3,3,4,1,1,2,1,1,2/)
+  mmm(1:9,2,2)=(/3,4,3,1,2,1,3,4,3/)
+  ! @ind =3
+  lll(1:9,3,2)=(/2,1,1,2,1,1,4,3,3/)
+  mmm(1:9,3,2)=(/2,1,2,4,3,4,2,1,2/)
+  ! @ind =4
+  lll(1:9,4,2)=(/1,1,2,1,1,2,3,3,4/)
+  mmm(1:9,4,2)=(/1,2,1,3,4,3,1,2,1/)
+
+  ! -> ndim= 3
+  ! @ind = 1
+  lll(1:27,1,3)=(/8,7,7,6,5,5,6,5,5,4,3,3,2,1,1,2,1,1,4,3,3,2,1,1,2,1,1/)
+  mmm(1:27,1,3)=(/8,7,8,6,5,6,8,7,8,4,3,4,2,1,2,4,3,4,8,7,8,6,5,6,8,7,8/)
+  ! @ind = 2
+  lll(1:27,2,3)=(/7,7,8,5,5,6,5,5,6,3,3,4,1,1,2,1,1,2,3,3,4,1,1,2,1,1,2/)
+  mmm(1:27,2,3)=(/7,8,7,5,6,5,7,8,7,3,4,3,1,2,1,3,4,3,7,8,7,5,6,5,7,8,7/)
+  ! @ind = 3
+  lll(1:27,3,3)=(/6,5,5,6,5,5,8,7,7,2,1,1,2,1,1,4,3,3,2,1,1,2,1,1,4,3,3/)
+  mmm(1:27,3,3)=(/6,5,6,8,7,8,6,5,6,2,1,2,4,3,4,2,1,2,6,5,6,8,7,8,6,5,6/)
+  ! @ind = 4
+  lll(1:27,4,3)=(/5,5,6,5,5,6,7,7,8,1,1,2,1,1,2,3,3,4,1,1,2,1,1,2,3,3,4/)
+  mmm(1:27,4,3)=(/5,6,5,7,8,7,5,6,5,1,2,1,3,4,3,1,2,1,5,6,5,7,8,7,5,6,5/)
+  ! @ind = 5
+  lll(1:27,5,3)=(/4,3,3,2,1,1,2,1,1,4,3,3,2,1,1,2,1,1,8,7,7,6,5,5,6,5,5/)
+  mmm(1:27,5,3)=(/4,3,4,2,1,2,4,3,4,8,7,8,6,5,6,8,7,8,4,3,4,2,1,2,4,3,4/)
+  ! @ind = 6
+  lll(1:27,6,3)=(/3,3,4,1,1,2,1,1,2,3,3,4,1,1,2,1,1,2,7,7,8,5,5,6,5,5,6/)
+  mmm(1:27,6,3)=(/3,4,3,1,2,1,3,4,3,7,8,7,5,6,5,7,8,7,3,4,3,1,2,1,3,4,3/)
+  ! @ind = 7
+  lll(1:27,7,3)=(/2,1,1,2,1,1,4,3,3,2,1,1,2,1,1,4,3,3,6,5,5,6,5,5,8,7,7/)
+  mmm(1:27,7,3)=(/2,1,2,4,3,4,2,1,2,6,5,6,8,7,8,6,5,6,2,1,2,4,3,4,2,1,2/)
+  ! @ind = 8
+  lll(1:27,8,3)=(/1,1,2,1,1,2,3,3,4,1,1,2,1,1,2,3,3,4,5,5,6,5,5,6,7,7,8/)
+  mmm(1:27,8,3)=(/1,2,1,3,4,3,1,2,1,5,6,5,7,8,7,5,6,5,1,2,1,3,4,3,1,2,1/)
+
+  iimin=0; iimax=0
+  if(ndim>0)iimax=1
+  jjmin=0; jjmax=0
+  if(ndim>1)jjmax=1
+  kkmin=0; kkmax=0
+  if(ndim>2)kkmax=1
+
+  do kk=kkmin,kkmax
+     do i=1,ng
+        ind_grid1(i)=ind_grid(i)
+     end do
+     if(kk>0)then
+        inbor=kkk(ind)
+        do i=1,ng
+           if(ind_grid(i)>0)then
+              ind_grid1(i)=morton_nbor_grid(ind_grid(i),ilevel,inbor)
+           endif
+        end do
+     end if
+
+     do jj=jjmin,jjmax
+        do i=1,ng
+           ind_grid2(i)=ind_grid1(i)
+        end do
+        if(jj>0)then
+           inbor=jjj(ind)
+           do i=1,ng
+              if(ind_grid1(i)>0)then
+                 ind_grid2(i)=morton_nbor_grid(ind_grid1(i),ilevel,inbor)
+              endif
+           end do
+        end if
+
+        do ii=iimin,iimax
+           do i=1,ng
+              ind_grid3(i)=ind_grid2(i)
+           end do
+           if(ii>0)then
+              inbor=iii(ind)
+              do i=1,ng
+                 if(ind_grid2(i)>0)then
+                    ind_grid3(i)=morton_nbor_grid(ind_grid2(i),ilevel,inbor)
+                 endif
+              end do
+           end if
+
+           inbor=1+ii+2*jj+4*kk
+           do i=1,ng
+              nbors_grids(i,inbor)=ind_grid3(i)
+           end do
+
+        end do
+     end do
+  end do
+
+  do j=1,twotondim
+     do i=1,ng
+        nbors_father_grids(i,j)=nbors_grids(i,j)
+     end do
+  end do
+
+  do j=1,threetondim
+     igrid=lll(j,ind,ndim)
+     icell=mmm(j,ind,ndim)
+     iskip=ncoarse+(icell-1)*ngridmax
+     do i=1,ng
+        if(nbors_grids(i,igrid)>0)then
+           nbors_father_cells(i,j)=iskip+nbors_grids(i,igrid)
+        else
+           nbors_father_cells(i,j)=0
+        endif
+     end do
+  end do
+
+end subroutine get3cubepos_mg
+
 ! ------------------------------------------------------------------------
-! Precompute neighbor grids and CPUs for coarse MG levels
+! Precompute neighbor grids for coarse MG levels (stub)
 ! ------------------------------------------------------------------------
 
 subroutine precompute_nbor_grid_coarse(lmin, lmax)
-   use amr_commons
    use poisson_commons
-   use morton_hash
    implicit none
    integer, intent(in) :: lmin, lmax
-   integer :: ilevel, ngrid, igrid_mg, igrid_amr, j
+   integer :: ilevel
 
-   if(.not.allocated(nbor_mg_cache)) allocate(nbor_mg_cache(1:nlevelmax))
-
+   ! Stub: no precomputed cache needed; morton_nbor_grid is called inline
+   if(.not.allocated(nbor_mg_cache)) return
    do ilevel = lmin, lmax
-      ngrid = active_mg(myid, ilevel)%ngrid
-      if(ngrid == 0) cycle
       if(allocated(nbor_mg_cache(ilevel)%grid)) deallocate(nbor_mg_cache(ilevel)%grid)
       if(allocated(nbor_mg_cache(ilevel)%cpu))  deallocate(nbor_mg_cache(ilevel)%cpu)
-      allocate(nbor_mg_cache(ilevel)%grid(0:twondim, 1:ngrid))
-      allocate(nbor_mg_cache(ilevel)%cpu(1:twondim, 1:ngrid))
-
-      !$omp parallel do private(igrid_mg, igrid_amr, j)
-      do igrid_mg = 1, ngrid
-         igrid_amr = active_mg(myid, ilevel)%igrid(igrid_mg)
-         nbor_mg_cache(ilevel)%grid(0, igrid_mg) = igrid_amr
-         do j = 1, twondim
-            nbor_mg_cache(ilevel)%grid(j, igrid_mg) = morton_nbor_grid(igrid_amr, ilevel, j)
-            nbor_mg_cache(ilevel)%cpu(j, igrid_mg)  = cpu_map(morton_nbor_cell(igrid_amr, ilevel, j))
-         end do
-      end do
    end do
 end subroutine precompute_nbor_grid_coarse
 

@@ -46,6 +46,11 @@ subroutine multigrid_fine(ilevel,icount)
          integer, intent(in) :: ilevel
          real(dp), intent(out), optional :: norm2
       end subroutine
+      subroutine cmp_residual_norm2_fine(ilevel, norm2)
+         use amr_commons, only: dp
+         integer, intent(in) :: ilevel
+         real(dp), intent(out) :: norm2
+      end subroutine
    end interface
 
    integer, parameter  :: MAXITER  = 10
@@ -355,19 +360,20 @@ subroutine multigrid_fine(ilevel,icount)
          if(.not. use_ri_gpu) call cuda_mg_download_f1_c(f, ncell_tot_c)
       else
 #endif
-         if(iter==1) then
-            call cmp_residual_mg_fine(ilevel, i_res_norm2)
-#ifndef WITHOUTMPI
-            call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
-                    & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-            i_res_norm2=i_res_norm2_tot
-#endif
-         else
-            call cmp_residual_mg_fine(ilevel)
-         end if
+         call cmp_residual_mg_fine(ilevel)
 #ifdef HYDRO_CUDA
       end if
 #endif
+      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+      ! Compute norm AFTER communication (SRC-compatible ordering)
+      if(iter==1) then
+         call cmp_residual_norm2_fine(ilevel, i_res_norm2)
+#ifndef WITHOUTMPI
+         call MPI_ALLREDUCE(i_res_norm2,i_res_norm2_tot,1, &
+                 & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+         i_res_norm2=i_res_norm2_tot
+#endif
+      end if
 
       ! Restrict residual into upper level RHS
 #ifdef HYDRO_CUDA
@@ -462,10 +468,13 @@ subroutine multigrid_fine(ilevel,icount)
          res_norm2 = gpu_norm2
       else
 #endif
-         call cmp_residual_mg_fine(ilevel, res_norm2)
+         call cmp_residual_mg_fine(ilevel)
 #ifdef HYDRO_CUDA
       end if
 #endif
+      call make_virtual_fine_dp(f(1,1),ilevel) ! communicate residual
+      ! Compute norm AFTER communication (SRC-compatible ordering)
+      call cmp_residual_norm2_fine(ilevel, res_norm2)
 #ifndef WITHOUTMPI
       call MPI_ALLREDUCE(res_norm2,res_norm2_tot,1, &
               & MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
@@ -943,6 +952,7 @@ recursive subroutine recursive_multigrid_coarse(ifinelevel, safe)
 
       ! Compute residual and restrict into upper level RHS
       call cmp_residual_mg_coarse(ifinelevel)
+      call make_virtual_mg_dp(3,ifinelevel)  ! Communicate residual
 
       ! First clear the rhs in coarser reception comms
       do icpu=1,ncpu
@@ -1688,7 +1698,7 @@ subroutine make_fine_bc_rhs(ilevel,icount)
                if(igshift==0) then
                   igrid_nbor_amr = igrid_amr
                else
-                  igrid_nbor_amr = nbor_grid_fine(igshift, igrid_mg)
+                  igrid_nbor_amr = morton_nbor_grid(igrid_amr,ilevel,igshift)
                end if
 
                if(igrid_nbor_amr==0) then

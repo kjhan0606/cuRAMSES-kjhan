@@ -208,10 +208,9 @@ end subroutine get3cubefather
 !##############################################################
 !##############################################################
 subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
-! Morton-based version: replaces 3-step son(nbor()) chain with
-! single Morton coordinate offset + hash table lookup.
+! Chained morton_nbor_grid version: matches SRC's son(nbor()) chain
+! but uses Morton hash for neighbor lookup (nbor array removed).
   use amr_commons
-  use morton_keys
   use morton_hash
   implicit none
   integer::ng,ind
@@ -241,17 +240,7 @@ subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
   integer,dimension(1:nvector,1:twotondim)::nbors_grids
 #endif
 
-  ! Morton variables
-  integer :: l, dx, dy, dz
-  integer(8) :: nmax_x, nmax_y, nmax_z
-  integer(8) :: nix, niy, niz
-  type(mkey_t) :: nkey
-#ifndef _OPENMP
-  integer(8),dimension(1:nvector),save::gix,giy,giz
-#else
-  integer(8),dimension(1:nvector)::gix,giy,giz
-#endif
-  logical :: use_morton
+  integer :: l
 
   call getindices3cube(lll,mmm)
 
@@ -262,79 +251,67 @@ subroutine get3cubepos(ind_grid,ind,nbors_father_cells,nbors_father_grids,ng)
   kkmin=0; kkmax=0
   if(ndim>2)kkmax=1
 
-  ! Check if Morton hash tables are available
-  use_morton = allocated(mort_table) .and. allocated(grid_level)
-  if (use_morton) then
-     ! Find level from first valid grid
-     l = 0
-     do i = 1, ng
-        if (ind_grid(i) > 0) then
-           l = grid_level(ind_grid(i))
-           exit
-        end if
-     end do
-     if (l <= 0) use_morton = .false.
-  end if
-
-  if (use_morton) then
-     nmax_x = int(nx, 8) * 2_8**(l-1)
-     nmax_y = int(ny, 8) * 2_8**(l-1)
-     nmax_z = int(nz, 8) * 2_8**(l-1)
-
-     ! Compute direction offsets from cell position index
-     ! RAMSES directions: 1=-x, 2=+x, 3=-y, 4=+y, 5=-z, 6=+z
-     dx = 0; dy = 0; dz = 0
-     select case(iii(ind))
-     case(1); dx = -1
-     case(2); dx = +1
-     end select
-     select case(jjj(ind))
-     case(3); dy = -1
-     case(4); dy = +1
-     end select
-     select case(kkk(ind))
-     case(5); dz = -1
-     case(6); dz = +1
-     end select
-
-     ! Pre-compute grid coordinates
-     do i = 1, ng
-        if (ind_grid(i) > 0) then
-           call morton_decode(grid_to_morton(ind_grid(i), l), gix(i), giy(i), giz(i))
-        end if
-     end do
-
-     ! Single-pass: compute all 2^ndim neighbor grids via coordinate offset
-     do kk = kkmin, kkmax
-        do jj = jjmin, jjmax
-           do ii = iimin, iimax
-              inbor = 1 + ii + 2*jj + 4*kk
-              do i = 1, ng
-                 if (ind_grid(i) > 0) then
-                    nix = gix(i) + ii*dx
-                    niy = giy(i) + jj*dy
-                    niz = giz(i) + kk*dz
-                    ! Periodic wrapping
-                    if (nix < 0) nix = nix + nmax_x
-                    if (nix >= nmax_x) nix = nix - nmax_x
-                    if (niy < 0) niy = niy + nmax_y
-                    if (niy >= nmax_y) niy = niy - nmax_y
-                    if (niz < 0) niz = niz + nmax_z
-                    if (niz >= nmax_z) niz = niz - nmax_z
-                    nkey = morton_encode(nix, niy, niz)
-                    nbors_grids(i, inbor) = morton_hash_lookup(mort_table(l), nkey)
-                 else
-                    nbors_grids(i, inbor) = 0
-                 end if
-              end do
-           end do
-        end do
-     end do
-
-  else
-     if(myid==1) write(*,*) 'FATAL: get3cubepos called without Morton hash tables'
+  ! Find level from first valid grid
+  l = 0
+  do i = 1, ng
+     if (ind_grid(i) > 0) then
+        l = grid_level(ind_grid(i))
+        exit
+     end if
+  end do
+  if (l <= 0) then
+     if(myid==1) write(*,*) 'FATAL: get3cubepos called with invalid grid'
      call clean_stop
   end if
+
+  ! Chained morton_nbor_grid approach (matches SRC's son(nbor()) chain)
+  do kk=kkmin,kkmax
+     do i=1,ng
+        ind_grid1(i)=ind_grid(i)
+     end do
+     if(kk>0)then
+        inbor=kkk(ind)
+        do i=1,ng
+           if(ind_grid(i)>0)then
+              ind_grid1(i)=morton_nbor_grid(ind_grid(i),l,inbor)
+           endif
+        end do
+     end if
+
+     do jj=jjmin,jjmax
+        do i=1,ng
+           ind_grid2(i)=ind_grid1(i)
+        end do
+        if(jj>0)then
+           inbor=jjj(ind)
+           do i=1,ng
+              if(ind_grid1(i)>0)then
+                 ind_grid2(i)=morton_nbor_grid(ind_grid1(i),l,inbor)
+              endif
+           end do
+        end if
+
+        do ii=iimin,iimax
+           do i=1,ng
+              ind_grid3(i)=ind_grid2(i)
+           end do
+           if(ii>0)then
+              inbor=iii(ind)
+              do i=1,ng
+                 if(ind_grid2(i)>0)then
+                    ind_grid3(i)=morton_nbor_grid(ind_grid2(i),l,inbor)
+                 endif
+              end do
+           end if
+
+           inbor=1+ii+2*jj+4*kk
+           do i=1,ng
+              nbors_grids(i,inbor)=ind_grid3(i)
+           end do
+
+        end do
+     end do
+  end do
 
   do j=1,twotondim
      do i=1,ng

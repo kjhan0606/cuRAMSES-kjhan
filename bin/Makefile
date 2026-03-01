@@ -127,7 +127,7 @@ PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fin
         flag_formation_sites.o init_sink.o output_sink.o
 # Poisson solver objects
 #POISSONOBJ = init_poisson.o phi_fine_cg.kisti.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
-             multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
+#             multigrid_fine_fine.kisti.o multigrid_fine_coarse.kisti.o gravana.o boundary_potential.o rho_ana.kjhan.o output_poisson.o
 POISSONOBJ = init_poisson.o phi_fine_cg.kjhan.o interpol_phi.kjhan.o force_fine.kjhan.o multigrid_coarse.kjhan.o multigrid_fine_commons.o \
              multigrid_fine_fine.kjhan.o multigrid_fine_coarse.kjhan.o gravana.o boundary_potential.kjhan.o rho_ana.kjhan.o output_poisson.o
 # Hydro objects
