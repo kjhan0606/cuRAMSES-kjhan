@@ -22,69 +22,45 @@ subroutine create_sink
   integer::ilevel,ivar,info,icpu,igrid,npartbound,isink,nelvelmax_loc
   real(dp)::dx_min,vol_min,dx,dx_temp
   integer::nx_loc
-  integer(kind=8)::cs_t0,cs_t1,cs_t2,cs_t3,cs_t4,cs_t5,cs_t6,cs_t7,cs_t8,cs_rate
-  real(dp)::cs_kill_virt,cs_rho_star,cs_make_sink,cs_kill_cloud,cs_update_pos
-  real(dp)::cs_merge,cs_create_cloud,cs_scatter,cs_hydro,cs_bondi
-  ! (per-level scatter timers removed)
-  if(verbose)write(*,*)' Entering create_sink'
-  call system_clock(cs_t0, cs_rate)
 
+  if(verbose)write(*,*)' Entering create_sink'
   ! Remove particles to finer levels
   do ilevel=levelmin,nlevelmax
      call kill_tree_fine(ilevel)
      call virtual_tree_fine(ilevel)
   end do
-  call system_clock(cs_t1)
-  cs_kill_virt = dble(cs_t1-cs_t0)/dble(cs_rate)
 
   ! Get the star density value in each cell
   do ilevel=levelmin,nlevelmax
      call kjhan_get_rho_star(ilevel)
   enddo
-  call system_clock(cs_t2)
-  cs_rho_star = dble(cs_t2-cs_t1)/dble(cs_rate)
 
   ! Create new sink particles
+  ! and gather particle from the grid
   call kjhan_make_sink(nlevelmax)
   do ilevel=nlevelmax-1,1,-1
-     if(ilevel>=levelmin)then
-        call kjhan_make_sink(ilevel)
-     endif
+     if(ilevel>=levelmin)call kjhan_make_sink(ilevel)
      call merge_tree_fine(ilevel)
   end do
-  call system_clock(cs_t3)
-  cs_make_sink = dble(cs_t3-cs_t2)/dble(cs_rate)
 
   ! Remove particle clouds around old sinks
   call kjhan_kill_cloud(1)
 
   ! update sink position before merging sinks and creating clouds
   call kjhan_update_sink_position_velocity
-  call system_clock(cs_t4)
-  cs_kill_cloud = dble(cs_t4-cs_t3)/dble(cs_rate)
 
   ! Merge sink using FOF
   call merge_sink(1)
-  call system_clock(cs_t5)
-  cs_merge = dble(cs_t5-cs_t4)/dble(cs_rate)
 
   ! Create new particle clouds
   call kjhan_create_cloud(1)
-  call system_clock(cs_t6)
-  cs_create_cloud = dble(cs_t6-cs_t5)/dble(cs_rate)
 
   ! Scatter particle to the grid
-  ! Scatter particles from coarse to fine levels.
-  ! Optimization: skip make_tree_fine for levels below levelmin.
-  ! Cloud particles are created at level 1 and cascade down via kill_tree_fine.
-  ! At coarse levels, make_tree_fine does no useful work (no sister grids to move to).
   do ilevel=1,nlevelmax
-     if(ilevel >= levelmin) call make_tree_fine(ilevel)
+     call make_tree_fine(ilevel)
      call kill_tree_fine(ilevel)
      call virtual_tree_fine(ilevel)
   end do
-  call system_clock(cs_t7)
-  cs_scatter = dble(cs_t7-cs_t6)/dble(cs_rate)
 
   ! Update hydro quantities for split cells
   if(hydro)then
@@ -101,8 +77,6 @@ subroutine create_sink
         if(simple_boundary)call make_boundary_hydro(ilevel)
      end do
   end if
-  call system_clock(cs_t8)
-  cs_hydro = dble(cs_t8-cs_t7)/dble(cs_rate)
 
   jsink=0d0
   ! Compute Bondi parameters and gather particle
@@ -110,24 +84,6 @@ subroutine create_sink
      if(bondi)call bondi_hoyle(ilevel)
      call merge_tree_fine(ilevel)
   end do
-
-  if(myid==1) then
-     call system_clock(cs_t1)
-     cs_bondi = dble(cs_t1-cs_t8)/dble(cs_rate)
-     write(*,'(A)') ' === create_sink sub-timers ==='
-     write(*,'(A,F8.3,A)') '   kill+virtual   : ', cs_kill_virt, ' s'
-     write(*,'(A,F8.3,A)') '   rho_star       : ', cs_rho_star, ' s'
-     write(*,'(A,F8.3,A)') '   make_sink      : ', cs_make_sink, ' s'
-     write(*,'(A,F8.3,A)') '   kill_cloud+upd : ', cs_kill_cloud, ' s'
-     write(*,'(A,F8.3,A)') '   merge_sink     : ', cs_merge, ' s'
-     write(*,'(A,F8.3,A)') '   create_cloud   : ', cs_create_cloud, ' s'
-     write(*,'(A,F8.3,A)') '   scatter(tree)  : ', cs_scatter, ' s'
-     write(*,'(A,F8.3,A)') '   hydro(upload+gz): ', cs_hydro, ' s'
-     write(*,'(A,F8.3,A)') '   bondi_hoyle    : ', cs_bondi, ' s'
-     write(*,'(A,F8.3,A)') '   TOTAL          : ', &
-          cs_kill_virt+cs_rho_star+cs_make_sink+cs_kill_cloud+cs_merge+ &
-          cs_create_cloud+cs_scatter+cs_hydro+cs_bondi, ' s'
-  endif
 
 end subroutine create_sink
 !################################################################
@@ -168,11 +124,6 @@ subroutine kjhan_make_sink(ilevel)
   real(dp),dimension(1:3)::xbound,skip_loc
   real(dp)::dx,dx_loc,scale,vol_loc,dx_min,vol_min,dxx,dyy,dzz,dr_sink,rmax_sink,rmax
   real(dp)::bx1,bx2,by1,by2,bz1,bz2,factG,pi,nCOM,d_star,star_ratio
-  ! Spatial binning for sink proximity check
-  integer::nbin_sink,ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi
-  real(dp)::inv_bin_size_sink
-  integer,dimension(:,:,:),allocatable::bin_head_sink
-  integer,dimension(:),allocatable::sink_next
 
   integer ,target, allocatable::Pind_grid(:,:),Pind_cell(:,:)
   logical ,target, allocatable::Pok(:,:)
@@ -199,9 +150,7 @@ subroutine kjhan_make_sink(ilevel)
   real(dp),dimension(:,:),allocatable::x_tmp,x_tmp_all
   real(dp),dimension(:)  ,allocatable::dens_tmp,dens_tmp_all
   integer ,dimension(:)  ,allocatable::flag_tmp,flag_tmp_all,point2flag2
-  ! Packed ALLREDUCE buffers
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
-  integer::npack,ip,idim
+
 
   if(numbtot(1,ilevel)==0) return
   if(.not. hydro)return
@@ -356,26 +305,10 @@ subroutine kjhan_make_sink(ilevel)
   !----------------------------
   ! Compute number of new sinks
   !----------------------------
-  ! Build spatial bins for sink proximity check (replaces O(nsink) brute-force)
-  if(nsink>0)then
-     nbin_sink=max(1,min(128,int(scale*xbound(1)/rmax_sink)))
-     inv_bin_size_sink=dble(nbin_sink)/(scale*xbound(1))
-     allocate(bin_head_sink(nbin_sink,nbin_sink,nbin_sink))
-     allocate(sink_next(1:nsink))
-     bin_head_sink=0; sink_next=0
-     do isink=1,nsink
-        ibx=max(1,min(nbin_sink,int(xsink(isink,1)*inv_bin_size_sink)+1))
-        iby=max(1,min(nbin_sink,int(xsink(isink,2)*inv_bin_size_sink)+1))
-        ibz=max(1,min(nbin_sink,int(xsink(isink,3)*inv_bin_size_sink)+1))
-        sink_next(isink)=bin_head_sink(ibx,iby,ibz)
-        bin_head_sink(ibx,iby,ibz)=isink
-     end do
-  endif
-
   ntot=0
   ! Loop over grids
   ncache=active(ilevel)%ngrid
-!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz, ibx,iby,ibz,jbx,jby,jbz,ibx_lo,ibx_hi,iby_lo,iby_hi,ibz_lo,ibz_hi) reduction(+: ntot) schedule(static)
+!$omp parallel do private(igrid,ngrid,i,ind,iskip, d, star_ratio, temp, d_jeans, d_thres, x,y,z,isink, dxx, dr_sink, dyy, dzz ) reduction(+: ntot) schedule(static)
   do igrid=1,ncache,nvector
      ngrid=MIN(nvector,ncache-igrid+1)
      do i=1,ngrid
@@ -406,68 +339,46 @@ subroutine kjhan_make_sink(ilevel)
 
            ! Check if the stellar density is higher than a star formation threshold
            if(star.and.rho_star(ind_cell(i))<d_star)ok(i)=.false.
+!!$      ! Check if the star ratio is higher than a certain fraction
+!!$      if(star.and.star_ratio<star_ratio_floor)ok(i)=.false.
           ! Check if the density is higher than star formation threshold
           if(d      <d_star )ok(i)=.false.
           ! Check if gas is Jeans unstable
           if(d      <d_thres)ok(i)=.false.
           ! Quenching criterion
            if(flag2(ind_cell(i))==1)ok(i)=.false.
-          if(ok(i).and.nsink>0)then
+
+          if(ok(i))then
              x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
              y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
              z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-             ! 27-bin spatial neighbor search
-             ibx=max(1,min(nbin_sink,int(x*inv_bin_size_sink)+1))
-             iby=max(1,min(nbin_sink,int(y*inv_bin_size_sink)+1))
-             ibz=max(1,min(nbin_sink,int(z*inv_bin_size_sink)+1))
-             ibx_lo=ibx-1; ibx_hi=ibx+1
-             iby_lo=iby-1; iby_hi=iby+1
-             ibz_lo=ibz-1; ibz_hi=ibz+1
-             ! Periodic wrapping for bin indices
-             if(ibx_lo<1) ibx_lo=ibx_lo+nbin_sink
-             if(ibx_hi>nbin_sink) ibx_hi=ibx_hi-nbin_sink
-             if(iby_lo<1) iby_lo=iby_lo+nbin_sink
-             if(iby_hi>nbin_sink) iby_hi=iby_hi-nbin_sink
-             if(ibz_lo<1) ibz_lo=ibz_lo+nbin_sink
-             if(ibz_hi>nbin_sink) ibz_hi=ibz_hi-nbin_sink
-             do jbz=1,nbin_sink
-                if(ibz_lo<=ibz_hi)then
-                   if(jbz<ibz_lo.or.jbz>ibz_hi) cycle
-                else
-                   if(jbz<ibz_lo.and.jbz>ibz_hi) cycle
-                endif
-             do jby=1,nbin_sink
-                if(iby_lo<=iby_hi)then
-                   if(jby<iby_lo.or.jby>iby_hi) cycle
-                else
-                   if(jby<iby_lo.and.jby>iby_hi) cycle
-                endif
-             do jbx=1,nbin_sink
-                if(ibx_lo<=ibx_hi)then
-                   if(jbx<ibx_lo.or.jbx>ibx_hi) cycle
-                else
-                   if(jbx<ibx_lo.and.jbx>ibx_hi) cycle
-                endif
-                isink=bin_head_sink(jbx,jby,jbz)
-                do while(isink>0)
-                  dxx=x-xsink(isink,1)
-                  if(dxx> x_half)dxx=dxx-x_box
-                  if(dxx<-x_half)dxx=dxx+x_box
-                  dr_sink=dxx*dxx
-                  dyy=y-xsink(isink,2)
-                  if(dyy> y_half)dyy=dyy-y_box
-                  if(dyy<-y_half)dyy=dyy+y_box
-                  dr_sink=dyy*dyy+dr_sink
-                  dzz=z-xsink(isink,3)
-                  if(dzz> z_half)dzz=dzz-z_box
-                  if(dzz<-z_half)dzz=dzz+z_box
-                  dr_sink=dzz*dzz+dr_sink
-                  if(dr_sink .le. rmax_sink2)ok(i)=.false.
-                  isink=sink_next(isink)
-                end do
-             end do
-             end do
-             end do
+             do isink=1,nsink
+               dxx=x-xsink(isink,1)
+               if(dxx> x_half)then
+                  dxx=dxx-x_box
+               endif
+               if(dxx<-x_half)then
+                  dxx=dxx+x_box
+               endif
+               dr_sink=dxx*dxx
+               dyy=y-xsink(isink,2)
+               if(dyy> y_half)then
+                  dyy=dyy-y_box
+               endif
+               if(dyy<-y_half)then
+                  dyy=dyy+y_box
+               endif
+               dr_sink=dyy*dyy+dr_sink
+               dzz=z-xsink(isink,3)
+               if(dzz> z_half)then
+                  dzz=dzz-z_box
+               endif
+               if(dzz<-z_half)then
+                  dzz=dzz+z_box
+               endif
+               dr_sink=dzz*dzz+dr_sink
+               if(dr_sink .le. rmax_sink2)ok(i)=.false.
+             enddo
           endif
 
        end do
@@ -484,10 +395,6 @@ subroutine kjhan_make_sink(ilevel)
   end do
 
 
-  ! Cleanup spatial bins
-  if(nsink>0)then
-     deallocate(bin_head_sink,sink_next)
-  endif
 
   if(verbose)write(*,*)'Check multiple sink creation',ntot
   !--------------------------------------------------------------------------------------
@@ -576,7 +483,8 @@ subroutine kjhan_make_sink(ilevel)
   flag_tmp=flag_tmp_all
   deallocate(x_tmp_all,dens_tmp_all,flag_tmp_all)
 #endif
-!$omp parallel do private(i,x,y,z,j,dxx,dr_sink,dyy,dzz) schedule(dynamic)
+! Sequential loop: flag_tmp writes must be ordered to avoid race conditions
+!!$omp parallel do private(i,x,y,z,j,dxx,dr_sink,dyy,dzz) schedule(dynamic)
   do i=1,ntot_tmp
      if(flag_tmp(i).eq.1)then
         x=x_tmp(i,1);y=x_tmp(i,2);z=x_tmp(i,3)
@@ -1011,62 +919,27 @@ subroutine kjhan_make_sink(ilevel)
   end do
 
 #ifndef WITHOUTMPI
-  if(nsink>0)then
-     ! Pack 9 dp arrays into single buffer: oksink,msink,xsink(3),vsink(3),tsink,dMsmbh,Esave,bhspin(3),spinmag = 15 per sink
-     npack=15*nsink
-     allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-     ip=0
-     sink_sbuf(ip+1:ip+nsink)=oksink_new(1:nsink);  ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=msink_new(1:nsink);   ip=ip+nsink
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=xsink_new(1:nsink,idim); ip=ip+nsink
-     end do
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=vsink_new(1:nsink,idim); ip=ip+nsink
-     end do
-     sink_sbuf(ip+1:ip+nsink)=tsink_new(1:nsink);   ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=dMsmbh_new(1:nsink);  ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=Esave_new(1:nsink);   ip=ip+nsink
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=bhspin_new(1:nsink,idim); ip=ip+nsink
-     end do
-     sink_sbuf(ip+1:ip+nsink)=spinmag_new(1:nsink); ip=ip+nsink
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 15, nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     ip=0
-     oksink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);  ip=ip+nsink
-     msink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);   ip=ip+nsink
-     do idim=1,ndim
-        xsink_all(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     do idim=1,ndim
-        vsink_all(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     tsink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);   ip=ip+nsink
-     dMsmbh_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);  ip=ip+nsink
-     Esave_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);   ip=ip+nsink
-     do idim=1,ndim
-        bhspin_all(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     spinmag_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     deallocate(sink_sbuf,sink_rbuf)
-     ! Integer array: separate ALLREDUCE
-     call MPI_ALLREDUCE(idsink_new,idsink_all,nsink,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
-  end if
+  call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(msink_new ,msink_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(xsink_new ,xsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(tsink_new ,tsink_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(idsink_new,idsink_all,nsinkmax   ,MPI_INTEGER        ,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(dMsmbh_new,dMsmbh_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(Esave_new ,Esave_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(bhspin_new,bhspin_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(spinmag_new,spinmag_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
-  oksink_all(1:nsink)=oksink_new(1:nsink)
-  msink_all(1:nsink)=msink_new(1:nsink)
-  xsink_all(1:nsink,:)=xsink_new(1:nsink,:)
-  vsink_all(1:nsink,:)=vsink_new(1:nsink,:)
-  tsink_all(1:nsink)=tsink_new(1:nsink)
-  idsink_all(1:nsink)=idsink_new(1:nsink)
-  dMsmbh_all(1:nsink)=dMsmbh_new(1:nsink)
-  Esave_all(1:nsink)=Esave_new(1:nsink)
-  bhspin_all(1:nsink,:)=bhspin_new(1:nsink,:)
-  spinmag_all(1:nsink)=spinmag_new(1:nsink)
+  oksink_all=oksink_new
+  msink_all =msink_new
+  xsink_all =xsink_new
+  vsink_all =vsink_new
+  tsink_all =tsink_new
+  idsink_all=idsink_new
+  dMsmbh_all=dMsmbh_new
+  Esave_all =Esave_new
+  bhspin_all=bhspin_new
+  spinmag_all=spinmag_new
 #endif
 ! call mpi_barrier(MPI_COMM_WORLD, info) if(verbose) print *,'### 4'
 !!$omp parallel do private(isink) schedule(dynamic)
@@ -1147,10 +1020,6 @@ subroutine merge_sink(ilevel)
   integer, dimension(:,:), allocatable:: GroupData
   integer:: ngrp,sisink, fisink,ijsink
 !#endif
-  real(dp):: ttsta, ttend
-
-  if(myid.eq.1)ttsta=MPI_WTIME(info)
-
   pi=twopi/2.0d0
   factG=1d0
   if(cosmo)factG=3d0/8d0/pi*omega_m*aexp
@@ -1605,6 +1474,7 @@ subroutine merge_sink(ilevel)
      xsink(isink,3)=zz
 #endif
   enddo
+
 ! call MPI_BARRIER(MPI_COMM_WORLD, info) if(verbose) print *,'###5'
 
   deallocate(psink,gsink)
@@ -1673,11 +1543,6 @@ subroutine merge_sink(ilevel)
      if(ip>0) call kjhan_kill_sink(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
 102  end do
   ! End loop over cpus
-
-   if (myid.eq.1) then
-      ttend=MPI_WTIME(info)
-      write(*,*) ' Time elapsed in merge_sink [sec]:', sngl(ttend-ttsta)
-   endif
 
 111 format('  +Entering merge_sink for level ',I2)
 
@@ -1889,13 +1754,10 @@ subroutine kjhan_mk_cloud(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   logical ,dimension(1:nvector),save::ok_true=.true.
 #else
   integer ,dimension(1:nvector)::ind_cloud
-  logical ,dimension(1:nvector)::ok_true
+  logical ,dimension(1:nvector)::ok_true=.true.
 #endif
   real(dp)::vol_min,dx
   integer::i,ijk,nall
-
-  ! Initialize ok_true (avoid implicit SAVE with OpenMP)
-  ok_true=.true.
 
   ! Mesh spacing in that level
   dx_loc=0.5D0**ilevel
@@ -2191,11 +2053,9 @@ subroutine bondi_hoyle(ilevel)
 
   real(dp)::r2,dx_loc,dx_min,scale
   real(dp)::dx,factG,pi
-  real(dp)::RandNum,phi,Rrand,SS,CC,UU,csound,turb,ttsta,ttend
+  real(dp)::RandNum,phi,Rrand,SS,CC,UU,csound,turb
   integer ,dimension(1:ncpu,1:IRandNumSize)::allseed
-  ! Packed ALLREDUCE buffers
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
-  integer::npack
+
 
   if(numbtot(1,ilevel)==0)return
   if(verbose)write(*,111)ilevel
@@ -2318,25 +2178,13 @@ subroutine bondi_hoyle(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     ! Pack 3 arrays: oksink, c2sink, v2sink = 3 per sink
-     npack=3*nsink
-     allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-     sink_sbuf(       1:  nsink)=oksink_new(1:nsink)
-     sink_sbuf(  nsink+1:2*nsink)=c2sink_new(1:nsink)
-     sink_sbuf(2*nsink+1:3*nsink)=v2sink_new(1:nsink)
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 3, nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     oksink_all(1:nsink)=sink_rbuf(       1:  nsink)
-     c2sink_all(1:nsink)=sink_rbuf(  nsink+1:2*nsink)
-     v2sink_all(1:nsink)=sink_rbuf(2*nsink+1:3*nsink)
-     deallocate(sink_sbuf,sink_rbuf)
+     call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(c2sink_new,c2sink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(v2sink_new,v2sink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
-     oksink_all(1:nsink)=oksink_new(1:nsink)
-     c2sink_all(1:nsink)=c2sink_new(1:nsink)
-     v2sink_all(1:nsink)=v2sink_new(1:nsink)
+     oksink_all=oksink_new
+     c2sink_all=c2sink_new
+     v2sink_all=v2sink_new
 #endif
   endif
 
@@ -2454,41 +2302,17 @@ subroutine bondi_hoyle(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     ! Pack 5 arrays: wdens,wvol,wc2,wmom(3),jsink(3) = 9 per sink
-     npack=9*nsink
-     allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-     ip=0
-     sink_sbuf(ip+1:ip+nsink)=wdens(1:nsink);     ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=wvol(1:nsink);      ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=wc2(1:nsink);       ip=ip+nsink
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=wmom(1:nsink,idim); ip=ip+nsink
-     end do
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=jsink_new(1:nsink,idim); ip=ip+nsink
-     end do
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 9, nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     ip=0
-     wdens_new(1:nsink)=sink_rbuf(ip+1:ip+nsink);     ip=ip+nsink
-     wvol_new(1:nsink)=sink_rbuf(ip+1:ip+nsink);      ip=ip+nsink
-     wc2_new(1:nsink)=sink_rbuf(ip+1:ip+nsink);       ip=ip+nsink
-     do idim=1,ndim
-        wmom_new(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     do idim=1,ndim
-        jsink_all(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     deallocate(sink_sbuf,sink_rbuf)
+     call MPI_ALLREDUCE(wdens,wdens_new,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(wvol ,wvol_new ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(wc2  ,wc2_new  ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(wmom ,wmom_new ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(jsink_new,jsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
-     wdens_new(1:nsink)=wdens(1:nsink)
-     wvol_new(1:nsink)=wvol(1:nsink)
-     wc2_new(1:nsink)=wc2(1:nsink)
-     wmom_new(1:nsink,:)=wmom(1:nsink,:)
-     jsink_all(1:nsink,:)=jsink_new(1:nsink,:)
+     wdens_new=wdens
+     wvol_new=wvol
+     wc2_new =wc2
+     wmom_new=wmom
+     jsink_all=jsink_new
 #endif
   endif
 
@@ -3059,9 +2883,7 @@ subroutine grow_bondi(ilevel)
   integer::igrid,jgrid,ipart,jpart,next_part,idim,info
   integer::i,ig,ip,npart1,npart2,icpu,nx_loc,isink,ilun
   real(dp),dimension(1:3)::velocity
-  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
-  common /omp_grow_bondi/ ind_grid, ind_part, ind_grid_part
-!$omp threadprivate(/omp_grow_bondi/)
+  integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
   real(dp)::r2,density,volume
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
   integer::ind,ivar,iskip
@@ -3070,21 +2892,11 @@ subroutine grow_bondi(ilevel)
   real(dp),dimension(1:3)::xdum,vdum,jdum
   real(dp)::dmaccdum,cdum,vvdum,dmEdddum,mbhdum,ddum,fourpi,prefact
   integer:: mythread, nthreads,npart3
-  integer, dimension(:), allocatable:: nparticles_gb, ptrhead_gb
-  common /omp_gb_threads/ mythread, nthreads
-!$omp threadprivate(/omp_gb_threads/)
-  ! Packed ALLREDUCE buffers
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
-  integer::npack
+
+  call MPI_BARRIER(MPI_COMM_WORLD,info)
 
   if(numbtot(1,ilevel)==0)return
   if(verbose)write(*,111)ilevel
-
-!$omp parallel
-  mythread = omp_get_thread_num()
-  nthreads = omp_get_num_threads()
-!$omp end parallel
-  allocate(nparticles_gb(0:nthreads-1), ptrhead_gb(0:nthreads-1))
 
   ! Conversion factor from user units to cgs units
   call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -3103,13 +2915,12 @@ subroutine grow_bondi(ilevel)
 
   ! Set unew to uold for myid cells
   ! Need unew to get initial density before Bondi accreting mass
-!$omp parallel do private(ind,iskip,ivar,i) schedule(dynamic,1024)
-  do i=1,active(ilevel)%ngrid
-     do ind=1,twotondim
-        iskip=ncoarse+(ind-1)*ngridmax
-        do ivar=1,nvar
-           unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
-        enddo
+  do ind=1,twotondim
+     iskip=ncoarse+(ind-1)*ngridmax
+     do ivar=1,nvar
+   do i=1,active(ilevel)%ngrid
+      unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
+   enddo
      enddo
   enddo
 
@@ -3185,11 +2996,6 @@ subroutine grow_bondi(ilevel)
      igrid=headl(icpu,ilevel)
      npart3 = numbl(icpu,ilevel)
 
-     call pthreadLinkedList(headl(icpu,ilevel), numbl(icpu,ilevel), nthreads, nparticles_gb, ptrhead_gb, next)
-!$omp parallel private(igrid,npart3,jgrid, npart1, npart2,ipart,jpart,next_part,ip,ig)
-     npart3 = nparticles_gb(mythread)
-     igrid = ptrhead_gb(mythread)
-
      ig=0
      ip=0
      do jgrid=1,npart3
@@ -3244,43 +3050,22 @@ subroutine grow_bondi(ilevel)
      if(ip>0) then
         call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
      endif
-!$omp end parallel
 102  end do
   ! End loop over cpus
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     ! Pack 5 arrays: msink,vsink(3),dMBH_coarse,dMEd_coarse,dMsmbh = 7 per sink
-     npack=7*nsink
-     allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-     ip=0
-     sink_sbuf(ip+1:ip+nsink)=msink_new(1:nsink); ip=ip+nsink
-     do idim=1,ndim
-        sink_sbuf(ip+1:ip+nsink)=vsink_new(1:nsink,idim); ip=ip+nsink
-     end do
-     sink_sbuf(ip+1:ip+nsink)=dMBH_coarse_new(1:nsink); ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=dMEd_coarse_new(1:nsink); ip=ip+nsink
-     sink_sbuf(ip+1:ip+nsink)=dMsmbh_new(1:nsink);      ip=ip+nsink
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 7, nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     ip=0
-     msink_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     do idim=1,ndim
-        vsink_all(1:nsink,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     end do
-     dMBH_coarse_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     dMEd_coarse_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-     dMsmbh_all(1:nsink)=sink_rbuf(ip+1:ip+nsink);      ip=ip+nsink
-     deallocate(sink_sbuf,sink_rbuf)
+     call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(vsink_new,vsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(dMBH_coarse_new,dMBH_coarse_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(dMEd_coarse_new,dMEd_coarse_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(dMsmbh_new     ,dMsmbh_all     ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
-     msink_all(1:nsink)=msink_new(1:nsink)
-     vsink_all(1:nsink,:)=vsink_new(1:nsink,:)
-     dMBH_coarse_all(1:nsink)=dMBH_coarse_new(1:nsink)
-     dMEd_coarse_all(1:nsink)=dMEd_coarse_new(1:nsink)
-     dMsmbh_all(1:nsink)=dMsmbh_new(1:nsink)
+     msink_all=msink_new
+     vsink_all=vsink_new
+     dMBH_coarse_all=dMBH_coarse_new
+     dMEd_coarse_all=dMEd_coarse_new
+     dMsmbh_all       =dMBsmbh_new
 #endif
   endif
 
@@ -3298,8 +3083,6 @@ subroutine grow_bondi(ilevel)
   if(spin_bh)call kjhan_growspin
   ! YDspin
 
-
-  deallocate(nparticles_gb, ptrhead_gb)
 
 111 format('  +Entering grow_bondi for level ',I2)
 
@@ -3570,25 +3353,19 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
         dmsink=dmsink*(1d0-epsilon_r)
 
         ! Add the accreted mass to the total accreted mass over
-        ! a coarse time step (atomic for OpenMP thread safety)
-!$omp atomic
+        ! a coarse time step
         dMBH_coarse_new(ksink)=dMBH_coarse_new(ksink) + &
              & dMBHoverdt(ksink)*weight/total_volume(ksink)*dtnew(ilevel)
-!$omp atomic
         dMEd_coarse_new(ksink)=dMEd_coarse_new(ksink) + &
              & dMEdoverdt(ksink)*weight/total_volume(ksink)*dtnew(ilevel)
-!$omp atomic
         dMsmbh_new     (ksink)=dMsmbh_new     (ksink) + dmsink
-!$omp atomic
+
         msink_new(ksink    )=msink_new(ksink  )+dmsink
-!$omp atomic
         vsink_new(ksink,1)=vsink_new(ksink,1)+dmsink*u
 #if NDIM>1
-!$omp atomic
         vsink_new(ksink,2)=vsink_new(ksink,2)+dmsink*v
 #endif
 #if NDIM>2
-!$omp atomic
         vsink_new(ksink,3)=vsink_new(ksink,3)+dmsink*w
 #endif
 
@@ -3648,7 +3425,6 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
               dvdrag=fdrag(idim)*dtnew(ilevel)
               dpdrag(idim)=mp(ind_part(j))*dvdrag
               vp(ind_part(j),idim)=vp(ind_part(j),idim)+dvdrag
-!$omp atomic
               vsink_new(ksink,idim)=vsink_new(ksink,idim)+dvdrag*mp(ind_part(j))!/msink(isink)
            enddo
 
@@ -3713,9 +3489,6 @@ subroutine grow_jeans(ilevel)
   common /omp1_threads/ mythread
 !$omp threadprivate(/omp1_threads/)
 #endif
-  ! Packed ALLREDUCE buffers
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
-  integer::npack
 
   if(numbtot(1,ilevel)==0)return
   if(verbose)write(*,111)ilevel
@@ -3843,26 +3616,11 @@ subroutine grow_jeans(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     ! Pack 2 arrays: msink, vsink(3) = 4 per sink
-     npack=4*nsink
-     allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-     sink_sbuf(       1:  nsink)=msink_new(1:nsink)
-     do idim=1,ndim
-        sink_sbuf(nsink*idim+1:nsink*(idim+1))=vsink_new(1:nsink,idim)
-     end do
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 4, nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     msink_all(1:nsink)=sink_rbuf(1:nsink)
-     do idim=1,ndim
-        vsink_all(1:nsink,idim)=sink_rbuf(nsink*idim+1:nsink*(idim+1))
-     end do
-     deallocate(sink_sbuf,sink_rbuf)
+     call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     call MPI_ALLREDUCE(vsink_new,vsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
-     msink_all(1:nsink)=msink_new(1:nsink)
-     vsink_all(1:nsink,:)=vsink_new(1:nsink,:)
+     msink_all=msink_new
+     vsink_all=vsink_new
 #endif
   endif
   do isink=1,nsink
@@ -4622,7 +4380,7 @@ subroutine cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
   ! Particle-based arrays
   logical ,dimension(1:nvector),save::ok
   real(dp),dimension(1:nvector),save::mmm
-  real(dp),dimension(1:nvector),save::ttt=0d0
+  real(dp),dimension(1:nvector),save::ttt
   real(dp),dimension(1:nvector),save::vol2
   real(dp),dimension(1:nvector,1:ndim),save::x,dd,dg
   integer ,dimension(1:nvector,1:ndim),save::ig,id,igg,igd,icg,icd
@@ -4691,8 +4449,8 @@ subroutine cic_star(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      mmm(j)=mp(ind_part(j))
   end do
 
-  ! Gather particle birth epoch
-  do j=1,nvector
+  ! Initialize and gather particle birth epoch
+  do j=1,np
      ttt(j)=0d0
   end do
   if(star)then
@@ -5242,33 +5000,15 @@ subroutine AGN_feedback
   real(dp)::temp_blast
   integer,dimension(1:nsink)::itemp
   integer::isort,isink,idim,ilun
-  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,Mfrac,ttsta,ttend
+  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,Mfrac
   character(LEN=5)::nchar,ncharcpu
   character(LEN=80)::filename,filedir,filecmd
   real(dp),allocatable,dimension(:)::xdp
   integer::nblock,nresidual,istart,iend,nsink_loc
-  interface
-     subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-          & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
-       use amr_commons, only: dp
-       integer, intent(in) :: nAGN
-       real(dp),dimension(1:nAGN,1:3) :: xAGN, jAGN
-       real(dp),dimension(1:nAGN) :: dMBH_AGN, dMEd_AGN, mAGN, ZAGN
-       real(dp),dimension(1:nAGN) :: vol_gas, mass_gas, psy_norm
-       real(dp),dimension(1:nAGN) :: vol_blast, mass_blast
-       integer ,dimension(1:nAGN) :: ind_blast, iAGN_myid
-       logical ,dimension(1:nAGN) :: ok_blast_agn
-       real(dp),dimension(1:nAGN) :: EsaveAGN, dMsmbh_AGN
-       logical, intent(in), optional :: local_only
-     end subroutine average_AGN
-  end interface
 
   if(.not. hydro)return
   if(ndim.ne.3)return
   if(nsink.eq.0)return
-
-!!$  call MPI_BARRIER(MPI_COMM_WORLD,info)
-  if(myid.eq.1)ttsta=MPI_WTIME(info)
 
   if(verbose)write(*,*)'  +Entering make_AGN'
 
@@ -5320,10 +5060,6 @@ subroutine AGN_feedback
      deallocate(xdp)
      endif
   endif
-
-  if(TRIM(ordering)=='ksection') then
-     call AGN_feedback_ksec()
-  else
 
   ! Get only AGN that are in my CPU or close to the border of my cpu (huge speed-up!)
   call kjhan_getAGNonmyid(itemp,nAGN)
@@ -5378,7 +5114,7 @@ subroutine AGN_feedback
 
   ! Compute some averaged quantities before doing the AGN energy input
   call average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-       & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN)
+       & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN)
 
   ! Check if AGN goes into thermal blast wave mode
 !!$omp parallel do private(iAGN, temp_blast)
@@ -5439,8 +5175,6 @@ subroutine AGN_feedback
   deallocate(iAGN_myid,ok_blast_agn,dMBH_AGN,dMEd_AGN,dMsmbh_AGN,Msmbh,EsaveAGN)
   deallocate(spinmagAGN,eps_AGN)
 
-  endif ! ordering=='ksection'
-
   ! Update hydro quantities for split cells
   do ilevel=nlevelmax,levelmin,-1
      call upload_fine(ilevel)
@@ -5453,509 +5187,16 @@ subroutine AGN_feedback
      enddo
   enddo
 
-!!$  call MPI_BARRIER(MPI_COMM_WORLD,info)
-   if (myid.eq.1) then
-      ttend=MPI_WTIME(info)
-      write(*,*) ' Time elapsed in AGN_feedback [sec]:', sngl(ttend-ttsta)
-   endif
-
 end subroutine AGN_feedback
 !################################################################
 !################################################################
 !################################################################
 !################################################################
-subroutine AGN_feedback_ksec()
-  !----------------------------------------------------------------------
-  ! 3-stage ksection exchange for AGN feedback (replaces ALLREDUCE path)
-  ! Exchange 1: Owner → neighbors (sink properties via overlap)
-  ! Exchange 2: Neighbors → owner (cell contributions via exclusive)
-  ! Exchange 3: Owner → neighbors (blast parameters via overlap)
-  !----------------------------------------------------------------------
-  use amr_commons
-  use pm_commons
-  use hydro_commons
-  use ksection, only: ksection_exchange_dp, ksection_exchange_dp_overlap, cmp_ksection_cpumap
-  implicit none
-#ifndef WITHOUTMPI
-  include 'mpif.h'
-#endif
-  integer :: isink, iAGN, nAGN, nown, j, k, info, idx
-  integer :: nprops_ex1, nprops_ex2, nprops_ex3
-  integer :: nrecv_ex1, nrecv_ex2, nrecv_ex3
-  integer :: ncontrib, owner_cpu_val, owner_idx_val
-  real(dp) :: scale_nH, scale_T2, scale_l, scale_d, scale_t, scale_v
-  real(dp) :: dx_min, scale, rmax, Mfrac, temp_blast
-  integer :: nx_loc
-  logical :: ok_jet, ok_blast_val
-  ! Exchange buffers
-  real(dp), allocatable :: sendbuf_ex1(:,:), recvbuf_ex1(:,:)
-  real(dp), allocatable :: xmin_ex1(:,:), xmax_ex1(:,:)
-  real(dp), allocatable :: sendbuf_ex2(:,:), recvbuf_ex2(:,:)
-  integer, allocatable :: dest_cpu_ex2(:)
-  real(dp), allocatable :: sendbuf_ex3(:,:), recvbuf_ex3(:,:)
-  real(dp), allocatable :: xmin_ex3(:,:), xmax_ex3(:,:)
-
-  ! Local AGN arrays (from Exchange 1)
-  real(dp), allocatable :: xAGN(:,:), vAGN(:,:), jAGN(:,:)
-  real(dp), allocatable :: dMBH_AGN(:), dMEd_AGN(:), dMsmbh_AGN(:)
-  real(dp), allocatable :: Msmbh_loc(:), EsaveAGN(:), spinmagAGN(:), eps_AGN(:)
-  real(dp), allocatable :: mAGN(:), ZAGN(:), vol_gas(:), mass_gas(:)
-  real(dp), allocatable :: psy_norm(:), vol_blast(:), mass_blast(:)
-  integer, allocatable :: ind_blast(:), iAGN_myid(:)
-  logical, allocatable :: ok_blast_agn(:)
-  integer, allocatable :: owner_cpu_arr(:), owner_idx_arr(:), isink_arr(:)
-
-  ! Saved from Exchange 1 processing (for ind_blast lookup)
-  integer, allocatable :: ind_blast_ex1(:), owner_cpu_ex1(:), owner_idx_ex1(:)
-  integer :: nSN_ex1
-  interface
-     subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-          & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
-       use amr_commons, only: dp
-       integer, intent(in) :: nAGN
-       real(dp),dimension(1:nAGN,1:3) :: xAGN, jAGN
-       real(dp),dimension(1:nAGN) :: dMBH_AGN, dMEd_AGN, mAGN, ZAGN
-       real(dp),dimension(1:nAGN) :: vol_gas, mass_gas, psy_norm
-       real(dp),dimension(1:nAGN) :: vol_blast, mass_blast
-       integer ,dimension(1:nAGN) :: ind_blast, iAGN_myid
-       logical ,dimension(1:nAGN) :: ok_blast_agn
-       real(dp),dimension(1:nAGN) :: EsaveAGN, dMsmbh_AGN
-       logical, intent(in), optional :: local_only
-     end subroutine average_AGN
-  end interface
-
-  ! Owner aggregation arrays
-  real(dp), allocatable :: vol_gas_agg(:), mass_gas_agg(:), psy_norm_agg(:)
-  real(dp), allocatable :: mAGN_agg(:), ZAGN_agg(:)
-  real(dp), allocatable :: vol_blast_agg(:), mass_blast_agg(:)
-  integer, allocatable :: blast_center_cpu_agg(:), isink_own(:)
-  integer, allocatable :: sink_owner(:)
-  integer, allocatable :: blast_center_cpu_arr(:)
-
-  ! -----------------------------------------------
-  ! Conversion factors and mesh parameters
-  ! -----------------------------------------------
-
-  call units(scale_l, scale_t, scale_d, scale_v, scale_nH, scale_T2)
-  nx_loc = (icoarse_max - icoarse_min + 1)
-  scale = boxlen / dble(nx_loc)
-  dx_min = scale * 0.5D0**nlevelmax
-  rmax = MAX(1d0*dx_min*scale_l/aexp, rAGN*3.08d21) / scale_l
-
-  ! -----------------------------------------------
-  ! EXCHANGE 1: Owner → neighbors (overlap)
-  ! -----------------------------------------------
-  allocate(sink_owner(1:nsink))
-  call cmp_ksection_cpumap(xsink, sink_owner, nsink)
-
-  ! Count owned sinks
-  nown = 0
-  do isink = 1, nsink
-     if(sink_owner(isink) == myid) nown = nown + 1
-  enddo
-
-  ! Pack owned sinks (nprops_ex1 = 20)
-  nprops_ex1 = 20
-  allocate(sendbuf_ex1(1:nprops_ex1, 1:max(1,nown)))
-  allocate(xmin_ex1(1:ndim, 1:max(1,nown)))
-  allocate(xmax_ex1(1:ndim, 1:max(1,nown)))
-  allocate(isink_own(1:max(1,nown)))
-
-  j = 0
-  do isink = 1, nsink
-     if(sink_owner(isink) == myid) then
-        j = j + 1
-        isink_own(j) = isink
-
-        ! Check jet condition (owner determines this)
-        ok_jet = .false.
-        if(dMEd_coarse(isink) > 0d0) then
-           if(dMBH_coarse(isink)/dMEd_coarse(isink) < X_floor &
-                & .and. Esave(isink) == 0d0) then
-              Mfrac = dMsmbh(isink) / (msink(isink) - dMsmbh(isink))
-              if(Mfrac >= jetfrac) ok_jet = .true.
-           endif
-        endif
-
-        sendbuf_ex1(1,j)  = xsink(isink,1)
-        sendbuf_ex1(2,j)  = xsink(isink,2)
-        sendbuf_ex1(3,j)  = xsink(isink,3)
-        sendbuf_ex1(4,j)  = vsink(isink,1)
-        sendbuf_ex1(5,j)  = vsink(isink,2)
-        sendbuf_ex1(6,j)  = vsink(isink,3)
-        if(spin_bh) then
-           sendbuf_ex1(7,j)  = bhspin(isink,1)
-           sendbuf_ex1(8,j)  = bhspin(isink,2)
-           sendbuf_ex1(9,j)  = bhspin(isink,3)
-        else
-           sendbuf_ex1(7,j)  = jsink(isink,1)
-           sendbuf_ex1(8,j)  = jsink(isink,2)
-           sendbuf_ex1(9,j)  = jsink(isink,3)
-        endif
-        sendbuf_ex1(10,j) = dMBH_coarse(isink)
-        sendbuf_ex1(11,j) = dMEd_coarse(isink)
-        sendbuf_ex1(12,j) = dMsmbh(isink)
-        sendbuf_ex1(13,j) = msink(isink)
-        sendbuf_ex1(14,j) = Esave(isink)
-        sendbuf_ex1(15,j) = spinmag(isink)
-        sendbuf_ex1(16,j) = eps_sink(isink)
-        if(ok_jet) then
-           sendbuf_ex1(17,j) = 1d0
-        else
-           sendbuf_ex1(17,j) = 0d0
-        endif
-        sendbuf_ex1(18,j) = dble(myid)
-        sendbuf_ex1(19,j) = dble(j)      ! owner_local_idx
-        sendbuf_ex1(20,j) = dble(isink)   ! global sink index
-
-        xmin_ex1(1,j) = xsink(isink,1) - rmax
-        xmin_ex1(2,j) = xsink(isink,2) - rmax
-        xmin_ex1(3,j) = xsink(isink,3) - rmax
-        xmax_ex1(1,j) = xsink(isink,1) + rmax
-        xmax_ex1(2,j) = xsink(isink,2) + rmax
-        xmax_ex1(3,j) = xsink(isink,3) + rmax
-     endif
-  enddo
-
-
-  call ksection_exchange_dp_overlap(sendbuf_ex1, nown, xmin_ex1, xmax_ex1, &
-       nprops_ex1, recvbuf_ex1, nrecv_ex1, periodic=.true.)
-  deallocate(xmin_ex1, xmax_ex1)
-
-
-  ! -----------------------------------------------
-  ! Unpack Exchange 1 → local AGN arrays
-  ! -----------------------------------------------
-  nAGN = nrecv_ex1
-  allocate(xAGN(1:max(1,nAGN),1:3), vAGN(1:max(1,nAGN),1:3), jAGN(1:max(1,nAGN),1:3))
-  allocate(dMBH_AGN(1:max(1,nAGN)), dMEd_AGN(1:max(1,nAGN)), dMsmbh_AGN(1:max(1,nAGN)))
-  allocate(Msmbh_loc(1:max(1,nAGN)), EsaveAGN(1:max(1,nAGN)))
-  allocate(spinmagAGN(1:max(1,nAGN)), eps_AGN(1:max(1,nAGN)))
-  allocate(ok_blast_agn(1:max(1,nAGN)), iAGN_myid(1:max(1,nAGN)))
-  allocate(owner_cpu_arr(1:max(1,nAGN)), owner_idx_arr(1:max(1,nAGN)))
-  allocate(isink_arr(1:max(1,nAGN)))
-  allocate(mAGN(1:max(1,nAGN)), ZAGN(1:max(1,nAGN)))
-  allocate(vol_gas(1:max(1,nAGN)), mass_gas(1:max(1,nAGN)), psy_norm(1:max(1,nAGN)))
-  allocate(vol_blast(1:max(1,nAGN)), mass_blast(1:max(1,nAGN)), ind_blast(1:max(1,nAGN)))
-
-  do iAGN = 1, nAGN
-     xAGN(iAGN,1)      = recvbuf_ex1(1,iAGN)
-     xAGN(iAGN,2)      = recvbuf_ex1(2,iAGN)
-     xAGN(iAGN,3)      = recvbuf_ex1(3,iAGN)
-     vAGN(iAGN,1)      = recvbuf_ex1(4,iAGN)
-     vAGN(iAGN,2)      = recvbuf_ex1(5,iAGN)
-     vAGN(iAGN,3)      = recvbuf_ex1(6,iAGN)
-     jAGN(iAGN,1)      = recvbuf_ex1(7,iAGN)
-     jAGN(iAGN,2)      = recvbuf_ex1(8,iAGN)
-     jAGN(iAGN,3)      = recvbuf_ex1(9,iAGN)
-     dMBH_AGN(iAGN)    = recvbuf_ex1(10,iAGN)
-     dMEd_AGN(iAGN)    = recvbuf_ex1(11,iAGN)
-     dMsmbh_AGN(iAGN)  = recvbuf_ex1(12,iAGN)
-     Msmbh_loc(iAGN)   = recvbuf_ex1(13,iAGN)
-     EsaveAGN(iAGN)    = recvbuf_ex1(14,iAGN)
-     spinmagAGN(iAGN)   = recvbuf_ex1(15,iAGN)
-     eps_AGN(iAGN)      = recvbuf_ex1(16,iAGN)
-     ok_blast_agn(iAGN) = (nint(recvbuf_ex1(17,iAGN)) == 1)
-     owner_cpu_arr(iAGN) = nint(recvbuf_ex1(18,iAGN))
-     owner_idx_arr(iAGN) = nint(recvbuf_ex1(19,iAGN))
-     isink_arr(iAGN)     = nint(recvbuf_ex1(20,iAGN))
-     iAGN_myid(iAGN)    = 0  ! Not used in ksection path
-  enddo
-  if(allocated(recvbuf_ex1)) deallocate(recvbuf_ex1)
-
-  ! -----------------------------------------------
-  ! Local cell loop (average_AGN without MPI)
-  ! -----------------------------------------------
-
-  call average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm, &
-       & vol_blast,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN, &
-       & dMsmbh_AGN,.true.)
-
-
-  ! Save ind_blast data for later fallback lookup
-  nSN_ex1 = nAGN
-  allocate(ind_blast_ex1(1:max(1,nSN_ex1)))
-  allocate(owner_cpu_ex1(1:max(1,nSN_ex1)))
-  allocate(owner_idx_ex1(1:max(1,nSN_ex1)))
-  do iAGN = 1, nSN_ex1
-     ind_blast_ex1(iAGN) = ind_blast(iAGN)
-     owner_cpu_ex1(iAGN) = owner_cpu_arr(iAGN)
-     owner_idx_ex1(iAGN) = owner_idx_arr(iAGN)
-  enddo
-
-  ! -----------------------------------------------
-  ! EXCHANGE 2: Neighbors → Owner (exclusive)
-  ! -----------------------------------------------
-  ncontrib = 0
-  do iAGN = 1, nAGN
-     if(vol_gas(iAGN) > 0d0 .or. ind_blast(iAGN) > 0) ncontrib = ncontrib + 1
-  enddo
-
-  nprops_ex2 = 10
-  allocate(sendbuf_ex2(1:nprops_ex2, 1:max(1,ncontrib)))
-  allocate(dest_cpu_ex2(1:max(1,ncontrib)))
-
-  j = 0
-  do iAGN = 1, nAGN
-     if(vol_gas(iAGN) > 0d0 .or. ind_blast(iAGN) > 0) then
-        j = j + 1
-        sendbuf_ex2(1,j)  = vol_gas(iAGN)
-        sendbuf_ex2(2,j)  = mass_gas(iAGN)
-        sendbuf_ex2(3,j)  = psy_norm(iAGN)
-        sendbuf_ex2(4,j)  = mAGN(iAGN)
-        sendbuf_ex2(5,j)  = ZAGN(iAGN)
-        if(ind_blast(iAGN) > 0) then
-           sendbuf_ex2(6,j) = 1d0   ! has_blast_center
-        else
-           sendbuf_ex2(6,j) = 0d0
-        endif
-        sendbuf_ex2(7,j)  = vol_blast(iAGN)
-        sendbuf_ex2(8,j)  = mass_blast(iAGN)
-        sendbuf_ex2(9,j)  = dble(myid)                    ! blast_src_cpu
-        sendbuf_ex2(10,j) = dble(owner_idx_arr(iAGN))     ! owner_local_idx
-        dest_cpu_ex2(j) = owner_cpu_arr(iAGN)
-     endif
-  enddo
-
-
-  call ksection_exchange_dp(sendbuf_ex2, ncontrib, dest_cpu_ex2, nprops_ex2, &
-       recvbuf_ex2, nrecv_ex2)
-  deallocate(sendbuf_ex2, dest_cpu_ex2)
-
-  ! Free Exchange 1 local arrays (will reallocate for Exchange 3)
-  deallocate(xAGN, vAGN, jAGN, dMBH_AGN, dMEd_AGN, dMsmbh_AGN)
-  deallocate(Msmbh_loc, EsaveAGN, spinmagAGN, eps_AGN)
-  deallocate(ok_blast_agn, iAGN_myid, owner_cpu_arr, owner_idx_arr, isink_arr)
-  deallocate(mAGN, ZAGN, vol_gas, mass_gas, psy_norm, vol_blast, mass_blast, ind_blast)
-
-  ! -----------------------------------------------
-  ! Owner Aggregation
-  ! -----------------------------------------------
-  allocate(vol_gas_agg(1:max(1,nown)), mass_gas_agg(1:max(1,nown)))
-  allocate(psy_norm_agg(1:max(1,nown)))
-  allocate(mAGN_agg(1:max(1,nown)), ZAGN_agg(1:max(1,nown)))
-  allocate(vol_blast_agg(1:max(1,nown)), mass_blast_agg(1:max(1,nown)))
-  allocate(blast_center_cpu_agg(1:max(1,nown)))
-
-  vol_gas_agg = 0d0; mass_gas_agg = 0d0; psy_norm_agg = 0d0
-  mAGN_agg = 0d0; ZAGN_agg = 0d0
-  vol_blast_agg = 0d0; mass_blast_agg = 0d0
-  blast_center_cpu_agg = 0
-
-  do j = 1, nrecv_ex2
-     idx = nint(recvbuf_ex2(10,j))  ! owner_local_idx
-     vol_gas_agg(idx)  = vol_gas_agg(idx)  + recvbuf_ex2(1,j)
-     mass_gas_agg(idx) = mass_gas_agg(idx) + recvbuf_ex2(2,j)
-     psy_norm_agg(idx) = psy_norm_agg(idx) + recvbuf_ex2(3,j)
-     if(nint(recvbuf_ex2(6,j)) == 1) then  ! has_blast_center
-        mAGN_agg(idx)    = recvbuf_ex2(4,j)
-        ZAGN_agg(idx)    = recvbuf_ex2(5,j)
-        vol_blast_agg(idx)  = recvbuf_ex2(7,j)
-        mass_blast_agg(idx) = recvbuf_ex2(8,j)
-        blast_center_cpu_agg(idx) = nint(recvbuf_ex2(9,j))
-     endif
-  enddo
-  if(allocated(recvbuf_ex2)) deallocate(recvbuf_ex2)
-
-  ! -----------------------------------------------
-  ! Owner: determine blast mode and pack Exchange 3
-  ! -----------------------------------------------
-  nprops_ex3 = 25
-  allocate(sendbuf_ex3(1:nprops_ex3, 1:max(1,nown)))
-  allocate(xmin_ex3(1:ndim, 1:max(1,nown)))
-  allocate(xmax_ex3(1:ndim, 1:max(1,nown)))
-
-  do j = 1, nown
-     ! ok_blast_agn: starts with jet condition from Exchange 1
-     ok_blast_val = (nint(sendbuf_ex1(17,j)) == 1)
-
-     ! Check thermal condition at owner (needs aggregated vol_gas/mass_gas)
-     if(sendbuf_ex1(11,j) > 0d0) then  ! dMEd > 0
-        if(sendbuf_ex1(10,j)/sendbuf_ex1(11,j) >= X_floor &
-             & .and. sendbuf_ex1(14,j) == 0d0) then
-           temp_blast = 0.0
-           if(vol_gas_agg(j) > 0.0) then
-              temp_blast = eAGN_T * 1d12 * sendbuf_ex1(12,j) / mass_gas_agg(j)
-           else
-              if(blast_center_cpu_agg(j) > 0) then
-                 temp_blast = eAGN_T * 1d12 * sendbuf_ex1(12,j) / mass_blast_agg(j)
-              endif
-           endif
-           if(temp_blast > TAGN) ok_blast_val = .true.
-        endif
-     endif
-
-     ! Pack Exchange 3 data
-     sendbuf_ex3(1,j)  = sendbuf_ex1(1,j)    ! xAGN(1)
-     sendbuf_ex3(2,j)  = sendbuf_ex1(2,j)    ! xAGN(2)
-     sendbuf_ex3(3,j)  = sendbuf_ex1(3,j)    ! xAGN(3)
-     sendbuf_ex3(4,j)  = sendbuf_ex1(4,j)    ! vAGN(1)
-     sendbuf_ex3(5,j)  = sendbuf_ex1(5,j)    ! vAGN(2)
-     sendbuf_ex3(6,j)  = sendbuf_ex1(6,j)    ! vAGN(3)
-     sendbuf_ex3(7,j)  = sendbuf_ex1(7,j)    ! jAGN(1)
-     sendbuf_ex3(8,j)  = sendbuf_ex1(8,j)    ! jAGN(2)
-     sendbuf_ex3(9,j)  = sendbuf_ex1(9,j)    ! jAGN(3)
-     sendbuf_ex3(10,j) = sendbuf_ex1(12,j)   ! dMsmbh_AGN
-     sendbuf_ex3(11,j) = sendbuf_ex1(10,j)   ! dMBH_AGN
-     sendbuf_ex3(12,j) = sendbuf_ex1(11,j)   ! dMEd_AGN
-     sendbuf_ex3(13,j) = sendbuf_ex1(14,j)   ! EsaveAGN (initial)
-     sendbuf_ex3(14,j) = sendbuf_ex1(15,j)   ! spinmagAGN
-     sendbuf_ex3(15,j) = sendbuf_ex1(16,j)   ! eps_AGN
-     if(ok_blast_val) then
-        sendbuf_ex3(16,j) = 1d0
-     else
-        sendbuf_ex3(16,j) = 0d0
-     endif
-     sendbuf_ex3(17,j) = vol_gas_agg(j)      ! vol_gas (aggregated)
-     sendbuf_ex3(18,j) = mAGN_agg(j)         ! mAGN (from blast center)
-     sendbuf_ex3(19,j) = ZAGN_agg(j)         ! ZAGN (from blast center)
-     sendbuf_ex3(20,j) = psy_norm_agg(j)     ! psy_norm (aggregated)
-     sendbuf_ex3(21,j) = vol_blast_agg(j)    ! vol_blast (from blast center)
-     sendbuf_ex3(22,j) = dble(blast_center_cpu_agg(j))
-     sendbuf_ex3(23,j) = dble(myid)          ! owner_cpu
-     sendbuf_ex3(24,j) = dble(j)             ! owner_idx
-     sendbuf_ex3(25,j) = dble(isink_own(j))  ! global isink
-
-     xmin_ex3(1,j) = sendbuf_ex1(1,j) - rmax
-     xmin_ex3(2,j) = sendbuf_ex1(2,j) - rmax
-     xmin_ex3(3,j) = sendbuf_ex1(3,j) - rmax
-     xmax_ex3(1,j) = sendbuf_ex1(1,j) + rmax
-     xmax_ex3(2,j) = sendbuf_ex1(2,j) + rmax
-     xmax_ex3(3,j) = sendbuf_ex1(3,j) + rmax
-  enddo
-
-  deallocate(sendbuf_ex1)
-  deallocate(vol_gas_agg, mass_gas_agg, psy_norm_agg)
-  deallocate(mAGN_agg, ZAGN_agg, vol_blast_agg, mass_blast_agg)
-  deallocate(blast_center_cpu_agg)
-
-  ! -----------------------------------------------
-  ! EXCHANGE 3: Owner → neighbors (overlap)
-  ! -----------------------------------------------
-
-  call ksection_exchange_dp_overlap(sendbuf_ex3, nown, xmin_ex3, xmax_ex3, &
-       nprops_ex3, recvbuf_ex3, nrecv_ex3, periodic=.true.)
-  deallocate(sendbuf_ex3, xmin_ex3, xmax_ex3)
-
-  ! -----------------------------------------------
-  ! Unpack Exchange 3 → blast arrays + call AGN_blast
-  ! -----------------------------------------------
-  nAGN = nrecv_ex3
-  allocate(xAGN(1:max(1,nAGN),1:3), vAGN(1:max(1,nAGN),1:3), jAGN(1:max(1,nAGN),1:3))
-  allocate(dMsmbh_AGN(1:max(1,nAGN)), dMBH_AGN(1:max(1,nAGN)), dMEd_AGN(1:max(1,nAGN)))
-  allocate(EsaveAGN(1:max(1,nAGN)), spinmagAGN(1:max(1,nAGN)), eps_AGN(1:max(1,nAGN)))
-  allocate(ok_blast_agn(1:max(1,nAGN)), iAGN_myid(1:max(1,nAGN)))
-  allocate(mAGN(1:max(1,nAGN)), ZAGN(1:max(1,nAGN)))
-  allocate(vol_gas(1:max(1,nAGN)), psy_norm(1:max(1,nAGN)))
-  allocate(vol_blast(1:max(1,nAGN)), ind_blast(1:max(1,nAGN)))
-  allocate(isink_arr(1:max(1,nAGN)))
-  allocate(blast_center_cpu_arr(1:max(1,nAGN)))
-
-  do iAGN = 1, nAGN
-     xAGN(iAGN,1)      = recvbuf_ex3(1,iAGN)
-     xAGN(iAGN,2)      = recvbuf_ex3(2,iAGN)
-     xAGN(iAGN,3)      = recvbuf_ex3(3,iAGN)
-     vAGN(iAGN,1)      = recvbuf_ex3(4,iAGN)
-     vAGN(iAGN,2)      = recvbuf_ex3(5,iAGN)
-     vAGN(iAGN,3)      = recvbuf_ex3(6,iAGN)
-     jAGN(iAGN,1)      = recvbuf_ex3(7,iAGN)
-     jAGN(iAGN,2)      = recvbuf_ex3(8,iAGN)
-     jAGN(iAGN,3)      = recvbuf_ex3(9,iAGN)
-     dMsmbh_AGN(iAGN)  = recvbuf_ex3(10,iAGN)
-     dMBH_AGN(iAGN)    = recvbuf_ex3(11,iAGN)
-     dMEd_AGN(iAGN)    = recvbuf_ex3(12,iAGN)
-     EsaveAGN(iAGN)    = recvbuf_ex3(13,iAGN)
-     spinmagAGN(iAGN)   = recvbuf_ex3(14,iAGN)
-     eps_AGN(iAGN)      = recvbuf_ex3(15,iAGN)
-     ok_blast_agn(iAGN) = (nint(recvbuf_ex3(16,iAGN)) == 1)
-     vol_gas(iAGN)      = recvbuf_ex3(17,iAGN)
-     mAGN(iAGN)        = recvbuf_ex3(18,iAGN)
-     ZAGN(iAGN)        = recvbuf_ex3(19,iAGN)
-     psy_norm(iAGN)    = recvbuf_ex3(20,iAGN)
-     vol_blast(iAGN)    = recvbuf_ex3(21,iAGN)
-     blast_center_cpu_arr(iAGN) = nint(recvbuf_ex3(22,iAGN))
-     owner_cpu_val = nint(recvbuf_ex3(23,iAGN))
-     owner_idx_val = nint(recvbuf_ex3(24,iAGN))
-     isink_arr(iAGN)    = nint(recvbuf_ex3(25,iAGN))
-     iAGN_myid(iAGN)   = 0  ! not used
-
-     ! Set ind_blast: only valid on the CPU that has the blast center
-     ind_blast(iAGN) = -1
-     if(blast_center_cpu_arr(iAGN) == myid) then
-        do k = 1, nSN_ex1
-           if(owner_cpu_ex1(k) == owner_cpu_val .and. &
-                & owner_idx_ex1(k) == owner_idx_val) then
-              ind_blast(iAGN) = ind_blast_ex1(k)
-              exit
-           endif
-        enddo
-     endif
-  enddo
-  if(allocated(recvbuf_ex3)) deallocate(recvbuf_ex3)
-  deallocate(ind_blast_ex1, owner_cpu_ex1, owner_idx_ex1)
-
-  ! -----------------------------------------------
-  ! Call AGN_blast with Exchange 3 data
-  ! -----------------------------------------------
-
-  call AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_blast,vol_gas &
-       & ,psy_norm,vol_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,spinmagAGN,eps_AGN)
-
-  ! -----------------------------------------------
-  ! Reset dMsmbh for blasted sinks
-  ! -----------------------------------------------
-  do iAGN = 1, nAGN
-     if(ok_blast_agn(iAGN)) then
-        dMsmbh(isink_arr(iAGN)) = 0d0
-     endif
-  enddo
-
-#ifndef WITHOUTMPI
-  ! MPI_MIN on dMsmbh (global — keeps as-is)
-  dMsmbh_new = dMsmbh
-  call MPI_ALLREDUCE(dMsmbh_new, dMsmbh_all, nsink, MPI_DOUBLE_PRECISION, &
-       MPI_MIN, MPI_COMM_WORLD, info)
-  dMsmbh = dMsmbh_all
-#endif
-  dMBH_coarse = 0d0; dMEd_coarse = 0d0
-
-  ! -----------------------------------------------
-  ! Collect EsaveAGN via sink_ksec_reduce_sum
-  ! -----------------------------------------------
-#ifndef WITHOUTMPI
-  Esave_new = 0d0
-  do iAGN = 1, nAGN
-     Esave_new(isink_arr(iAGN)) = EsaveAGN(iAGN)
-  enddo
-  call sink_ksec_reduce_sum(Esave_new, Esave_all, 1, nsink)
-  Esave = Esave_all
-#endif
-
-  ! -----------------------------------------------
-  ! Cleanup
-  ! -----------------------------------------------
-  deallocate(xAGN, vAGN, jAGN, dMBH_AGN, dMEd_AGN, dMsmbh_AGN)
-  deallocate(EsaveAGN, spinmagAGN, eps_AGN)
-  deallocate(ok_blast_agn, iAGN_myid, mAGN, ZAGN)
-  deallocate(vol_gas, psy_norm, vol_blast, ind_blast)
-  deallocate(isink_arr, blast_center_cpu_arr)
-  deallocate(sink_owner, isink_own)
-
-
-end subroutine AGN_feedback_ksec
-!################################################################
-!################################################################
-!################################################################
-!################################################################
 subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,psy_norm,vol_blast &
-     & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN,dMsmbh_AGN,local_only)
+     & ,mass_blast,ind_blast,nAGN,iAGN_myid,ok_blast_agn,EsaveAGN)
   use pm_commons
   use amr_commons
   use hydro_commons
-#ifdef HYDRO_CUDA
-  use sink_cuda_interface
-  use cuda_commons, only: cuda_pool_is_initialized_c
-#endif
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -5999,28 +5240,10 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::vol_gas_mpi,mass_gas_mpi,mAGN_mpi,psy_norm_mpi,ZAGN_mpi
   real(dp),dimension(1:nsink)::vol_gas_all,mass_gas_all,mAGN_all,psy_norm_all,ZAGN_all
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
-  integer::npack,ip
 #endif
   logical ,dimension(1:nAGN)::ok_blast_agn
-  real(dp),dimension(1:nAGN)::dMsmbh_AGN
-  logical, intent(in), optional :: local_only
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy
   real(dp)::eint,ekk
-  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
-  real(dp) :: bin_size, inv_bin_size
-  integer, allocatable :: bin_head(:,:,:), agn_next(:)
-#ifdef HYDRO_CUDA
-  logical :: gpu_done
-  integer :: ncells_total, jc, igrid_i, ind_cell_i, iskip_i, use_gpu, ic
-  integer :: ilevel_g, ind_g
-  real(dp) :: dx_g, dx_loc_g, vol_loc_g
-  real(dp),allocatable :: h_cell_x(:),h_cell_y(:),h_cell_z(:)
-  real(dp),allocatable :: h_cell_vol(:),h_cell_d(:),h_cell_dx(:)
-  integer(4),allocatable :: h_cell_idx(:), h_agn_ok(:)
-  real(dp),dimension(1:twotondim,1:3) :: xc_g
-  integer :: ix_g,iy_g,iz_g
-#endif
 
   if(verbose)write(*,*)'  +Entering average_AGN'
 !$omp parallel shared(nthreads)
@@ -6068,120 +5291,9 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
-  ! Build spatial bins for AGN
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  bin_size=boxlen/dble(nbin)
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
-  bin_head=0; agn_next=0
-  do iAGN=1,nAGN
-     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
-     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
-     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
-     agn_next(iAGN)=bin_head(ibx,iby,ibz)
-     bin_head(ibx,iby,ibz)=iAGN
-  end do
-
   ! Initialize the averaged variables
   vol_gas=0d0;mass_gas=0d0;vol_blast=0d0;mass_blast=0d0;ind_blast=-1;psy_norm=0d0;ZAGN=0d0
-
-#ifdef HYDRO_CUDA
-  ! ---- GPU dispatch for average_AGN ----
-  gpu_done = .false.
-  if(gpu_sink .and. cuda_pool_is_initialized_c() /= 0 .and. nAGN > 0) then
-    ! Count leaf cells across all levels
-    ncells_total = 0
-    do ilevel_g = levelmin, nlevelmax
-      do igrid_i = 1, active(ilevel_g)%ngrid
-        do ind_g = 1, twotondim
-          iskip_i = ncoarse + (ind_g-1)*ngridmax
-          ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
-          if(son(ind_cell_i) == 0) ncells_total = ncells_total + 1
-        end do
-      end do
-    end do
-    if(ncells_total > 0) then
-      allocate(h_cell_x(1:ncells_total), h_cell_y(1:ncells_total), h_cell_z(1:ncells_total))
-      allocate(h_cell_vol(1:ncells_total), h_cell_d(1:ncells_total), h_cell_dx(1:ncells_total))
-      allocate(h_cell_idx(1:ncells_total))
-      allocate(h_agn_ok(1:nAGN))
-      ! Fill flat cell arrays
-      jc = 0
-      do ilevel_g = levelmin, nlevelmax
-        dx_g = 0.5D0**ilevel_g
-        dx_loc_g = dx_g * scale
-        vol_loc_g = dx_loc_g**ndim
-        do ind_g = 1, twotondim
-          iz_g = (ind_g-1)/4
-          iy_g = (ind_g-1-4*iz_g)/2
-          ix_g = (ind_g-1-2*iy_g-4*iz_g)
-          xc_g(ind_g,1) = (dble(ix_g)-0.5D0)*dx_g
-          xc_g(ind_g,2) = (dble(iy_g)-0.5D0)*dx_g
-          xc_g(ind_g,3) = (dble(iz_g)-0.5D0)*dx_g
-        end do
-        do igrid_i = 1, active(ilevel_g)%ngrid
-          do ind_g = 1, twotondim
-            iskip_i = ncoarse + (ind_g-1)*ngridmax
-            ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
-            if(son(ind_cell_i) == 0) then
-              jc = jc + 1
-              h_cell_x(jc) = (xg(active(ilevel_g)%igrid(igrid_i),1)+xc_g(ind_g,1)-skip_loc(1))*scale
-              h_cell_y(jc) = (xg(active(ilevel_g)%igrid(igrid_i),2)+xc_g(ind_g,2)-skip_loc(2))*scale
-              h_cell_z(jc) = (xg(active(ilevel_g)%igrid(igrid_i),3)+xc_g(ind_g,3)-skip_loc(3))*scale
-              h_cell_vol(jc) = vol_loc_g
-              h_cell_d(jc) = uold(ind_cell_i,1)
-              h_cell_dx(jc) = dx_loc_g
-              h_cell_idx(jc) = ind_cell_i
-            endif
-          end do
-        end do
-      end do
-      ! Pack ok_blast_agn to integer array
-      do iAGN = 1, nAGN
-        h_agn_ok(iAGN) = merge(1, 0, ok_blast_agn(iAGN))
-      end do
-      ! Call GPU kernel (bin_head column-major layout matches CUDA kernel)
-      use_gpu = cuda_sink_average_agn_c( &
-        h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_d, h_cell_dx, h_cell_idx, ncells_total, &
-        xAGN, jAGN, dMBH_AGN, dMEd_AGN, EsaveAGN, h_agn_ok, nAGN, &
-        bin_head, agn_next, nbin, inv_bin_size, rmax, rmax2, X_floor, &
-        vol_gas, mass_gas, psy_norm, vol_blast, mass_blast, ind_blast)
-      if(use_gpu == 1) then
-        gpu_done = .true.
-        ! Blast cell mass extraction for jet AGN (CPU post-processing)
-        do iAGN = 1, nAGN
-          if(EsaveAGN(iAGN) == 0d0 .and. X_radio(iAGN) < X_floor &
-               & .and. ok_blast_agn(iAGN) .and. ind_blast(iAGN) > 0) then
-            jtot = sqrt(jAGN(iAGN,1)**2 + jAGN(iAGN,2)**2 + jAGN(iAGN,3)**2)
-            if(jtot > 0d0) then
-              d = uold(ind_blast(iAGN),1)
-              u = uold(ind_blast(iAGN),2)/d
-              v = uold(ind_blast(iAGN),3)/d
-              w = uold(ind_blast(iAGN),4)/d
-              ekk = 0.5d0*d*(u*u+v*v+w*w)
-              eint = uold(ind_blast(iAGN),5) - ekk
-              mAGN(iAGN) = min(mloadAGN*dMsmbh_AGN(iAGN), 0.25d0*d*vol_blast(iAGN))
-              if(metal) then
-                ZAGN(iAGN) = uold(ind_blast(iAGN),imetal)/d
-                uold(ind_blast(iAGN),imetal) = uold(ind_blast(iAGN),imetal) &
-                  & - ZAGN(iAGN)*mAGN(iAGN)/vol_blast(iAGN)
-              endif
-              d = d - mAGN(iAGN)/vol_blast(iAGN)
-              uold(ind_blast(iAGN),1) = d
-              uold(ind_blast(iAGN),2) = d*u
-              uold(ind_blast(iAGN),3) = d*v
-              uold(ind_blast(iAGN),4) = d*w
-              uold(ind_blast(iAGN),5) = eint + 0.5d0*d*(u*u+v*v+w*w)
-            endif
-          endif
-        end do
-      endif
-      deallocate(h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_d, h_cell_dx, h_cell_idx, h_agn_ok)
-    endif
-  endif
-  if(.not. gpu_done) then
-#endif
-!#########################################################################################################
+!######################################################################################################### 
 ! STATUS:
 ! mass_blast, ind_blast, vol_blast: global return variables of iAGN but only once saved when iAGN is completely contained by
 !                                   the lowest grid cell
@@ -6190,7 +5302,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
 ! STRATEGY:
 ! vol_blast, ind_blast, mass_blast ==> let it be.
 ! vol_gas, mass_gas, psy_norm ==> use thread-local array variables and broadcast the sum to global array variables.
-!#########################################################################################################
+!######################################################################################################### 
   Pvol_gas=0d0;Pmass_gas=0d0;Ppsy_norm=0d0
 
   ! Loop over levels
@@ -6212,7 +5324,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(iAGN,igrid,ngrid,i,ind, iskip,x,y,z,dxx,dyy,dzz,&
 !$omp                  dr_AGN,dr_cell,jtot,j_x,j_y,j_z,dzjet,drjet,psy,d,u,v,w,&
-!$omp                  ekk,eint,ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
+!$omp                  ekk,eint) schedule(dynamic)
      do igrid=1,ncache,nvector
        ngrid=MIN(nvector,ncache-igrid+1)
        do i=1,ngrid
@@ -6234,16 +5346,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-               ! Find cell's bin
-               ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-               iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-               ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
-               ! Loop over 27 neighbor bins
-               do jbz=max(1,ibz-1),min(nbin,ibz+1)
-               do jby=max(1,iby-1),min(nbin,iby+1)
-               do jbx=max(1,ibx-1),min(nbin,ibx+1)
-               iAGN=bin_head(jbx,jby,jbz)
-               do while(iAGN > 0)
+               do iAGN=1,nAGN
                   dxx=x-xAGN(iAGN,1)
                   dyy=y-xAGN(iAGN,2)
                   dzz=z-xAGN(iAGN,3)
@@ -6298,7 +5401,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                                ekk=0.5d0*d*(u*u+v*v+w*w)
                                eint=uold(ind_blast(iAGN),5)-ekk
                                vol_blast  (iAGN)=vol_loc
-                               mAGN(iAGN)=min(mloadAGN*dMsmbh_AGN(iAGN),0.25d0*d*vol_loc)
+                               mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN_myid(iAGN)),0.25d0*d*vol_loc)
                                if(metal)then
                                   ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
                                   uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
@@ -6337,9 +5440,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                          endif
                       endif
                    endif
-                  iAGN=agn_next(iAGN)
-               end do ! while
-               end do; end do; end do ! jbx, jby, jbz
+         end do
               endif
       end do
 
@@ -6357,11 +5458,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   psy_norm(iAGN) = sum(Ppsy_norm(iAGN,0:nthreads-1))
   enddo
 
-#ifdef HYDRO_CUDA
-  endif ! .not. gpu_done
-#endif
 
-  deallocate(bin_head, agn_next)
   deallocate(Pind_cell)
   deallocate(Pind_grid)
   deallocate(Pok)
@@ -6370,7 +5467,6 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   deallocate(Ppsy_norm)
 
   !################################################################
-  if(.not.(present(local_only).and.local_only)) then
 #ifndef WITHOUTMPI
   vol_gas_mpi=0d0; mass_gas_mpi=0d0; mAGN_mpi=0d0; ZAGN_mpi=0d0; psy_norm_mpi=0d0
   ! Put the nAGN size arrays into nsink size arrays to synchronize processors
@@ -6383,27 +5479,11 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ZAGN_mpi    (isink)=ZAGN    (iAGN)
      psy_norm_mpi(isink)=psy_norm(iAGN)
   enddo
-  ! Pack 5 arrays into single ALLREDUCE (vol_gas,mass_gas,mAGN,ZAGN,psy_norm)
-  npack=5*nsink
-  allocate(sink_sbuf(1:npack),sink_rbuf(1:npack))
-  ip=0
-  sink_sbuf(ip+1:ip+nsink)=vol_gas_mpi(1:nsink);  ip=ip+nsink
-  sink_sbuf(ip+1:ip+nsink)=mass_gas_mpi(1:nsink); ip=ip+nsink
-  sink_sbuf(ip+1:ip+nsink)=mAGN_mpi(1:nsink);    ip=ip+nsink
-  sink_sbuf(ip+1:ip+nsink)=ZAGN_mpi(1:nsink);    ip=ip+nsink
-  sink_sbuf(ip+1:ip+nsink)=psy_norm_mpi(1:nsink); ip=ip+nsink
-  if(TRIM(ordering)=='ksection') then
-     call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, 5, nsink)
-  else
-     call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,npack,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  end if
-  ip=0
-  vol_gas_all(1:nsink) =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-  mass_gas_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-  mAGN_all(1:nsink)    =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-  ZAGN_all(1:nsink)    =sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-  psy_norm_all(1:nsink)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-  deallocate(sink_sbuf,sink_rbuf)
+  call MPI_ALLREDUCE(vol_gas_mpi ,vol_gas_all ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(mass_gas_mpi,mass_gas_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(mAGN_mpi    ,mAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(ZAGN_mpi    ,ZAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(psy_norm_mpi,psy_norm_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   vol_gas_mpi =vol_gas_all
   mass_gas_mpi=mass_gas_all
   mAGN_mpi    =mAGN_all
@@ -6420,7 +5500,6 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      psy_norm(iAGN)=psy_norm_mpi(isink)
   enddo
 #endif
-  endif ! local_only
   !################################################################
 
   if(verbose)write(*,*)'  +Exiting average_AGN', nAGN
@@ -6436,10 +5515,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   use amr_commons
   use hydro_commons
   use cooling_module, ONLY: XH=>X, rhoc, mH
-#ifdef HYDRO_CUDA
-  use sink_cuda_interface
-  use cuda_commons, only: cuda_pool_is_initialized_c
-#endif
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -6486,22 +5561,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy,nCOM,T2_1,T2_2,ekk,eint,vm_,dr_cell,T2,etot
   real(dp)::eint1,ekkold,T2maxAGNz,epsilon_r,ZZ1,ZZ2,onethird,r_lso,eff_mad
   integer::idim,isink
-  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
-  real(dp) :: bin_size, inv_bin_size
-  integer, allocatable :: bin_head(:,:,:), agn_next(:)
-#ifdef HYDRO_CUDA
-  logical :: gpu_done
-  integer :: ncells_total, jc, igrid_i, ind_cell_i, iskip_i, use_gpu
-  integer :: ilevel_g, ind_g, ivar
-  real(dp) :: dx_g, dx_loc_g, vol_loc_g
-  real(dp),allocatable :: h_cell_x(:),h_cell_y(:),h_cell_z(:)
-  real(dp),allocatable :: h_cell_vol(:),h_cell_dx(:)
-  real(dp),allocatable :: h_cell_uold(:,:)
-  integer(4),allocatable :: h_cell_idx(:), h_agn_ok(:), h_agn_ok_save(:)
-  real(dp),dimension(1:twotondim,1:3) :: xc_g
-  integer :: ix_g,iy_g,iz_g
-  real(dp),allocatable :: h_esave_out(:)
-#endif
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::EsaveAGN_mpi,EsaveAGN_all
 #endif
@@ -6550,20 +5609,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
-  ! Build spatial bins for AGN
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  bin_size=boxlen/dble(nbin)
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
-  bin_head=0; agn_next=0
-  do iAGN=1,nAGN
-     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
-     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
-     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
-     agn_next(iAGN)=bin_head(ibx,iby,ibz)
-     bin_head(ibx,iby,ibz)=iAGN
-  end do
-
 !!$omp parallel do private(iAGN)
   do iAGN=1,nAGN
      X_radio(iAGN)=dMBH_AGN(iAGN)/dMEd_AGN(iAGN)
@@ -6586,8 +5631,8 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
         if(X_radio(iAGN).lt.X_floor)then
            if(mad_jet)then
               ! Fourth-order polynomial fit to McKinney et al, 2012 (jet+wind)
-              eff_mad=4.10507d0+0.328712d0*spinmagAGN(iAGN)+76.0849d0*spinmagAGN(iAGN)**2d0 &
-                   & +47.9235d0*spinmagAGN(iAGN)**3d0+3.86634d0*spinmagAGN(iAGN)**4d0
+              eff_mad=4.10507+0.328712*spinmagAGN(iAGN)+76.0849*spinmagAGN(iAGN)**2d0 &
+                   & +47.9235*spinmagAGN(iAGN)**3d0+3.86634*spinmagAGN(iAGN)**4d0
               eff_mad=eff_mad/100d0
               EAGN(iAGN)=eff_mad*dMsmbh_AGN(iAGN)*(3d10/scale_v)**2d0
               p_gas(iAGN)=(1d0-f_ekAGN)*EAGN(iAGN) / vol_gas(iAGN)
@@ -6605,100 +5650,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   end do
   EsaveAGN=0d0
   PEsaveAGN=0d0
-
-#ifdef HYDRO_CUDA
-  ! ---- GPU dispatch for AGN_blast ----
-  gpu_done = .false.
-  if(gpu_sink .and. cuda_pool_is_initialized_c() /= 0 .and. nAGN > 0) then
-    ! Count leaf cells across all levels
-    ncells_total = 0
-    do ilevel_g = levelmin, nlevelmax
-      do igrid_i = 1, active(ilevel_g)%ngrid
-        do ind_g = 1, twotondim
-          iskip_i = ncoarse + (ind_g-1)*ngridmax
-          ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
-          if(son(ind_cell_i) == 0) ncells_total = ncells_total + 1
-        end do
-      end do
-    end do
-    if(ncells_total > 0) then
-      allocate(h_cell_x(1:ncells_total), h_cell_y(1:ncells_total), h_cell_z(1:ncells_total))
-      allocate(h_cell_vol(1:ncells_total), h_cell_dx(1:ncells_total))
-      allocate(h_cell_idx(1:ncells_total))
-      allocate(h_cell_uold(1:ncells_total, 1:nvar))
-      allocate(h_agn_ok(1:nAGN), h_agn_ok_save(1:nAGN))
-      allocate(h_esave_out(1:nAGN))
-      ! Fill flat cell arrays + gather uold
-      jc = 0
-      do ilevel_g = levelmin, nlevelmax
-        dx_g = 0.5D0**ilevel_g
-        dx_loc_g = dx_g * scale
-        vol_loc_g = dx_loc_g**ndim
-        do ind_g = 1, twotondim
-          iz_g = (ind_g-1)/4
-          iy_g = (ind_g-1-4*iz_g)/2
-          ix_g = (ind_g-1-2*iy_g-4*iz_g)
-          xc_g(ind_g,1) = (dble(ix_g)-0.5D0)*dx_g
-          xc_g(ind_g,2) = (dble(iy_g)-0.5D0)*dx_g
-          xc_g(ind_g,3) = (dble(iz_g)-0.5D0)*dx_g
-        end do
-        do igrid_i = 1, active(ilevel_g)%ngrid
-          do ind_g = 1, twotondim
-            iskip_i = ncoarse + (ind_g-1)*ngridmax
-            ind_cell_i = iskip_i + active(ilevel_g)%igrid(igrid_i)
-            if(son(ind_cell_i) == 0) then
-              jc = jc + 1
-              h_cell_x(jc) = (xg(active(ilevel_g)%igrid(igrid_i),1)+xc_g(ind_g,1)-skip_loc(1))*scale
-              h_cell_y(jc) = (xg(active(ilevel_g)%igrid(igrid_i),2)+xc_g(ind_g,2)-skip_loc(2))*scale
-              h_cell_z(jc) = (xg(active(ilevel_g)%igrid(igrid_i),3)+xc_g(ind_g,3)-skip_loc(3))*scale
-              h_cell_vol(jc) = vol_loc_g
-              h_cell_dx(jc) = dx_loc_g
-              h_cell_idx(jc) = ind_cell_i
-              do ivar = 1, nvar
-                h_cell_uold(jc, ivar) = uold(ind_cell_i, ivar)
-              end do
-            endif
-          end do
-        end do
-      end do
-      ! Pack logical arrays to integer
-      do iAGN = 1, nAGN
-        h_agn_ok(iAGN) = merge(1, 0, ok_blast_agn(iAGN))
-        h_agn_ok_save(iAGN) = merge(1, 0, ok_save(iAGN))
-      end do
-      ! Call GPU kernel
-      use_gpu = cuda_sink_agn_blast_c( &
-        h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_dx, &
-        h_cell_uold, ncells_total, nvar, &
-        xAGN, jAGN, vAGN, &
-        p_gas, uBlast, mAGN, ZAGN, &
-        psy_norm, vol_gas, &
-        dMBH_AGN, dMEd_AGN, &
-        h_agn_ok, h_agn_ok_save, nAGN, &
-        bin_head, agn_next, &
-        nbin, inv_bin_size, rmax, rmax2, X_floor, &
-        scale_T2, T2maxAGNz, imetal, gamma, &
-        h_esave_out)
-      if(use_gpu == 1) then
-        gpu_done = .true.
-        ! Set vol_loc for post-loop (matches CPU path: last level value)
-        vol_loc = (0.5D0**nlevelmax * scale)**ndim
-        ! Scatter modified uold back
-        do ivar = 1, nvar
-          do jc = 1, ncells_total
-            uold(h_cell_idx(jc), ivar) = h_cell_uold(jc, ivar)
-          end do
-        end do
-        ! Copy Esave output
-        EsaveAGN(1:nAGN) = h_esave_out(1:nAGN)
-      endif
-      deallocate(h_cell_x, h_cell_y, h_cell_z, h_cell_vol, h_cell_dx)
-      deallocate(h_cell_idx, h_cell_uold)
-      deallocate(h_agn_ok, h_agn_ok_save, h_esave_out)
-    endif
-  endif
-  if(.not. gpu_done) then
-#endif
 
   ! Loop over levels
   do ilevel=levelmin,nlevelmax
@@ -6723,7 +5674,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(igrid,ngrid,i,ind,iskip,x,y,z,iAGN,dxx,dyy,dzz,&
 !$omp               dr_AGN,ekk,d,idim,etot,eint,T2_1,T2_2,jtot,j_x,j_y,j_z,&
-!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas,ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
+!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas) schedule(dynamic)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
@@ -6749,16 +5700,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
 
-                 ! Find cell's bin
-                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
-                 ! Loop over 27 neighbor bins
-                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
-                 do jby=max(1,iby-1),min(nbin,iby+1)
-                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
-                 iAGN=bin_head(jbx,jby,jbz)
-                 do while(iAGN > 0)
+                 do iAGN=1,nAGN
 
                     ! ------------------------------------------
                     ! case 0: Some energy has not been released
@@ -6932,9 +5874,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                     endif
                     !End of ok_blast_agn
 
-                    iAGN=agn_next(iAGN)
-                 end do ! while
-                 end do; end do; end do ! jbx, jby, jbz
+                 end do
               endif
            end do
         end do
@@ -6947,10 +5887,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   do iAGN=1, nAGN
      EsaveAGN(iAGN) = sum(PEsaveAGN(iAGN,0:nthreads-1))
   enddo
-
-#ifdef HYDRO_CUDA
-  endif ! .not. gpu_done
-#endif
 
 !$omp parallel do private(iAGN,ekk,d,etot,eint,T2_1,T2_2, d_gas,u,v,w)
   do iAGN=1,nAGN
@@ -7056,7 +5992,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      endif
     endif
   end do
-  deallocate(bin_head, agn_next)
 #ifdef _OPENMP
   deallocate(Pind_grid, Pind_cell, Pok, PEsaveAGN)
 #endif
@@ -7388,10 +6323,9 @@ subroutine kjhan_update_sink_position_velocity
   !------------------------------------------------------------------------
   ! This routine updates position and velocity of sink particles.
   !------------------------------------------------------------------------
-  integer::isink,idim,size_mpi,info,nx_loc,ip,ilevel2
+  integer::isink,idim,size_mpi,info,nx_loc
   real(dp)::vdum,ncloud,scale
   real(dp),dimension(1:3)::xbound
-  real(dp),dimension(:),allocatable::sink_sbuf,sink_rbuf
 
   ! Mesh spacing in that level
   xbound(1:3)=(/dble(nx),dble(ny),dble(nz)/)
@@ -7400,28 +6334,8 @@ subroutine kjhan_update_sink_position_velocity
 
   ! update the sink particle position based on total sink particles
 #ifndef WITHOUTMPI
-  if(nsink>0)then
-     size_mpi=nsink*(nlevelmax-levelmin+1)*(ndim*2+1)
-     allocate(sink_sbuf(1:size_mpi),sink_rbuf(1:size_mpi))
-     ip=0
-     do idim=1,ndim*2+1
-        do ilevel2=levelmin,nlevelmax
-           sink_sbuf(ip+1:ip+nsink)=sink_stat(1:nsink,ilevel2,idim); ip=ip+nsink
-        end do
-     end do
-     if(TRIM(ordering)=='ksection') then
-        call sink_ksec_reduce_sum(sink_sbuf, sink_rbuf, (nlevelmax-levelmin+1)*(ndim*2+1), nsink)
-     else
-        call MPI_ALLREDUCE(sink_sbuf,sink_rbuf,size_mpi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     end if
-     ip=0
-     do idim=1,ndim*2+1
-        do ilevel2=levelmin,nlevelmax
-           sink_stat_all(1:nsink,ilevel2,idim)=sink_rbuf(ip+1:ip+nsink); ip=ip+nsink
-        end do
-     end do
-     deallocate(sink_sbuf,sink_rbuf)
-  end if
+  size_mpi=nsinkmax*(nlevelmax-levelmin+1)*(ndim*2+1)
+  call MPI_ALLREDUCE(sink_stat,sink_stat_all,size_mpi,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #else
   sink_stat_all=sink_stat
 #endif
@@ -7578,168 +6492,3 @@ subroutine true_max(x,y,z,ilevel)
 
 #endif
 end subroutine true_max
-!################################################################
-!################################################################
-!################################################################
-!################################################################
-subroutine sink_ksec_reduce_sum(sbuf, rbuf, nfields, nsink_arg)
-  !----------------------------------------------------------------------
-  ! Replace MPI_ALLREDUCE(MPI_SUM) for sink particles using 2-stage
-  ! ksection exchange:
-  !   Stage 1: exclusive exchange → each sink's partial sums go to owner CPU
-  !   Stage 2: overlap broadcast  → owner broadcasts results to all CPUs
-  !
-  ! sbuf(1:nfields*nsink_arg) = local partial sums [field-major packing]
-  ! rbuf(1:nfields*nsink_arg) = global sums (same layout)
-  !----------------------------------------------------------------------
-  use amr_commons, only: myid, ncpu, ndim, boxlen, ordering, dp
-  use pm_commons, only: xsink
-  use ksection, only: ksection_exchange_dp, ksection_exchange_dp_overlap, &
-       cmp_ksection_cpumap
-  implicit none
-#ifndef WITHOUTMPI
-  include 'mpif.h'
-#endif
-  integer, intent(in) :: nfields, nsink_arg
-  real(dp), intent(in)  :: sbuf(1:nfields*nsink_arg)
-  real(dp), intent(out) :: rbuf(1:nfields*nsink_arg)
-
-  ! Local variables
-  integer :: isink, ifld, nitem_send, nown, ip, i, nrecv1, nrecv2
-  integer :: sink_owner(1:nsink_arg)
-  integer :: dest_cpu(1:nsink_arg)  ! max possible send items
-  real(dp) :: val
-  logical :: has_contrib
-
-  ! Stage 1: exclusive exchange buffers
-  ! sendbuf1(1:nfields+1, 1:nitem_send): (sink_index, field1, field2, ...)
-  real(dp), allocatable :: sendbuf1(:,:)
-  real(dp), allocatable :: recvbuf1(:,:)
-
-  ! Stage 2: overlap broadcast buffers
-  ! sendbuf2(1:nfields+1, 1:nown): (sink_index, field1, field2, ...)
-  real(dp), allocatable :: sendbuf2(:,:)
-  real(dp), allocatable :: recvbuf2(:,:)
-  real(dp), allocatable :: xmin_br(:,:), xmax_br(:,:)
-
-  ! Accumulated result on owner
-  real(dp) :: acc(1:nfields)
-
-#ifdef WITHOUTMPI
-  rbuf = sbuf
-  return
-#endif
-
-#ifndef WITHOUTMPI
-  if(nsink_arg == 0) then
-     rbuf = 0d0
-     return
-  end if
-
-  ! Initialize output
-  rbuf = 0d0
-
-  ! Determine owner CPU for each sink
-  call cmp_ksection_cpumap(xsink, sink_owner, nsink_arg)
-
-  !----------------------------------------------------------------------
-  ! Stage 1: Sparse exclusive exchange → owner CPU
-  !----------------------------------------------------------------------
-  ! Count items to send (sinks with non-zero contribution)
-  nitem_send = 0
-  do isink = 1, nsink_arg
-     has_contrib = .false.
-     do ifld = 1, nfields
-        if(sbuf((ifld-1)*nsink_arg + isink) /= 0d0) then
-           has_contrib = .true.
-           exit
-        end if
-     end do
-     if(has_contrib) nitem_send = nitem_send + 1
-  end do
-
-  ! Build send buffer
-  allocate(sendbuf1(1:nfields+1, 1:max(nitem_send,1)))
-  ip = 0
-  do isink = 1, nsink_arg
-     has_contrib = .false.
-     do ifld = 1, nfields
-        if(sbuf((ifld-1)*nsink_arg + isink) /= 0d0) then
-           has_contrib = .true.
-           exit
-        end if
-     end do
-     if(has_contrib) then
-        ip = ip + 1
-        sendbuf1(1, ip) = dble(isink)  ! sink index
-        do ifld = 1, nfields
-           sendbuf1(ifld+1, ip) = sbuf((ifld-1)*nsink_arg + isink)
-        end do
-        dest_cpu(ip) = sink_owner(isink)
-     end if
-  end do
-
-  ! Exchange to owners
-  call ksection_exchange_dp(sendbuf1, nitem_send, dest_cpu, nfields+1, &
-       recvbuf1, nrecv1)
-  deallocate(sendbuf1)
-
-  ! Accumulate received data on owner
-  ! rbuf is used as accumulator for owned sinks
-  do i = 1, nrecv1
-     isink = nint(recvbuf1(1, i))
-     do ifld = 1, nfields
-        rbuf((ifld-1)*nsink_arg + isink) = &
-             rbuf((ifld-1)*nsink_arg + isink) + recvbuf1(ifld+1, i)
-     end do
-  end do
-  if(allocated(recvbuf1)) deallocate(recvbuf1)
-
-  ! Also add local contribution for sinks owned by this CPU
-  ! (ksection_exchange_dp delivers self-sends too, so already included)
-
-  !----------------------------------------------------------------------
-  ! Stage 2: Overlap broadcast → all CPUs
-  !----------------------------------------------------------------------
-  ! Count sinks owned by this CPU
-  nown = 0
-  do isink = 1, nsink_arg
-     if(sink_owner(isink) == myid) nown = nown + 1
-  end do
-
-  ! Build broadcast buffer: owned sinks with accumulated results
-  allocate(sendbuf2(1:nfields+1, 1:max(nown,1)))
-  allocate(xmin_br(1:ndim, 1:max(nown,1)))
-  allocate(xmax_br(1:ndim, 1:max(nown,1)))
-
-  ip = 0
-  do isink = 1, nsink_arg
-     if(sink_owner(isink) == myid) then
-        ip = ip + 1
-        sendbuf2(1, ip) = dble(isink)
-        do ifld = 1, nfields
-           sendbuf2(ifld+1, ip) = rbuf((ifld-1)*nsink_arg + isink)
-        end do
-        ! Full-domain bbox → all CPUs receive
-        xmin_br(1:ndim, ip) = 0d0
-        xmax_br(1:ndim, ip) = boxlen
-     end if
-  end do
-
-  ! Broadcast via overlap exchange
-  call ksection_exchange_dp_overlap(sendbuf2, nown, xmin_br, xmax_br, &
-       nfields+1, recvbuf2, nrecv2, periodic=.true.)
-  deallocate(sendbuf2, xmin_br, xmax_br)
-
-  ! Write results to rbuf from broadcast
-  rbuf = 0d0  ! Reset before filling from broadcast
-  do i = 1, nrecv2
-     isink = nint(recvbuf2(1, i))
-     do ifld = 1, nfields
-        rbuf((ifld-1)*nsink_arg + isink) = recvbuf2(ifld+1, i)
-     end do
-  end do
-  if(allocated(recvbuf2)) deallocate(recvbuf2)
-#endif
-
-end subroutine sink_ksec_reduce_sum

@@ -194,43 +194,12 @@ subroutine godunov_fine(ilevel)
   else
 #endif
 
-  ! Allocate per-thread scatter buffers for Level L-1
-  nthreads = 1
-  !$ nthreads = omp_get_max_threads()
-  allocate(cpu_scatter_bufs(0:nthreads-1))
-  do it = 0, nthreads-1
-     call scatter_buf_init(cpu_scatter_bufs(it), SBUF_INIT_CAP, nvar)
-  end do
-
-  ! Dynamic scheduling with per-thread scatter buffers
-  !$omp parallel do private(igrid,ngrid,tid) schedule(dynamic)
+  ! Use critical section path (no scatter buffer) to match SRC FP order
+  !$omp parallel do private(igrid,ngrid) schedule(dynamic)
   do igrid=1,ncache,nvector
-     tid = 0
-     !$ tid = omp_get_thread_num()
      ngrid=MIN(nvector,ncache-igrid+1)
-     call godfine1(ilevel, igrid, ngrid, cpu_scatter_bufs(tid))
+     call godfine1(ilevel, igrid, ngrid)
   end do
-
-  ! Serial merge: L-1 scatter buffers -> unew/divu/enew
-  do it = 0, nthreads-1
-     do i = 1, cpu_scatter_bufs(it)%count
-        ic = cpu_scatter_bufs(it)%icell(i)
-        do ivar = 1, nvar
-           unew(ic, ivar) = unew(ic, ivar) + cpu_scatter_bufs(it)%dunew(i, ivar)
-        end do
-        if (pressure_fix) then
-           divu(ic) = divu(ic) + cpu_scatter_bufs(it)%ddivu(i)
-           enew(ic) = enew(ic) + cpu_scatter_bufs(it)%denew(i)
-        end if
-     end do
-  end do
-
-  ! Cleanup scatter buffers
-  do it = 0, nthreads-1
-     deallocate(cpu_scatter_bufs(it)%icell, cpu_scatter_bufs(it)%dunew, &
-                cpu_scatter_bufs(it)%ddivu, cpu_scatter_bufs(it)%denew)
-  end do
-  deallocate(cpu_scatter_bufs)
 
 #ifdef HYDRO_CUDA
   end if
@@ -856,8 +825,11 @@ subroutine godfine1(ilevel, jgrid, mgrid, sbuf)
   end do
   !--------------------------------------
   ! Conservative update at level ilevel
-  ! (conflict-free: each thread writes to its own grid cells)
   !--------------------------------------
+#ifndef OMP_TEST
+!$omp flush
+!$omp critical (godunov)
+#endif
   do idim=1,ndim
      i0=0; j0=0; k0=0
      if(idim==1)i0=1
@@ -978,8 +950,7 @@ subroutine godfine1(ilevel, jgrid, mgrid, sbuf)
         end do
      end do
   else
-     ! Fallback: original critical section path
-     !$omp critical (godunov)
+     ! Fallback: original critical section path (outer critical already held)
      do idim=1,ndim
         i0=0; j0=0; k0=0
         if(idim==1)i0=1
@@ -1068,8 +1039,11 @@ subroutine godfine1(ilevel, jgrid, mgrid, sbuf)
            end do
         end if
      end do
-     !$omp end critical (godunov)
   end if
+#ifndef OMP_TEST
+!$omp flush
+!$omp end critical (godunov)
+#endif
 
 end subroutine godfine1
 #ifdef HYDRO_CUDA

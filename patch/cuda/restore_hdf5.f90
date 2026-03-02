@@ -48,6 +48,10 @@ subroutine restore_amr_hdf5()
   integer(8) :: ix, iy, iz, ix_p, iy_p, iz_p
   integer :: nxny
   integer :: ngrid_all_int, icpu, grid_offset
+
+  ! nbor rebuild variables
+  integer :: j_nb, ig_nb, ih_nb, ind_oct_nb, igrid_par_nb, nbor_grid
+  integer :: ggg_nb(8,6), hhh_nb(8,6)
   type(mkey_t) :: mkey
   real(dp) :: twotol
 
@@ -641,6 +645,101 @@ subroutine restore_amr_hdf5()
   ngrid_current = ngridmax - numbf
   used_mem = ngrid_current
   if(myid==1) write(*,*) 'HDF5: ngrid_current =', ngrid_current
+
+  !=====================================================
+  ! Step 7b: Rebuild nbor() array for son(nbor) compatibility
+  !=====================================================
+  if(size(nbor,1) > 1) then
+     if(myid==1) write(*,*) 'HDF5: rebuilding nbor() array...'
+     nbor = 0
+
+     ! Level 1: compute nbor from coarse cell coordinates
+     do icpu = 1, ncpu
+        igrid = headl(icpu, 1)
+        do while(igrid > 0)
+           ix = int(xg(igrid, 1) * 1.0d0, 8)
+           iy = int(xg(igrid, 2) * 1.0d0, 8)
+           iz = int(xg(igrid, 3) * 1.0d0, 8)
+           ! x-direction
+           if(ix > 0) then
+              nbor(igrid, 1) = 1 + int(ix-1) + int(iy)*nx + int(iz)*nxny
+           else
+              nbor(igrid, 1) = 1 + (nx-1) + int(iy)*nx + int(iz)*nxny
+           end if
+           if(ix < nx-1) then
+              nbor(igrid, 2) = 1 + int(ix+1) + int(iy)*nx + int(iz)*nxny
+           else
+              nbor(igrid, 2) = 1 + 0 + int(iy)*nx + int(iz)*nxny
+           end if
+           ! y-direction
+           if(iy > 0) then
+              nbor(igrid, 3) = 1 + int(ix) + int(iy-1)*nx + int(iz)*nxny
+           else
+              nbor(igrid, 3) = 1 + int(ix) + (ny-1)*nx + int(iz)*nxny
+           end if
+           if(iy < ny-1) then
+              nbor(igrid, 4) = 1 + int(ix) + int(iy+1)*nx + int(iz)*nxny
+           else
+              nbor(igrid, 4) = 1 + int(ix) + 0 + int(iz)*nxny
+           end if
+           ! z-direction
+           if(iz > 0) then
+              nbor(igrid, 5) = 1 + int(ix) + int(iy)*nx + int(iz-1)*nxny
+           else
+              nbor(igrid, 5) = 1 + int(ix) + int(iy)*nx + (nz-1)*nxny
+           end if
+           if(iz < nz-1) then
+              nbor(igrid, 6) = 1 + int(ix) + int(iy)*nx + int(iz+1)*nxny
+           else
+              nbor(igrid, 6) = 1 + int(ix) + int(iy)*nx + 0
+           end if
+           igrid = next(igrid)
+        end do
+     end do
+
+     ! Levels > 1: inline getnborgrids + getnborcells logic
+     ! ggg: which neighbor (0=central, 1-6=direction), hhh: cell position in that grid
+     ggg_nb(1:8,1)=(/1,0,1,0,1,0,1,0/); hhh_nb(1:8,1)=(/2,1,4,3,6,5,8,7/)
+     ggg_nb(1:8,2)=(/0,2,0,2,0,2,0,2/); hhh_nb(1:8,2)=(/2,1,4,3,6,5,8,7/)
+     ggg_nb(1:8,3)=(/3,3,0,0,3,3,0,0/); hhh_nb(1:8,3)=(/3,4,1,2,7,8,5,6/)
+     ggg_nb(1:8,4)=(/0,0,4,4,0,0,4,4/); hhh_nb(1:8,4)=(/3,4,1,2,7,8,5,6/)
+     ggg_nb(1:8,5)=(/5,5,5,5,0,0,0,0/); hhh_nb(1:8,5)=(/5,6,7,8,1,2,3,4/)
+     ggg_nb(1:8,6)=(/0,0,0,0,6,6,6,6/); hhh_nb(1:8,6)=(/5,6,7,8,1,2,3,4/)
+
+     do ilevel = 2, nlevelmax
+        do icpu = 1, ncpu
+           igrid = headl(icpu, ilevel)
+           do while(igrid > 0)
+              ! Extract father grid and oct position from father cell index
+              ind_oct_nb = (father(igrid) - ncoarse - 1) / ngridmax + 1
+              igrid_par_nb = father(igrid) - ncoarse - (ind_oct_nb - 1) * ngridmax
+
+              do j_nb = 1, twondim
+                 ig_nb = ggg_nb(ind_oct_nb, j_nb)
+                 ih_nb = hhh_nb(ind_oct_nb, j_nb)
+                 if(ig_nb == 0) then
+                    nbor_grid = igrid_par_nb  ! Central grid (parent itself)
+                 else
+                    if(nbor(igrid_par_nb, ig_nb) > 0) then
+                       nbor_grid = son(nbor(igrid_par_nb, ig_nb))
+                    else
+                       nbor_grid = 0
+                    end if
+                 end if
+                 if(nbor_grid > 0) then
+                    nbor(igrid, j_nb) = ncoarse + (ih_nb - 1) * ngridmax + nbor_grid
+                 else
+                    nbor(igrid, j_nb) = 0
+                 end if
+              end do
+
+              igrid = next(igrid)
+           end do
+        end do
+     end do
+
+     if(myid==1) write(*,*) 'HDF5: nbor() rebuild completed'
+  end if
 
   !=====================================================
   ! Step 8: Compute numbtot via MPI_ALLREDUCE

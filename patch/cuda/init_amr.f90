@@ -269,7 +269,7 @@ subroutine init_amr
 
   ! Allocate tree arrays
   allocate(father(1:ngridmax))
-  allocate(nbor  (1:1,1:1))  ! Minimal — nbor computed from Morton keys
+  allocate(nbor  (1:ngridmax,1:twondim))  ! Full allocation for son(nbor) compatibility
   allocate(next  (1:ngridmax))
   allocate(prev  (1:ngridmax))
   father=0; nbor=0; next=0; prev=0
@@ -561,9 +561,23 @@ subroutine init_amr
               do i=1,ncache
                  father(ind_grid(i))=iig(i)
               end do
-              ! Read nbor index (read but ignore — computed from Morton keys)
+              ! Read nbor index
               do ind=1,twondim
                  read(ilun)iig
+                 if(ngridmax.ne.ngridmax2.and.ilevel>1)then
+                    do i=1,ncache
+                       pos(i)=(iig(i)-ncoarse-1)/ngridmax2
+                    end do
+                    do i=1,ncache
+                       grid(i)=iig(i)-ncoarse-pos(i)*ngridmax2
+                    end do
+                    do i=1,ncache
+                       iig(i)=ncoarse+pos(i)*ngridmax+grid(i)
+                    end do
+                 end if
+                 do i=1,ncache
+                    nbor(ind_grid(i),ind)=iig(i)
+                 end do
               end do
               ! Read son index
               do ind=1,twotondim

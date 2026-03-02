@@ -74,7 +74,7 @@ subroutine init_tree
              & xp(ipart,idim)=xp(ipart,idim)-(xbound(idim)-skip_loc(idim))*scale
      end do
      if(sink)then
-!$omp parallel do private(ipart) 
+!$omp parallel do private(ipart)
         do ipart=1,nsink
            if(xsink(ipart,idim)/scale+skip_loc(idim)<0.0d0) &
                 & xsink(ipart,idim)=xsink(ipart,idim)+(xbound(idim)-skip_loc(idim))*scale
@@ -83,7 +83,7 @@ subroutine init_tree
         end do
      endif
   end do
- 
+
   !----------------------------------
   ! Reset all linked lists at level 1
   !----------------------------------

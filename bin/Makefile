@@ -160,6 +160,9 @@ write_patch.o: FORCE
 	$(F90) $(FFLAGS) -c write_patch.f90 -o $@
 %.o:%.f90
 	$(F90) $(FFLAGS) -c $^ -o $@
+# ifx ICE workaround: phi_fine_cg.kisti crashes with -qopenmp
+phi_fine_cg.kisti.o: phi_fine_cg.kisti.f90
+	mpiifx $(FFLAGS) -c $^ -o $@
 ifdef USE_CUDA
 %.o:%.cu
 	$(NVCC) $(NVCCFLAGS) -c $< -o $@
