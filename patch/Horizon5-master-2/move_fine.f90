@@ -12,6 +12,8 @@ subroutine move_fine(ilevel)
   ! for CIC interpolation. Otherwise, use coarse grid (ilevel-1) force.
   !----------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part,ig,ip,npart1,info,isink
+  integer::npack,ip_buf,idim
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
   integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
 
   if(numbtot(1,ilevel)==0)return
@@ -63,8 +65,21 @@ subroutine move_fine(ilevel)
   if(sink)then
      if(nsink>0)then
 #ifndef WITHOUTMPI
-        call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-        call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+        npack = (1+ndim)*nsink
+        allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+        ip_buf = 0
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = oksink_new(1:nsink); ip_buf = ip_buf + nsink
+        do idim=1,ndim
+           sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
+        end do
+        call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+        ip_buf = 0
+        oksink_all=0d0; vsink_all=0d0
+        oksink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+        do idim=1,ndim
+           vsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+        end do
+        deallocate(sink_sbuf, sink_rbuf)
 #else
         oksink_all=oksink_new
         vsink_all=vsink_new

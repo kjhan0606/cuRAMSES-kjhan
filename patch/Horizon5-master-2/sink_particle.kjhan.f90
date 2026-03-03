@@ -114,6 +114,9 @@ subroutine kjhan_make_sink(ilevel)
   integer ::igrid,ix,iy,iz,ind,i,j,n,iskip,isink,inew,nx_loc
   integer ::ii,jj,kk,ind_cloud,ncloud
   integer ::ntot,ntot_all,info,ilun,ntot_tmp,izero_myid,ninc,ntot_myid
+  integer ::npack,npack_int,ip_buf,idim2
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
+  integer ,allocatable,dimension(:)::sink_ibuf,sink_jbuf
   logical ::ok_free
   character(LEN=80)::filename
   character(LEN=5)::nchar
@@ -919,16 +922,51 @@ subroutine kjhan_make_sink(ilevel)
   end do
 
 #ifndef WITHOUTMPI
-  call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(msink_new ,msink_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(xsink_new ,xsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(tsink_new ,tsink_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(idsink_new,idsink_all,nsinkmax   ,MPI_INTEGER        ,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(dMsmbh_new,dMsmbh_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(Esave_new ,Esave_all ,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(bhspin_new,bhspin_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(spinmag_new,spinmag_all,nsinkmax   ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  ! Pack 15 real fields: oksink(1)+msink(1)+xsink(3)+vsink(3)+tsink(1)+dMsmbh(1)+Esave(1)+bhspin(3)+spinmag(1)
+  npack = 15*nsink
+  npack_int = nsink
+  allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+  allocate(sink_ibuf(1:npack_int), sink_jbuf(1:npack_int))
+  ip_buf = 0
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = oksink_new(1:nsink);  ip_buf = ip_buf + nsink
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = msink_new(1:nsink);   ip_buf = ip_buf + nsink
+  do idim2=1,ndim
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = xsink_new(1:nsink,idim2); ip_buf = ip_buf + nsink
+  end do
+  do idim2=1,ndim
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim2); ip_buf = ip_buf + nsink
+  end do
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = tsink_new(1:nsink);   ip_buf = ip_buf + nsink
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = dMsmbh_new(1:nsink);  ip_buf = ip_buf + nsink
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = Esave_new(1:nsink);   ip_buf = ip_buf + nsink
+  do idim2=1,ndim
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = bhspin_new(1:nsink,idim2); ip_buf = ip_buf + nsink
+  end do
+  sink_sbuf(ip_buf+1:ip_buf+nsink) = spinmag_new(1:nsink); ip_buf = ip_buf + nsink
+  sink_ibuf(1:nsink) = idsink_new(1:nsink)
+  call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+  call MPI_ALLREDUCE(sink_ibuf, sink_jbuf, npack_int, MPI_INTEGER, MPI_SUM, MPI_COMM_WORLD, info)
+  ! Unpack
+  ip_buf = 0
+  oksink_all=0d0; msink_all=0d0; xsink_all=0d0; vsink_all=0d0
+  tsink_all=0d0; dMsmbh_all=0d0; Esave_all=0d0; bhspin_all=0d0; spinmag_all=0d0; idsink_all=0
+  oksink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink);  ip_buf = ip_buf + nsink
+  msink_all(1:nsink)  = sink_rbuf(ip_buf+1:ip_buf+nsink);  ip_buf = ip_buf + nsink
+  do idim2=1,ndim
+     xsink_all(1:nsink,idim2) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  end do
+  do idim2=1,ndim
+     vsink_all(1:nsink,idim2) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  end do
+  tsink_all(1:nsink)   = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  dMsmbh_all(1:nsink)  = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  Esave_all(1:nsink)   = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  do idim2=1,ndim
+     bhspin_all(1:nsink,idim2) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  end do
+  spinmag_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+  idsink_all(1:nsink)  = sink_jbuf(1:nsink)
+  deallocate(sink_sbuf, sink_rbuf, sink_ibuf, sink_jbuf)
 #else
   oksink_all=oksink_new
   msink_all =msink_new
@@ -2040,6 +2078,8 @@ subroutine bondi_hoyle(ilevel)
   !------------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part,idim,info
   integer::i,ig,ip,npart1,npart2,icpu,nx_loc,isink
+  integer::npack,ip_buf
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
   integer(i8b):: ksink
 ! integer,target, allocatable::Pind_grid(:,:),Pind_part(:,:),Pind_grid_part(:,:)
 ! integer, pointer:: ind_grid(:), ind_part(:), ind_grid_part(:)
@@ -2178,9 +2218,19 @@ subroutine bondi_hoyle(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(c2sink_new,c2sink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(v2sink_new,v2sink_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     npack = 3*nsink
+     allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+     ip_buf = 0
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = oksink_new(1:nsink); ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = c2sink_new(1:nsink); ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = v2sink_new(1:nsink); ip_buf = ip_buf + nsink
+     call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+     ip_buf = 0
+     oksink_all=0d0; c2sink_all=0d0; v2sink_all=0d0
+     oksink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     c2sink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     v2sink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     deallocate(sink_sbuf, sink_rbuf)
 #else
      oksink_all=oksink_new
      c2sink_all=c2sink_new
@@ -2302,11 +2352,32 @@ subroutine bondi_hoyle(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     call MPI_ALLREDUCE(wdens,wdens_new,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(wvol ,wvol_new ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(wc2  ,wc2_new  ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(wmom ,wmom_new ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(jsink_new,jsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     ! Pack 9 fields: wdens(1)+wvol(1)+wc2(1)+wmom(3)+jsink(3)
+     npack = (3+2*ndim)*nsink
+     allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+     ip_buf = 0
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = wdens(1:nsink);     ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = wvol(1:nsink);      ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = wc2(1:nsink);       ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = wmom(1:nsink,idim); ip_buf = ip_buf + nsink
+     end do
+     do idim=1,ndim
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = jsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
+     end do
+     call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+     ip_buf = 0
+     wdens_new=0d0; wvol_new=0d0; wc2_new=0d0; wmom_new=0d0; jsink_all=0d0
+     wdens_new(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink);  ip_buf = ip_buf + nsink
+     wvol_new(1:nsink)  = sink_rbuf(ip_buf+1:ip_buf+nsink);  ip_buf = ip_buf + nsink
+     wc2_new(1:nsink)   = sink_rbuf(ip_buf+1:ip_buf+nsink);  ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        wmom_new(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     end do
+     do idim=1,ndim
+        jsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     end do
+     deallocate(sink_sbuf, sink_rbuf)
 #else
      wdens_new=wdens
      wvol_new=wvol
@@ -2882,6 +2953,8 @@ subroutine grow_bondi(ilevel)
   !------------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part,idim,info
   integer::i,ig,ip,npart1,npart2,icpu,nx_loc,isink,ilun
+  integer::npack,ip_buf
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
   real(dp),dimension(1:3)::velocity
   integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
   real(dp)::r2,density,volume
@@ -3055,11 +3128,28 @@ subroutine grow_bondi(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(vsink_new,vsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(dMBH_coarse_new,dMBH_coarse_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(dMEd_coarse_new,dMEd_coarse_all,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(dMsmbh_new     ,dMsmbh_all     ,nsinkmax,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     ! Pack 7 fields: msink(1)+vsink(3)+dMBH_coarse(1)+dMEd_coarse(1)+dMsmbh(1)
+     npack = (4+ndim)*nsink
+     allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+     ip_buf = 0
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = msink_new(1:nsink); ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
+     end do
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = dMBH_coarse_new(1:nsink); ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = dMEd_coarse_new(1:nsink); ip_buf = ip_buf + nsink
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = dMsmbh_new(1:nsink);      ip_buf = ip_buf + nsink
+     call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+     ip_buf = 0
+     msink_all=0d0; vsink_all=0d0; dMBH_coarse_all=0d0; dMEd_coarse_all=0d0; dMsmbh_all=0d0
+     msink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        vsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     end do
+     dMBH_coarse_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     dMEd_coarse_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     dMsmbh_all(1:nsink)      = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     deallocate(sink_sbuf, sink_rbuf)
 #else
      msink_all=msink_new
      vsink_all=vsink_new
@@ -3470,6 +3560,8 @@ subroutine grow_jeans(ilevel)
   !------------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part,idim,info
   integer::i,ig,ip,npart1,npart2,icpu,nx_loc,isink
+  integer::npack,ip_buf
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
 #ifndef _OPENMP
   integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
 #else
@@ -3616,8 +3708,22 @@ subroutine grow_jeans(ilevel)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
-     call MPI_ALLREDUCE(msink_new,msink_all,nsinkmax    ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-     call MPI_ALLREDUCE(vsink_new,vsink_all,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+     ! Pack 4 fields: msink(1)+vsink(3)
+     npack = (1+ndim)*nsink
+     allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+     ip_buf = 0
+     sink_sbuf(ip_buf+1:ip_buf+nsink) = msink_new(1:nsink); ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
+     end do
+     call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+     ip_buf = 0
+     msink_all=0d0; vsink_all=0d0
+     msink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     do idim=1,ndim
+        vsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+     end do
+     deallocate(sink_sbuf, sink_rbuf)
 #else
      msink_all=msink_new
      vsink_all=vsink_new
