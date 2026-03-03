@@ -780,7 +780,7 @@ The Morton keys are stored in a per-level open-addressing hash table
 that maps keys to grid indices, providing $\Olog{1}$ amortised
 neighbour look-up (Appendix~\ref{app:hashtable}).
 Each hash table entry stores a 16-byte Morton key and a 4-byte grid
-index (20 bytes total).  With a maximum load factor of 0.7, the
+index (20 bytes total).  With a maximum fill fraction of 0.7 (i.e.\ 70\,per\,cent occupancy), the
 aggregate memory footprint across all levels is approximately
 $1.4 \times 20 \times N_{\rm grids} \approx 29\,N_{\rm grids}$ bytes,
 where $N_{\rm grids}$ is the number of allocated grids.
@@ -788,35 +788,6 @@ For a typical run with $N_{\rm grids} \approx 3\,\mathrm{M}$, this
 amounts to roughly 83\,MB, far smaller than the original
 \code{nbor} array ($48\,\ngridmax \approx 240$\,MB for
 $\ngridmax = 5\,\mathrm{M}$).
-
-\subsection{Hilbert Key and Histogram Array Elimination}
-\label{sec:mem_hilbert}
-
-When using \ksec\ ordering, the Hilbert key array
-\code{hilbert\_key(1:ncell)} is no longer needed for domain
-decomposition. We replace it with \code{allocate(hilbert\_key(1:1))},
-saving $16\,\ngridmax\,\twotondim$ bytes
-under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
-For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
-
-The defragmentation routine, which previously required Hilbert keys
-for reordering, uses a local scratch array (\code{defrag\_dp})
-allocated only during the defragmentation pass and immediately
-deallocated.
-
-Similarly, the arrays \code{bisec\_ind\_cell} and \code{cell\_level},
-each of size $\ngridmax\,\twotondim$ integers (8 bytes), are used
-exclusively during load balancing to build the bisection histogram.
-We allocate them on entry to \code{init\_bisection\_histogram} and
-deallocate them after \code{cmp\_new\_cpu\_map} returns, saving
-$16\,\ngridmax\,\twotondim \approx 320$\,MB
-for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
-every \code{nremap} coarse steps, these arrays are absent during the
-vast majority of the simulation.
-
-
-\subsection{Memory Savings Summary}
-\label{sec:mem_summary}
 
 The memory cost of the hash table is
 \begin{equation}
@@ -826,83 +797,14 @@ M_{\rm hash} \approx 1.4\,N_{\rm grids}
 \end{equation}
 where $N_{\rm grids}$ is the actual number of grids (typically much
 less than $\ngridmax$), 16 bytes per key, 4 bytes per grid index, and
-a load factor of 0.7 accounts for empty slots. The
-\code{grid\_level} array adds $4\,\ngridmax$ bytes.
-
-Compared to the original \code{nbor} cost of $48\,\ngridmax$
-bytes, the net savings are approximately
-$44\,\ngridmax - 17\,N_{\rm grids}$.
-Since $N_{\rm grids} \ll \ngridmax$ in practice (typical occupancy is
-30--60\,per\,cent), the savings are substantial, reaching $\sim$176\,MB for
-$\ngridmax = 5\,\mathrm{M}$ at 50\,per\,cent occupancy.
-
-The computational cost of a hash lookup is $\Olog{1}$ expected time,
-with worst-case linear probing bounded by the load factor. In
-practice, the precomputed neighbour caches described in
-Section~\ref{sec:multigrid} amortize any per-lookup overhead in the
-performance-critical Poisson solver.
-
-Table~\ref{tab:memory} summarizes the combined memory savings for
-$\ngridmax = 5\,\mathrm{M}$.
-
-\begin{table}
-\centering
-\caption{Memory savings per MPI rank for $\ngridmax = 5\,\mathrm{M}$.
-Savings marked with ${}^*$ are conditional on using \ksec\ ordering.}
-\label{tab:memory}
-\small
-\begin{tabular}{lrl}
-\toprule
-Optimization & MB & Availability \\
-\midrule
-\code{nbor} removal (Morton hash) & 240 & Always \\
-\code{hilbert\_key} removal${}^*$ & 640 & Steady state \\
-On-demand \code{bisec\_ind\_cell}${}^*$ & 160 & Between LB \\
-On-demand \code{cell\_level}${}^*$ & 160 & Between LB \\
-Defrag scratch (local) & 40 & Between defrag \\
-\midrule
-\textbf{Total} & \textbf{$>$1200} & \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The reported memory savings of the \code{nbor} array account for both
-the eliminated array ($48\,\ngridmax = 240$\,MB) and the hash table
-overhead ($\sim$17\,$N_{\rm grids}$, typically $<$50\,MB). Net savings
-are at least 190\,MB. The Hilbert key savings of 640\,MB assume
-\code{QUADHILBERT}; for standard 64-bit keys the savings would be
-320\,MB. Figure~\ref{fig:memory_savings} visualizes the individual
-contributions.
-
-\begin{figure*}
-\centering
-\includegraphics[width=\textwidth]{fig_memory_savings.pdf}
-\caption{Per-rank memory savings breakdown for $\ngridmax = 5\,\mathrm{M}$.
-  Solid bars denote unconditional savings (always available); hatched
-  bars denote savings available only between load-balance steps or
-  defragmentation passes.  The red segment shows the hash table
-  overhead ($\sim$40--50\,MB), yielding a net saving of $>$1190\,MB
-  per MPI rank.}
-\label{fig:memory_savings}
-\end{figure*}
-
-From an astrophysical perspective, the reduction of over 1\,GB per rank
-is not merely a hardware efficiency gain. It directly translates
-into deeper AMR hierarchies within the same memory budget.  For a
-fixed node configuration, the freed memory can accommodate a
-proportionally larger $\ngridmax$, enabling finer resolution in the
-densest regions of the simulation, including the cores of dark matter haloes,
-the circum-galactic medium, and the sites of active star formation.
-In practice, this means that phenomena requiring high spatial
-resolution, e.g.\ the fragmentation of cold gas clouds in the ISM,
-the accretion flow onto supermassive black holes, or the propagation
-of supernova-driven outflows, can be resolved to higher AMR levels
-without requiring additional hardware, directly improving the fidelity
-of sub-grid physics models.
-
-We implement a diagnostic routine \code{writemem\_minmax} that reports
-the minimum and maximum resident set size across all ranks at each
-coarse step, providing runtime verification of the memory savings.
+a fill fraction of 0.7 accounts for the $1/0.7 \approx 1.43\times$ capacity overhead.
+Compared to the original \code{nbor} cost of $48\,\ngridmax$ bytes,
+the net savings exceed 60\,per\,cent of neighbour-related memory.
+Combined with Hilbert key elimination and on-demand allocation of
+auxiliary arrays, the total savings exceed $248\,\ngridmax$ bytes
+($>$1.2\,GB per rank for $\ngridmax = 5\,\mathrm{M}$).
+The detailed memory savings analysis, including per-component
+breakdowns, is provided in Appendix~\ref{app:memory}.
 
 
 % ===================================================================
@@ -919,101 +821,14 @@ step. We describe several optimizations that reduce this fraction to
 approximately 39\,per\,cent.
 
 
-\subsection{Neighbour Grid Precomputation}
-\label{sec:mg_nbor_precompute}
-
-The Gauss--Seidel (GS) smoother and residual computation both require
-access to the six Cartesian neighbours of each grid. In the Morton
-hash table approach (Section~\ref{sec:morton}), each neighbour lookup
-involves a hash table query. While individual lookups are $\Olog{1}$,
-the GS kernel accesses 6 neighbours per grid, 8 cells per grid, and
-typically 4--5 V-cycle iterations, resulting in hundreds of hash
-lookups per grid per solve.
-
-We precompute all neighbour grids into a contiguous array before
-entering the V-cycle iteration loop,
-\begin{equation}
-\text{nbor\_grid\_fine}(j,\, i) = \text{morton\_nbor\_grid}(
-\text{igrid\_amr}(i),\, l,\, j),
-\label{eq:nbor_precompute}
-\end{equation}
-for $j = 0, 1, \ldots, 6$ (where $j = 0$ stores the grid's own AMR
-index \code{igrid\_amr}) and $i = 1, \ldots, N_{\rm grid}$. This
-array is allocated before the iteration loop and deallocated after,
-so its memory overhead is transient.
-
-The original GS kernel also contains a branch on \code{igshift == 0}
-to distinguish between the current grid and its neighbours. We unify
-the access pattern with a cache array
-\code{nbor\_grids\_cache(0:twondim)}, where index 0 references the
-grid itself. All neighbour accesses, including the self-reference,
-use the same indexed load, eliminating the branch.
-
-
-\subsection{Merged Red-Black Exchange and Fused Kernels}
-\label{sec:mg_merged_rb}
-
-Standard red-black Gauss--Seidel smoothing in \ramses\ performs a
-ghost-zone exchange of the potential $\phi$ between the red and black
-sweeps,
-Red $\to$ Exchange($\phi$) $\to$ Black $\to$ Exchange($\phi$).
-Each iteration thus requires two exchanges for the smoother alone,
-plus additional exchanges for the residual and restriction/prolongation
-steps, for a total of 9 exchange calls per iteration.
-
-We merge the red and black sweeps by removing the inter-sweep exchange,
-Red $\to$ Black $\to$ Exchange($\phi$).
-This is a form of relaxed synchronisation in which boundary cells in the
-black sweep use values from the previous iteration rather than
-freshly exchanged red-sweep values. For the MG
-preconditioner, this does not affect convergence in practice because the
-MG solve is itself an approximate preconditioner for the conjugate
-gradient outer iteration, and the stale-ghost error is well within
-the MG tolerance.
-
-We also remove two unnecessary residual exchanges per iteration,
-reducing the total from 9 to 5 exchange calls per iteration, a
-44\,per\,cent reduction in MG communication volume.
-
-The same optimization is applied to the coarse-level solver
-(direct solve, pre-smoothing, post-smoothing), where the merged
-red-black pattern similarly halves the exchange count.
-
-The MG algorithm requires both the residual $r = f - A\phi$ and its
-$L^2$ norm $\|r\|_2^2$ at specific points in the V-cycle. In the
-original code, these are computed in separate passes. We add an
-optional \code{norm2} argument to \code{cmp\_residual\_mg\_fine}:
-when present, the norm is accumulated during the same loop that
-computes the residual, saving one full grid traversal.
-Since the subroutine is \code{external} (not module-contained), callers
-must include an \code{interface} block to enable the optional-argument
-dispatch.
-
-The GS fast-path computation involves a division by
-$2 N_{\rm dim} = 6$:
-\begin{equation}
-\phi_{\rm new} = \frac{\sum_j \phi_j - h^2 f}{2 N_{\rm dim}}.
-\label{eq:gs_update}
-\end{equation}
-We replace the division \code{/ dtwondim} with a multiplication by
-the precomputed reciprocal \code{* oneoverdtwondim}, which is faster
-on most architectures.
-
-\begin{figure*}
-\centering
-\includegraphics[width=\textwidth]{fig_mg_redblack.pdf}
-\caption{Multigrid V-cycle exchange optimization.
-  (a)~Original: each smoothing iteration requires 9 ghost-zone
-  exchanges, two for the red-black sweeps (exchanging $\phi$), one
-  each for the residual and norm (exchanging $r$), and additional
-  exchanges for restriction and prolongation.
-  (b)~Optimized: the inter-sweep red-black exchange is removed
-  (relaxed synchronisation), and the separate residual and norm
-  exchanges are fused, reducing the total to 5 exchanges per iteration
-  ($-44$\,per\,cent).  Orange diamonds marked ``E'' denote active
-  exchanges; crossed-out diamonds indicate eliminated exchanges.}
-\label{fig:mg_redblack}
-\end{figure*}
+We apply several targeted optimizations to the MG smoother and
+communication pattern.  Neighbour grid indices are precomputed into a
+contiguous cache before the V-cycle, amortising hash table lookups.
+The red and black Gauss--Seidel sweeps are merged by removing the
+inter-sweep ghost exchange, and two redundant residual exchanges are
+eliminated, reducing the total exchange count from 9 to 5 per
+iteration (44\,per\,cent).  Implementation details are given in
+Appendix~\ref{app:mg_details}.
 
 \subsection{Performance Impact}
 \label{sec:mg_performance}
@@ -1099,6 +914,14 @@ $e_{\text{cons}} = 6.12 \times 10^{-4}$ for both FFTW3 and cuFFT.
 The solver is enabled via \code{use\_fftw=.true.} in
 \code{\&RUN\_PARAMS} and requires compilation with
 \code{make USE\_FFTW=1}.
+
+We note that the sparse point-to-point exchange replaces an earlier
+\code{MPI\_ALLTOALLV} implementation; there is no separate
+\ksec-specific path for the FFT solver.  Partner lists are computed
+from grid-position-based bounding boxes obtained via
+\code{MPI\_ALLGATHER}, rather than from domain-decomposition-specific
+arrays, so the solver works identically with both Hilbert and
+\ksec\ orderings.
 
 
 % ===================================================================
@@ -1712,13 +1535,32 @@ base-level Poisson solve without requiring GPU hardware.
 \subsection{Test Configuration}
 \label{sec:perf_config}
 
-All tests use a cosmological $\Lambda$CDM simulation with
+We use two test configurations.  The \emph{simple test} has
 $200\,\mathrm{M}$ dark matter particles in a periodic box of side
 256\,$h^{-1}$\,Mpc, initialised at $z = 29.5$ with \textsc{music}
 \citep{Hahn2011}. The base AMR grid is $256^3$ (\code{levelmin}=8)
 with adaptive refinement up to \code{levelmax}=10. The simulation is
 restarted from an HDF5 output at coarse step~5 and evolved to
-step~10 (5 coarse steps). The test platform is a dual-socket AMD EPYC
+step~10 (5 coarse steps).
+
+The \emph{production test}, used for strong scaling
+(Section~\ref{sec:perf_timing}), is drawn from an ongoing
+Horizon-5 production run.  It contains $135.7\,\mathrm{M}$ dark
+matter particles and $3.2 \times 10^4$ sink particles in the same
+256\,$h^{-1}$\,Mpc box with $\Lambda$CDM cosmology
+($\Omega_b = 0.04$).  The base grid is $512^3$
+(\code{levelmin}=9) with \code{levelmax}=17; at the restart epoch
+(coarse step~241) levels 9--14 are active.  The physics suite
+includes radiative cooling \citep[Haardt \& Madau
+background;][]{HaardtMadau2012}, star formation, Type~II supernova
+(SNII) and AGN feedback, Bondi black hole accretion, and BH spin
+with magnetically arrested disc (MAD) jets.  Initial conditions are
+generated with \textsc{music} at $z = 29.5$.  Each MPI rank
+allocates $\ngridmax = 5\,\mathrm{M}$ grids (88\,M total grids
+across all ranks), and the run is restarted from an HDF5 output at
+coarse step~241.
+
+Both tests are run on a dual-socket AMD EPYC
 7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4 memory.
 
 
@@ -2357,6 +2199,9 @@ Frontiere N., et al., 2025, in Proc.\ SC~'25, ACM, New York, doi:10.1145/3712285
 \bibitem[\protect\citeauthoryear{Guillet \& Teyssier}{Guillet \& Teyssier}{2011}]{Guillet2011}
 Guillet T., Teyssier R., 2011, J.\ Comput.\ Phys., 230, 4756
 
+\bibitem[\protect\citeauthoryear{Haardt \& Madau}{Haardt \& Madau}{2012}]{HaardtMadau2012}
+Haardt F., Madau P., 2012, ApJ, 746, 125
+
 \bibitem[\protect\citeauthoryear{Habib et al.}{Habib et al.}{2016}]{Habib2016}
 Habib S., et al., 2016, New Astron., 42, 49
 
@@ -2540,7 +2385,7 @@ $\text{\texttt{>>}}$ is a logical right bit-shift,
 $\phi_1 = 2654435761$ and $\phi_2 = \texttt{0x9E3779B97F4A7C15}$
 are constants chosen for good bit mixing, and the table capacity is
 always a power of two to allow bitmask modular arithmetic. Collisions
-are resolved by linear probing, and the load factor is kept below 0.7 by
+are resolved by linear probing, and the fill fraction is kept below 0.7 by
 automatic rehashing (doubling capacity).
 
 The hash table is maintained incrementally.
@@ -2649,6 +2494,261 @@ $N_{\rm omp}$ & Cores & Elapsed & $S$ & MG & Godunov & Sinks & Poisson & Particl
 20 &  80 &  374.3 & 5.7  &  124.4 &  56.8 & 105.8 &  99.7 &  47.7 & 10.0 &  7.8 &  2.7 \\
 24 &  96 &  363.1 & 5.9  &  114.3 &  59.0 & 103.0 &  97.5 &  46.4 &  9.5 &  7.4 &  2.5 \\
 30 & 120 &  365.6 & 5.9  &  103.2 &  65.4 & 105.2 &  98.0 &  47.4 &  9.5 &  7.0 &  2.3 \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+
+% ===================================================================
+% APPENDIX E: MEMORY SAVINGS DETAILS
+% ===================================================================
+\section{MEMORY SAVINGS DETAILS}
+\label{app:memory}
+
+\subsection{Hilbert Key and Histogram Array Elimination}
+\label{app:mem_hilbert}
+
+When using \ksec\ ordering, the Hilbert key array
+\code{hilbert\_key(1:ncell)} is no longer needed for domain
+decomposition. We replace it with \code{allocate(hilbert\_key(1:1))},
+saving $16\,\ngridmax\,\twotondim$ bytes
+under \code{QUADHILBERT} (128-bit keys stored as two 64-bit integers).
+For $\ngridmax = 5\,\mathrm{M}$, this is approximately 640\,MB.
+
+The defragmentation routine, which previously required Hilbert keys
+for reordering, uses a local scratch array (\code{defrag\_dp})
+allocated only during the defragmentation pass and immediately
+deallocated.
+
+Similarly, the arrays \code{bisec\_ind\_cell} and \code{cell\_level},
+each of size $\ngridmax\,\twotondim$ integers (8 bytes), are used
+exclusively during load balancing to build the bisection histogram.
+We allocate them on entry to \code{init\_bisection\_histogram} and
+deallocate them after \code{cmp\_new\_cpu\_map} returns, saving
+$16\,\ngridmax\,\twotondim \approx 320$\,MB
+for $\ngridmax = 5\,\mathrm{M}$. Since load balancing occurs only
+every \code{nremap} coarse steps, these arrays are absent during the
+vast majority of the simulation.
+
+
+\subsection{Memory Savings Summary}
+\label{app:mem_summary}
+
+The hash table memory cost is given by equation~(\ref{eq:hash_memory}).
+The \code{grid\_level} array adds $4\,\ngridmax$ bytes.
+Compared to the original \code{nbor} cost of $48\,\ngridmax$
+bytes, the net savings are approximately
+$44\,\ngridmax - 17\,N_{\rm grids}$.
+Since $N_{\rm grids} \ll \ngridmax$ in practice (typical occupancy is
+30--60\,per\,cent), the savings are substantial, reaching $\sim$176\,MB for
+$\ngridmax = 5\,\mathrm{M}$ at 50\,per\,cent occupancy,
+a reduction of roughly 60\,per\,cent in neighbour-related memory.
+
+The computational cost of a hash lookup is $\Olog{1}$ expected time,
+with worst-case linear probing bounded by the fill fraction. In
+practice, the precomputed neighbour caches described in
+Appendix~\ref{app:mg_details} amortize any per-lookup overhead in the
+performance-critical Poisson solver.
+
+Table~\ref{tab:memory} summarizes the combined memory savings for
+$\ngridmax = 5\,\mathrm{M}$.
+
+\begin{table}
+\centering
+\caption{Memory savings per MPI rank.
+The second column gives the per-grid byte cost; the third column
+evaluates it for $\ngridmax = 5\,\mathrm{M}$.
+Savings marked with ${}^*$ are conditional on using \ksec\ ordering.}
+\label{tab:memory}
+\small
+\begin{tabular}{lcrl}
+\toprule
+Optimization & Per rank & MB ($\ngridmax\!=\!5\mathrm{M}$) & Availability \\
+\midrule
+\code{nbor} removal  & $48\,\ngridmax$ & 240 & Always \\
+\code{hilbert\_key} removal${}^*$ & $128\,\ngridmax$ & 640 & Steady state \\
+On-demand \code{bisec\_ind\_cell}${}^*$ & $32\,\ngridmax$ & 160 & Between LB \\
+On-demand \code{cell\_level}${}^*$ & $32\,\ngridmax$ & 160 & Between LB \\
+Defrag scratch (local) & $8\,\ngridmax$ & 40 & Between defrag \\
+\midrule
+\textbf{Total} & $\mathbf{>248\,\ngridmax}$ & \textbf{$>$1200} & \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The reported memory savings of the \code{nbor} array account for both
+the eliminated array ($48\,\ngridmax = 240$\,MB) and the hash table
+overhead ($\sim$17\,$N_{\rm grids}$, typically $<$50\,MB). Net savings
+are at least 190\,MB. The Hilbert key savings of 640\,MB assume
+\code{QUADHILBERT}; for standard 64-bit keys the savings would be
+320\,MB. Figure~\ref{fig:memory_savings} visualizes the individual
+contributions.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_memory_savings.pdf}
+\caption{Per-rank memory savings breakdown for $\ngridmax = 5\,\mathrm{M}$.
+  Solid bars denote unconditional savings (always available); hatched
+  bars denote savings available only between load-balance steps or
+  defragmentation passes.  The red segment shows the hash table
+  overhead ($\sim$40--50\,MB), yielding a net saving of $>$1190\,MB
+  per MPI rank.}
+\label{fig:memory_savings}
+\end{figure*}
+
+From an astrophysical perspective, the reduction of over 1\,GB per rank
+is not merely a hardware efficiency gain. It directly translates
+into deeper AMR hierarchies within the same memory budget.  For a
+fixed node configuration, the freed memory can accommodate a
+proportionally larger $\ngridmax$, enabling finer resolution in the
+densest regions of the simulation, including the cores of dark matter haloes,
+the circum-galactic medium, and the sites of active star formation.
+In practice, this means that phenomena requiring high spatial
+resolution, e.g.\ the fragmentation of cold gas clouds in the ISM,
+the accretion flow onto supermassive black holes, or the propagation
+of supernova-driven outflows, can be resolved to higher AMR levels
+without requiring additional hardware, directly improving the fidelity
+of sub-grid physics models.
+
+We implement a diagnostic routine \code{writemem\_minmax} that reports
+the minimum and maximum resident set size across all ranks at each
+coarse step, providing runtime verification of the memory savings.
+
+
+% ===================================================================
+% APPENDIX F: MULTIGRID SOLVER IMPLEMENTATION DETAILS
+% ===================================================================
+\section{MULTIGRID SOLVER IMPLEMENTATION DETAILS}
+\label{app:mg_details}
+
+\subsection{Neighbour Grid Precomputation}
+\label{app:mg_nbor_precompute}
+
+The Gauss--Seidel (GS) smoother and residual computation both require
+access to the six Cartesian neighbours of each grid. In the Morton
+hash table approach (Section~\ref{sec:morton}), each neighbour lookup
+involves a hash table query. While individual lookups are $\Olog{1}$,
+the GS kernel accesses 6 neighbours per grid, 8 cells per grid, and
+typically 4--5 V-cycle iterations, resulting in hundreds of hash
+lookups per grid per solve.
+
+We precompute all neighbour grids into a contiguous array before
+entering the V-cycle iteration loop,
+\begin{equation}
+\text{nbor\_grid\_fine}(j,\, i) = \text{morton\_nbor\_grid}(
+\text{igrid\_amr}(i),\, l,\, j),
+\label{eq:nbor_precompute}
+\end{equation}
+where $l$ is the AMR level being solved, $\text{igrid\_amr}(i)$ is
+the AMR grid pointer for the $i$-th active grid at level $l$,
+$j = 0, 1, \ldots, 6$ (where $j = 0$ stores the grid's own AMR
+index), and $i = 1, \ldots, N_{\rm grid}$. This
+array is allocated before the iteration loop and deallocated after,
+so its memory overhead is transient.
+
+
+\subsection{Merged Red-Black Exchange and Fused Kernels}
+\label{app:mg_merged_rb}
+
+Standard red-black Gauss--Seidel smoothing in \ramses\ performs a
+ghost-zone exchange of the potential $\phi$ between the red and black
+sweeps,
+Red $\to$ Exchange($\phi$) $\to$ Black $\to$ Exchange($\phi$).
+Each iteration thus requires two exchanges for the smoother alone,
+plus additional exchanges for the residual and restriction/prolongation
+steps, for a total of 9 exchange calls per iteration.
+
+We merge the red and black sweeps by removing the inter-sweep exchange,
+Red $\to$ Black $\to$ Exchange($\phi$).
+This is a form of relaxed synchronisation in which boundary cells in the
+black sweep use values from the previous iteration rather than
+freshly exchanged red-sweep values. For the MG
+preconditioner, this does not affect convergence in practice because the
+MG solve is itself an approximate preconditioner for the conjugate
+gradient outer iteration, and the stale-ghost error is well within
+the MG tolerance.
+
+We also remove two unnecessary residual exchanges per iteration,
+reducing the total from 9 to 5 exchange calls per iteration, a
+44\,per\,cent reduction in MG communication volume.
+
+The same optimization is applied to the coarse-level solver
+(direct solve, pre-smoothing, post-smoothing), where the merged
+red-black pattern similarly halves the exchange count.
+
+The MG algorithm requires both the residual $r = f - A\phi$ and its
+$L^2$ norm $\|r\|_2^2$ at specific points in the V-cycle. In the
+original code, these are computed in separate passes. We add an
+optional \code{norm2} argument to \code{cmp\_residual\_mg\_fine}:
+when present, the norm is accumulated during the same loop that
+computes the residual, saving one full grid traversal.
+Since the subroutine is \code{external} (not module-contained), callers
+must include an \code{interface} block to enable the optional-argument
+dispatch.
+
+The GS fast-path computation involves a division by
+$2 N_{\rm dim} = 6$:
+\begin{equation}
+\phi_{\rm new} = \frac{\sum_j \phi_j - h^2 f}{2 N_{\rm dim}}.
+\label{eq:gs_update}
+\end{equation}
+We replace the division \code{/ dtwondim} with a multiplication by
+the precomputed reciprocal \code{* oneoverdtwondim}, which is faster
+on most architectures.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_mg_redblack.pdf}
+\caption{Multigrid V-cycle exchange optimization.
+  (a)~Original: each smoothing iteration requires 9 ghost-zone
+  exchanges, two for the red-black sweeps (exchanging $\phi$), one
+  each for the residual and norm (exchanging $r$), and additional
+  exchanges for restriction and prolongation.
+  (b)~Optimized: the inter-sweep red-black exchange is removed
+  (relaxed synchronisation), and the separate residual and norm
+  exchanges are fused, reducing the total to 5 exchanges per iteration
+  ($-44$\,per\,cent).  Orange diamonds marked ``E'' denote active
+  exchanges; crossed-out diamonds indicate eliminated exchanges.}
+\label{fig:mg_redblack}
+\end{figure*}
+
+
+% ===================================================================
+% APPENDIX G: NEW NAMELIST PARAMETERS
+% ===================================================================
+\section{NEW NAMELIST PARAMETERS}
+\label{app:namelist}
+
+Table~\ref{tab:namelist} lists the namelist parameters introduced or
+modified by \curamses.
+
+\begin{table*}
+\centering
+\caption{New namelist parameters introduced by \curamses.  Default
+values are shown where applicable.}
+\label{tab:namelist}
+\small
+\begin{tabular}{lllll}
+\toprule
+Parameter & Namelist block & Type & Default & Description \\
+\midrule
+\code{ordering}        & \code{\&RUN\_PARAMS}   & string  & \code{'hilbert'} & Domain decomposition ordering (\code{'hilbert'} or \code{'ksection'}) \\
+\code{use\_fftw}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable FFTW3 direct Poisson solver at base level \\
+\code{exchange\_method} & \code{\&RUN\_PARAMS}  & string  & \code{'auto'}    & MPI exchange backend (\code{'auto'}, \code{'p2p'}, \code{'ksection'}) \\
+\code{gpu\_hydro}      & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for hydrodynamics \\
+\code{gpu\_poisson}    & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for MG Poisson solver \\
+\code{gpu\_fft}        & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for FFT solver \\
+\code{gpu\_sink}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for sink particle routines \\
+\code{memory\_balance} & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable memory-weighted load balancing \\
+\code{use\_neutrino}   & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable massive neutrino linear response \\
+\code{de\_perturb}     & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable dark energy perturbation corrections \\
+\midrule
+\code{mem\_weight\_grid} & \code{\&AMR\_PARAMS} & integer & 270              & Memory cost per grid in load-balance cost function \\
+\code{mem\_weight\_part} & \code{\&AMR\_PARAMS} & integer & 12               & Memory cost per particle \\
+\code{mem\_weight\_sink} & \code{\&AMR\_PARAMS} & integer & 500              & Computational cost per sink particle \\
+\midrule
+\code{omega\_nu}       & \code{\&COSMO\_PARAMS} & real    & 0                & Massive neutrino density parameter $\Omega_\nu$ \\
+\code{neutrino\_table} & \code{\&COSMO\_PARAMS} & string  & ---              & Path to neutrino transfer function table \\
 \bottomrule
 \end{tabular}
 \end{table*}
