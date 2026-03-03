@@ -2834,6 +2834,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    real(dp), save :: cached_box_xmin = -1.0d0
    real(dp), save :: cached_box_xmax = -1.0d0
    integer, save :: cached_fftw_block = 0
+   real(dp), allocatable, save :: fftw_cpubox_min(:), fftw_cpubox_max(:)
 
    ! Loop variables
    integer :: igrid, ngrid_loc, ind, iskip
@@ -2866,6 +2867,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    integer :: nreq, ip
    integer :: slab_x_lo, slab_x_hi
    real(dp) :: recv_pos_lo, recv_pos_hi
+   real(dp) :: my_xmin, my_xmax
    logical :: overlap
 
    ! ================================================================
@@ -3046,28 +3048,48 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       ! ============================================================
 
       ! --- Precompute P2P partner lists (cached, recomputed on rebalance) ---
+      ! Compute my spatial x-bounding box from active grid positions
+      my_xmin = 1.0d0
+      my_xmax = 0.0d0
+      ngrid_loc = active(ilevel)%ngrid
+      do igrid = 1, ngrid_loc
+         igrid_amr = active(ilevel)%igrid(igrid)
+         my_xmin = min(my_xmin, xg(igrid_amr, 1) - dx_fft)
+         my_xmax = max(my_xmax, xg(igrid_amr, 1) + dx_fft)
+      end do
+      if(ngrid_loc == 0) then
+         my_xmin = 0.5d0; my_xmax = 0.5d0
+      end if
+
       if(.not. fftw_partners_computed .or. &
-         cached_box_xmin /= bisec_cpubox_min(myid, 1) .or. &
-         cached_box_xmax /= bisec_cpubox_max(myid, 1) .or. &
+         cached_box_xmin /= my_xmin .or. &
+         cached_box_xmax /= my_xmax .or. &
          cached_fftw_block /= fftw_block) then
+
+         ! Gather all ranks' bounding boxes
+         if(.not. allocated(fftw_cpubox_min)) allocate(fftw_cpubox_min(ncpu))
+         if(.not. allocated(fftw_cpubox_max)) allocate(fftw_cpubox_max(ncpu))
+         call MPI_ALLGATHER(my_xmin, 1, MPI_DOUBLE_PRECISION, &
+              fftw_cpubox_min, 1, MPI_DOUBLE_PRECISION, MPI_COMM_WORLD, info)
+         call MPI_ALLGATHER(my_xmax, 1, MPI_DOUBLE_PRECISION, &
+              fftw_cpubox_max, 1, MPI_DOUBLE_PRECISION, MPI_COMM_WORLD, info)
 
          if(allocated(fftw_send_partners)) deallocate(fftw_send_partners)
          if(allocated(fftw_recv_partners)) deallocate(fftw_recv_partners)
 
          ! Send partners: FFTW slab ranks whose position range overlaps my domain
-         ! Uses same overlap test as recv to ensure symmetric P2P consistency
          n_fftw_send = 0
          do irank = 0, ncpu - 1
             slab_x_lo = irank * fftw_block
             slab_x_hi = min((irank + 1) * fftw_block, fft_Nx) - 1
             recv_pos_lo = (dble(slab_x_lo) - 0.5d0) / dble(fft_Nx)
             recv_pos_hi = (dble(slab_x_hi) + 1.5d0) / dble(fft_Nx)
-            overlap = (bisec_cpubox_max(myid, 1) > recv_pos_lo .and. &
-                       bisec_cpubox_min(myid, 1) < recv_pos_hi)
+            overlap = (fftw_cpubox_max(myid) > recv_pos_lo .and. &
+                       fftw_cpubox_min(myid) < recv_pos_hi)
             if(recv_pos_lo < 0.0d0) &
-               overlap = overlap .or. (bisec_cpubox_max(myid, 1) > recv_pos_lo + 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_max(myid) > recv_pos_lo + 1.0d0)
             if(recv_pos_hi > 1.0d0) &
-               overlap = overlap .or. (bisec_cpubox_min(myid, 1) < recv_pos_hi - 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_min(myid) < recv_pos_hi - 1.0d0)
             if(overlap) n_fftw_send = n_fftw_send + 1
          end do
 
@@ -3078,12 +3100,12 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
             slab_x_hi = min((irank + 1) * fftw_block, fft_Nx) - 1
             recv_pos_lo = (dble(slab_x_lo) - 0.5d0) / dble(fft_Nx)
             recv_pos_hi = (dble(slab_x_hi) + 1.5d0) / dble(fft_Nx)
-            overlap = (bisec_cpubox_max(myid, 1) > recv_pos_lo .and. &
-                       bisec_cpubox_min(myid, 1) < recv_pos_hi)
+            overlap = (fftw_cpubox_max(myid) > recv_pos_lo .and. &
+                       fftw_cpubox_min(myid) < recv_pos_hi)
             if(recv_pos_lo < 0.0d0) &
-               overlap = overlap .or. (bisec_cpubox_max(myid, 1) > recv_pos_lo + 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_max(myid) > recv_pos_lo + 1.0d0)
             if(recv_pos_hi > 1.0d0) &
-               overlap = overlap .or. (bisec_cpubox_min(myid, 1) < recv_pos_hi - 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_min(myid) < recv_pos_hi - 1.0d0)
             if(overlap) then
                n_fftw_send = n_fftw_send + 1
                fftw_send_partners(n_fftw_send) = irank
@@ -3098,32 +3120,32 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
 
          n_fftw_recv = 0
          do irank = 1, ncpu
-            overlap = (bisec_cpubox_max(irank, 1) > recv_pos_lo .and. &
-                       bisec_cpubox_min(irank, 1) < recv_pos_hi)
+            overlap = (fftw_cpubox_max(irank) > recv_pos_lo .and. &
+                       fftw_cpubox_min(irank) < recv_pos_hi)
             if(recv_pos_lo < 0.0d0) &
-               overlap = overlap .or. (bisec_cpubox_max(irank, 1) > recv_pos_lo + 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_max(irank) > recv_pos_lo + 1.0d0)
             if(recv_pos_hi > 1.0d0) &
-               overlap = overlap .or. (bisec_cpubox_min(irank, 1) < recv_pos_hi - 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_min(irank) < recv_pos_hi - 1.0d0)
             if(overlap) n_fftw_recv = n_fftw_recv + 1
          end do
 
          allocate(fftw_recv_partners(n_fftw_recv))
          n_fftw_recv = 0
          do irank = 1, ncpu
-            overlap = (bisec_cpubox_max(irank, 1) > recv_pos_lo .and. &
-                       bisec_cpubox_min(irank, 1) < recv_pos_hi)
+            overlap = (fftw_cpubox_max(irank) > recv_pos_lo .and. &
+                       fftw_cpubox_min(irank) < recv_pos_hi)
             if(recv_pos_lo < 0.0d0) &
-               overlap = overlap .or. (bisec_cpubox_max(irank, 1) > recv_pos_lo + 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_max(irank) > recv_pos_lo + 1.0d0)
             if(recv_pos_hi > 1.0d0) &
-               overlap = overlap .or. (bisec_cpubox_min(irank, 1) < recv_pos_hi - 1.0d0)
+               overlap = overlap .or. (fftw_cpubox_min(irank) < recv_pos_hi - 1.0d0)
             if(overlap) then
                n_fftw_recv = n_fftw_recv + 1
                fftw_recv_partners(n_fftw_recv) = irank - 1  ! 0-based MPI rank
             end if
          end do
 
-         cached_box_xmin = bisec_cpubox_min(myid, 1)
-         cached_box_xmax = bisec_cpubox_max(myid, 1)
+         cached_box_xmin = my_xmin
+         cached_box_xmax = my_xmax
          cached_fftw_block = fftw_block
          fftw_partners_computed = .true.
 

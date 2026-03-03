@@ -327,11 +327,9 @@ subroutine init_amr
      end if
      call MPI_BCAST(ncpu2,1,MPI_INTEGER,0,MPI_COMM_WORLD,info2)
      call MPI_BCAST(nlevelmax2,1,MPI_INTEGER,0,MPI_COMM_WORLD,info2)
-     if(ncpu2.ne.ncpu)then
-        if(ordering /= 'ksection') then
-           if(myid==1) write(*,*)'Variable-ncpu restart only supported with ksection ordering'
-           call clean_stop
-        end if
+     if(ncpu2.ne.ncpu .or. ordering=='ksection')then
+        if(myid==1 .and. ncpu2.ne.ncpu) &
+           write(*,'(A,I5,A,I5)') ' Variable-ncpu restart: ncpu_old=', ncpu2, ' ncpu_new=', ncpu
         call restore_amr_binary_varcpu(ncpu2,nlevelmax2)
         goto 998
      end if
@@ -703,8 +701,8 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
   integer(8) :: ix, iy, iz, ix_p, iy_p, iz_p
   integer :: nxny, nx_loc, iskip
   type(mkey_t) :: mkey
-  real(dp) :: twotol, dx, scale, xx_cell(1,3), xx_father(1,3), xg_recv(3)
-  integer :: c_tmp(1)
+  real(dp) :: twotol, dx, scale, xx_cell(1:nvector,1:ndim), xx_father(1:nvector,1:ndim), xg_recv(3)
+  integer :: c_tmp(1:nvector)
   real(dp) :: mass_sph2
 
   character(LEN=128) :: ordering_file
@@ -842,11 +840,57 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
   ! ============================================================
   ! Step 3: Rebuild domain decomposition for new ncpu
   ! ============================================================
-  call build_ksection(update=.false.)
-  call rebuild_ksec_cpuranges()
-  call compute_ksec_cpu_path()
-  bisec_cpubox_min2 = bisec_cpubox_min
-  bisec_cpubox_max2 = bisec_cpubox_max
+  if(ordering == 'ksection') then
+     call build_ksection(update=.false.)
+     call rebuild_ksec_cpuranges()
+     call compute_ksec_cpu_path()
+     bisec_cpubox_min2 = bisec_cpubox_min
+     bisec_cpubox_max2 = bisec_cpubox_max
+  else
+     ! Hilbert ordering: compute bound_key for new ncpu
+     ndomain = ncpu * overload
+     block
+       real(dp) :: x_tmp(1,3), dx_loc
+       real(qdp) :: order_min_tmp(1), order_max_tmp(1)
+       integer :: idom
+       dx_loc = scale
+       order_all_min = huge(order_all_min)
+       order_all_max = 0.0
+       do iz = kcoarse_min, kcoarse_max
+       do iy = jcoarse_min, jcoarse_max
+       do ix = icoarse_min, icoarse_max
+          x_tmp(1,1) = (dble(ix) + 0.5d0 - dble(icoarse_min)) * scale
+          x_tmp(1,2) = (dble(iy) + 0.5d0 - dble(jcoarse_min)) * scale
+          x_tmp(1,3) = (dble(iz) + 0.5d0 - dble(kcoarse_min)) * scale
+          call cmp_minmaxorder(x_tmp, order_min_tmp, order_max_tmp, dx_loc, 1)
+          order_all_min = min(order_all_min, order_min_tmp(1))
+          order_all_max = max(order_all_max, order_max_tmp(1))
+       end do
+       end do
+       end do
+       if(.not. allocated(bound_key)) allocate(bound_key(0:ndomain))
+       if(.not. allocated(bound_key2)) allocate(bound_key2(0:ndomain))
+       do idom = 0, ndomain - 1
+#ifdef QUADHILBERT
+          bound_key(idom) = order_all_min + real(idom, 16) / real(ndomain, 16) * &
+               (order_all_max - order_all_min)
+#else
+          bound_key(idom) = order_all_min + real(idom, 8) / real(ndomain, 8) * &
+               (order_all_max - order_all_min)
+#endif
+       end do
+       bound_key(ndomain) = order_all_max
+       bound_key2 = bound_key
+       if(myid==1) then
+          write(*,*) 'Hilbert varcpu: ndomain=', ndomain, ' nlevelmax=', nlevelmax
+          write(*,*) 'Hilbert varcpu: order_all_min=', order_all_min
+          write(*,*) 'Hilbert varcpu: order_all_max=', order_all_max
+          do idom = 0, ndomain
+             write(*,'(A,I3,A,E20.10)') '  bound_key(', idom, ')=', dble(bound_key(idom))
+          end do
+       end if
+     end block
+  end if
 
   ! Recompute coarse cpu_map
   do iz = kcoarse_min, kcoarse_max
@@ -856,13 +900,17 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
      xx_cell(1,1) = (dble(ix) + 0.5d0 - dble(icoarse_min)) * scale
      xx_cell(1,2) = (dble(iy) + 0.5d0 - dble(jcoarse_min)) * scale
      xx_cell(1,3) = (dble(iz) + 0.5d0 - dble(kcoarse_min)) * scale
-     call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+     if(ordering == 'ksection') then
+        call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+     else
+        call cmp_cpumap(xx_cell, c_tmp, 1)
+     end if
      cpu_map(ind) = c_tmp(1)
   end do
   end do
   end do
   cpu_map2(1:ncoarse) = cpu_map(1:ncoarse)
-  if(myid==1) write(*,*) 'Binary varcpu: ksection tree rebuilt, coarse cpu_map recomputed'
+  if(myid==1) write(*,*) 'Binary varcpu: domain decomposition rebuilt, coarse cpu_map recomputed'
 
   ! ============================================================
   ! Step 4: Initialize Morton hash tables
@@ -1050,7 +1098,7 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
 
      dx = 0.5d0**ilevel
 
-     ! 7a. Determine owner for each local grid via cmp_ksection_cpumap
+     ! 7a. Determine owner for each local grid
      allocate(dest(max(nlocal,1)))
      do i = 1, nlocal
         twotol = 2.0d0**(ilevel-1)
@@ -1060,7 +1108,11 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
         xx_father(1,1) = ((dble(ix) + 0.5d0) / twotol - dble(icoarse_min)) * scale
         xx_father(1,2) = ((dble(iy) + 0.5d0) / twotol - dble(jcoarse_min)) * scale
         xx_father(1,3) = ((dble(iz) + 0.5d0) / twotol - dble(kcoarse_min)) * scale
-        call cmp_ksection_cpumap(xx_father, c_tmp, 1)
+        if(ordering == 'ksection') then
+           call cmp_ksection_cpumap(xx_father, c_tmp, 1)
+        else
+           call cmp_cpumap(xx_father, c_tmp, 1)
+        end if
         dest(i) = c_tmp(1)
      end do
 
@@ -1076,6 +1128,8 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
           MPI_COMM_WORLD, info)
      nsend = sum(scount)
      nrecv = sum(rcount)
+     if(myid==1) write(*,'(A,I3,A,I10,A,I10,A,10I8)') &
+          ' Lvl ', ilevel, ' nsend=', nsend, ' nrecv=', nrecv, ' rcount=', rcount(0:min(ncpu-1,9))
 
      ! 7d. Compute displacements
      allocate(sdispl(0:ncpu-1), rdispl(0:ncpu-1))
@@ -1206,7 +1260,11 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
                 - dble(jcoarse_min)) * scale
            xx_cell(1,3) = (xg_recv(3) + (dble(iz) - 0.5d0) * dx &
                 - dble(kcoarse_min)) * scale
-           call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+           if(ordering == 'ksection') then
+              call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+           else
+              call cmp_cpumap(xx_cell, c_tmp, 1)
+           end if
            cpu_map(ind_cell) = c_tmp(1)
            cpu_map2(ind_cell) = c_tmp(1)
         end do
