@@ -2095,6 +2095,9 @@ subroutine bondi_hoyle(ilevel)
   real(dp)::dx,factG,pi
   real(dp)::RandNum,phi,Rrand,SS,CC,UU,csound,turb
   integer ,dimension(1:ncpu,1:IRandNumSize)::allseed
+  ! Sink-based seeding for CPU-independent jet directions
+  integer,dimension(IRandNumSize)::sink_seed
+  integer(i8b)::ks1,ks2
 
 
   if(numbtot(1,ilevel)==0)return
@@ -2334,12 +2337,19 @@ subroutine bondi_hoyle(ilevel)
   if(random_jet)then
      if(myid==1)then
    do isink=1,nsink
+      ! Sink-based seed for CPU-independent jet directions
+      ks1 = int(idsink(isink), i8b) * 2654435761_i8b
+      ks2 = int(nstep_coarse, i8b) * 1103515245_i8b + 54321_i8b
+      sink_seed(1) = int(IAND(ks1, 4095_i8b))
+      sink_seed(2) = int(IAND(ISHFT(ks1,-12), 4095_i8b))
+      sink_seed(3) = int(IAND(ks2, 4095_i8b))
+      sink_seed(4) = int(IAND(ks1+ks2, 4095_i8b))
       ! Random directions
-      call ranf(localseed,RandNum)
+      call ranf(sink_seed,RandNum)
       SS =(RandNum-0.5)*2.
-      call ranf(localseed,RandNum)
+      call ranf(sink_seed,RandNum)
       phi=(RandNum-0.5)*2.*pi
-      call ranf(localseed,RandNum)
+      call ranf(sink_seed,RandNum)
       UU =RandNum
       Rrand=UU**(1./3.)
       CC=Rrand*sqrt(1.-SS**2.)

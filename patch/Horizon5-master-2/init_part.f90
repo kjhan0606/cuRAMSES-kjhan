@@ -197,8 +197,8 @@ subroutine init_part
 #endif
 
      if(varcpu_restart) then
-        if(sink) call init_sink_alloc
         call restore_part_binary_varcpu()
+        call redistribute_particles_by_position()
         if(myid==1) write(*,*) 'Binary varcpu PART backup files read completed'
         goto 999
      end if
@@ -1038,6 +1038,10 @@ subroutine restore_part_binary_varcpu
   ! Broadcast header info
   call MPI_BCAST(npart_per_file, ncpu_file, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
   call MPI_BCAST(localseed, IRandNumSize, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
+  ! Fix: varcpu restore reads localseed from file 1 only, giving all CPUs the
+  ! same seed.  Reset to -1 so that star_formation reinitialises unique
+  ! per-CPU seeds via rans(ncpu, iseed, allseed).
+  localseed(1) = -1
 #ifndef LONGINT
   call MPI_BCAST(nstar_tot, 1, MPI_INTEGER, 0, MPI_COMM_WORLD, info)
 #else
@@ -1192,6 +1196,199 @@ subroutine restore_part_binary_varcpu
   if(myid==1) write(*,*) 'Binary varcpu particle restore done. npart_total=', npart_total
 
 end subroutine restore_part_binary_varcpu
+!################################################################
+!################################################################
+!################################################################
+subroutine redistribute_particles_by_position()
+  ! After varcpu particle restore, particles are distributed by global
+  ! index (not position), so most particles are on the wrong CPU.
+  ! This routine redistributes them by position using cmp_cpumap,
+  ! so that init_tree works correctly.
+  use amr_commons
+  use pm_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer :: ipart, icpu, i, info, idim, npart1, npart_new
+  integer, allocatable :: target_cpu(:), sort_index(:)
+  integer :: nsend(1:ncpu), nrecv(1:ncpu)
+  integer :: sdispls(1:ncpu), rdispls(1:ncpu)
+  integer :: offsets(1:ncpu)
+  real(dp), allocatable :: sendbuf_dp(:), recvbuf_dp(:)
+  integer(i8b), allocatable :: sendbuf_i8(:), recvbuf_i8(:)
+  integer, allocatable :: sendbuf_int(:), recvbuf_int(:)
+  real(dp), dimension(1:nvector, 1:ndim) :: xtmp
+  integer, dimension(1:nvector) :: ctmp
+  integer :: nlocal
+
+  if(myid==1) write(*,*) 'Redistributing particles by position for varcpu restart...'
+
+  ! Step 1: Compute target CPU for each particle
+  allocate(target_cpu(1:npart))
+  do ipart = 1, npart, nvector
+     npart1 = min(nvector, npart - ipart + 1)
+     do i = 1, npart1
+        xtmp(i, 1:ndim) = xp(ipart + i - 1, 1:ndim)
+     end do
+     call cmp_cpumap(xtmp, ctmp, npart1)
+     do i = 1, npart1
+        target_cpu(ipart + i - 1) = ctmp(i)
+     end do
+  end do
+
+  ! Step 2: Count particles going to each CPU
+  nsend = 0
+  do ipart = 1, npart
+     nsend(target_cpu(ipart)) = nsend(target_cpu(ipart)) + 1
+  end do
+
+  ! Step 3: Exchange counts
+  call MPI_ALLTOALL(nsend, 1, MPI_INTEGER, nrecv, 1, MPI_INTEGER, &
+       MPI_COMM_WORLD, info)
+
+  npart_new = sum(nrecv)
+  if(npart_new > npartmax) then
+     write(*,*) 'ERROR redistribute: npart_new > npartmax', npart_new, npartmax, myid
+     call MPI_ABORT(MPI_COMM_WORLD, 1, info)
+  end if
+
+  ! Step 4: Compute displacements
+  sdispls(1) = 0
+  rdispls(1) = 0
+  do icpu = 2, ncpu
+     sdispls(icpu) = sdispls(icpu-1) + nsend(icpu-1)
+     rdispls(icpu) = rdispls(icpu-1) + nrecv(icpu-1)
+  end do
+
+  ! Step 5: Create sort index (partition particles by target CPU)
+  allocate(sort_index(1:npart))
+  offsets = sdispls
+  do ipart = 1, npart
+     icpu = target_cpu(ipart)
+     offsets(icpu) = offsets(icpu) + 1
+     sort_index(offsets(icpu)) = ipart
+  end do
+  deallocate(target_cpu)
+
+  ! Step 6: Exchange each property using MPI_ALLTOALLV
+
+  ! --- xp (ndim dimensions) ---
+  allocate(sendbuf_dp(1:npart))
+  allocate(recvbuf_dp(1:npart_new))
+  do idim = 1, ndim
+     do i = 1, npart
+        sendbuf_dp(i) = xp(sort_index(i), idim)
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     xp(1:npart_new, idim) = recvbuf_dp(1:npart_new)
+  end do
+
+  ! --- vp (ndim dimensions) ---
+  do idim = 1, ndim
+     do i = 1, npart
+        sendbuf_dp(i) = vp(sort_index(i), idim)
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     vp(1:npart_new, idim) = recvbuf_dp(1:npart_new)
+  end do
+
+  ! --- mp ---
+  do i = 1, npart
+     sendbuf_dp(i) = mp(sort_index(i))
+  end do
+  call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+       recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+       MPI_COMM_WORLD, info)
+  mp(1:npart_new) = recvbuf_dp(1:npart_new)
+
+  ! --- idp (integer(i8b)) ---
+  allocate(sendbuf_i8(1:npart))
+  allocate(recvbuf_i8(1:npart_new))
+  do i = 1, npart
+     sendbuf_i8(i) = idp(sort_index(i))
+  end do
+  call MPI_ALLTOALLV(sendbuf_i8, nsend, sdispls, MPI_INTEGER8, &
+       recvbuf_i8, nrecv, rdispls, MPI_INTEGER8, &
+       MPI_COMM_WORLD, info)
+  idp(1:npart_new) = recvbuf_i8(1:npart_new)
+  deallocate(sendbuf_i8, recvbuf_i8)
+
+  ! --- levelp (integer) ---
+  allocate(sendbuf_int(1:npart))
+  allocate(recvbuf_int(1:npart_new))
+  do i = 1, npart
+     sendbuf_int(i) = levelp(sort_index(i))
+  end do
+  call MPI_ALLTOALLV(sendbuf_int, nsend, sdispls, MPI_INTEGER, &
+       recvbuf_int, nrecv, rdispls, MPI_INTEGER, &
+       MPI_COMM_WORLD, info)
+  levelp(1:npart_new) = recvbuf_int(1:npart_new)
+  deallocate(sendbuf_int, recvbuf_int)
+
+  ! --- Star/sink properties ---
+  if(star .or. sink) then
+     ! tp
+     do i = 1, npart
+        sendbuf_dp(i) = tp(sort_index(i))
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     tp(1:npart_new) = recvbuf_dp(1:npart_new)
+
+     ! zp (if metal)
+     if(metal) then
+        do i = 1, npart
+           sendbuf_dp(i) = zp(sort_index(i))
+        end do
+        call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+             recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+             MPI_COMM_WORLD, info)
+        zp(1:npart_new) = recvbuf_dp(1:npart_new)
+     end if
+
+     ! tpp
+     do i = 1, npart
+        sendbuf_dp(i) = tpp(sort_index(i))
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     tpp(1:npart_new) = recvbuf_dp(1:npart_new)
+
+     ! mp0
+     do i = 1, npart
+        sendbuf_dp(i) = mp0(sort_index(i))
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     mp0(1:npart_new) = recvbuf_dp(1:npart_new)
+
+     ! indtab
+     do i = 1, npart
+        sendbuf_dp(i) = indtab(sort_index(i))
+     end do
+     call MPI_ALLTOALLV(sendbuf_dp, nsend, sdispls, MPI_DOUBLE_PRECISION, &
+          recvbuf_dp, nrecv, rdispls, MPI_DOUBLE_PRECISION, &
+          MPI_COMM_WORLD, info)
+     indtab(1:npart_new) = recvbuf_dp(1:npart_new)
+  end if
+
+  deallocate(sendbuf_dp, recvbuf_dp, sort_index)
+
+  nlocal = nsend(myid)
+  npart = npart_new
+  if(myid==1) write(*,'(A,I12,A,I12)') &
+       ' Particle redistribution done. local_kept=', nlocal, ' total=', npart_new
+
+end subroutine redistribute_particles_by_position
+!################################################################
 
 #define TIME_START(cs) call SYSTEM_CLOCK(COUNT=cs)
 #define TIME_END(ce) call SYSTEM_CLOCK(COUNT=ce)

@@ -207,8 +207,6 @@ subroutine star_formation(ilevel)
 	 jmstar_tot = jmstar_tot + imstar_tot
   end do
   ntot = ntot + jntot
-  mstar_lost =mstar_lost + jmstar_lost
-  mstar_tot =mstar_tot + jmstar_tot
 
 ! call MPI_Barrier(MPI_COMM_WORLD, info)
 ! if(verbose)write(*,*)' +Entering star_formation:4'
@@ -238,16 +236,19 @@ subroutine star_formation(ilevel)
   ! Compute global stars statistics
   !---------------------------------
 #ifndef WITHOUTMPI
-  mlost=mstar_lost; mtot=mstar_tot
+  mlost=jmstar_lost; mtot=jmstar_tot
   call MPI_ALLREDUCE(ntot,ntot_all,1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(mtot,mtot_all,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(mlost,mlost_all,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 #endif
 #ifdef WITHOUTMPI
   ntot_all=ntot
-  mtot_all=mstar_tot
-  mlost_all=mstar_lost
+  mtot_all=jmstar_tot
+  mlost_all=jmstar_lost
 #endif
+  ! Global accumulation: mstar_tot/mstar_lost identical on all ranks
+  mstar_tot = mstar_tot + mtot_all
+  mstar_lost = mstar_lost + mlost_all
   ntot_star_cpu=0; ntot_star_all=0
   ntot_star_cpu(myid)=ntot
 #ifndef WITHOUTMPI
@@ -261,7 +262,7 @@ subroutine star_formation(ilevel)
   if(myid==1)then
      if(ntot_all.gt.0)then
         write(*,'(" Level=",I6," New star=",I6," Tot=",I10," Mass=",1PE10.3," Lost=",0PF5.1,"%")')&
-             & ilevel,ntot_all,nstar_tot,mtot_all,mlost_all/(mlost_all+mtot_all)*100.
+             & ilevel,ntot_all,nstar_tot,mstar_tot,mstar_lost/(mstar_lost+mstar_tot)*100.
      endif
   end if
 ! call MPI_Barrier(MPI_COMM_WORLD, info)
@@ -640,6 +641,11 @@ subroutine sub2_star_formation(ilevel, igrid,ngrid,ntot,imstar_lost,imstar_tot)
   real(dp)::dx,dx_loc,scale,vol_loc,dx_min,vol_min,d1,d2,d3,d4,d5,d6
   real(dp)::bx1,bx2,by1,by2,bz1,bz2,A,B,C,emag,beta,fbeta
   real(dp),dimension(1:nvector)::sfr_ff
+  ! Cell-based seeding for CPU-independent star formation
+  integer,dimension(IRandNumSize)::cell_seed
+  integer(i8b)::icx,icy,icz,khash1,khash2
+  real(dp)::xcell,ycell,zcell,scale_cell
+  integer::iix,iiy,iiz
 
   common /star_formation_1/ scale,factG,mstar,nISM,vol_loc,dx_loc,scale_nH,&
   &              scale_T2,scale_l,scale_d,scale_t,scale_v,d0
@@ -647,11 +653,17 @@ subroutine sub2_star_formation(ilevel, igrid,ngrid,ntot,imstar_lost,imstar_tot)
   ntot = 0
   imstar_lost = 0
   imstar_tot = 0
+  dx = 0.5D0**ilevel
+  scale_cell = 2.0D0**ilevel
   do i = 1, ngrid
      ind_grid(i) = active(ilevel)%igrid(igrid+i-1)
   enddo
   do ind=1,twotondim
      iskip=ncoarse+(ind-1)*ngridmax
+     ! Oct sub-cell indices for cell_seed
+     iiz=(ind-1)/4
+     iiy=(ind-1-4*iiz)/2
+     iix=(ind-1-2*iiy-4*iiz)
      do i=1,ngrid
          ind_cell(i)=iskip+ind_grid(i)
      end do
@@ -912,8 +924,22 @@ subroutine sub2_star_formation(ilevel, igrid,ngrid,ntot,imstar_lost,imstar_tot)
            mgas = dtnew(ilevel)*(sfr_ff(i)/tstar)*mcell
            ! Poisson mean
            PoissMean = mgas/mstar
+           ! Compute cell_seed from position (CPU-independent)
+           xcell = xg(ind_grid(i),1) + (dble(iix)-0.5D0)*dx
+           ycell = xg(ind_grid(i),2) + (dble(iiy)-0.5D0)*dx
+           zcell = xg(ind_grid(i),3) + (dble(iiz)-0.5D0)*dx
+           icx = int(xcell * scale_cell, i8b)
+           icy = int(ycell * scale_cell, i8b)
+           icz = int(zcell * scale_cell, i8b)
+           khash1 = icx*2654435761_i8b + icy*340573321_i8b + icz*4290933_i8b
+           khash2 = int(nstep,i8b)*1103515245_i8b + int(ilevel,i8b)*12345_i8b
+           cell_seed(1) = int(IAND(khash1, 4095_i8b))
+           cell_seed(2) = int(IAND(ISHFT(khash1,-12), 4095_i8b))
+           cell_seed(3) = int(IAND(khash2, 4095_i8b))
+           cell_seed(4) = int(IAND(khash1+khash2, 4095_i8b))
+           IGauss = 0
            ! Compute Poisson realisation
-           call poissdev(localseed,PoissMean,nstar(i))
+           call poissdev(cell_seed,PoissMean,nstar(i))
            ! Compute depleted gas mass
            mgas=nstar(i)*mstar
            ! Security to prevent more than 90% of gas depletion
