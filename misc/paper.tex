@@ -422,17 +422,6 @@ memory-weighted balancing reduces the peak-to-mean memory ratio from
 2.5 to 1.3 without affecting physics results (identical
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$ to machine precision).
 
-The parameter \code{nremap} controls the frequency of load-rebalancing
-operations (every \code{nremap} coarse steps). We changed the default
-from \code{nremap = 0} (rebalance every step) to \code{nremap = 5}
-based on systematic tests with $200\,\mathrm{M}$ particles on 12 ranks over
-10 coarse steps.
-The optimal value \code{nremap = 5} balances the cost of rebalancing
-against the growing imbalance that accumulates between rebalancing
-steps. Higher values ($\code{nremap} = 10$) reduce LB overhead further
-but allow imbalance to grow enough to slow other operations, resulting
-in a net increase in total runtime.
-
 Internal timing instrumentation breaks the load-balancing cost into
 two categories, \emph{communication} (MPI synchronization, global
 reductions, and grid migration between ranks) and \emph{local
@@ -460,6 +449,20 @@ adaptively at runtime.
 \subsection{Exchange Methods}
 \label{sec:exchange_backends}
 
+\subsubsection{MPI\_ALLTOALLV}
+\label{sec:backend_alltoall}
+
+The \code{MPI\_ALLTOALLV} collective exchanges variable-length
+messages among all ranks in a single call. This backend packs all
+emission data into a contiguous buffer with displacements computed
+from per-rank send counts, invokes \code{MPI\_ALLTOALLV}, and unpacks
+the received data. Although it involves all $\ncpu$ ranks (with zero
+counts for non-neighbours), high-quality MPI implementations exploit
+the sparsity internally and can outperform explicit P2P on certain
+interconnects, particularly for small messages on fat-tree topologies.
+However, the implicit global synchronisation and $\Olog{\ncpu}$ memory
+overhead make it less attractive at very large rank counts.
+
 \subsubsection{Point-to-point (P2P)}
 \label{sec:backend_p2p}
 
@@ -476,20 +479,6 @@ communication partners is determined by the domain geometry (typically
 independent of $\ncpu$. The P2P backend has low latency for sparse
 neighbour sets and is the best choice when each rank communicates with
 only a few neighbours when the clustering is not strong or the AMR level is not high.
-
-\subsubsection{MPI\_ALLTOALLV}
-\label{sec:backend_alltoall}
-
-The \code{MPI\_ALLTOALLV} collective exchanges variable-length
-messages among all ranks in a single call. This backend packs all
-emission data into a contiguous buffer with displacements computed
-from per-rank send counts, invokes \code{MPI\_ALLTOALLV}, and unpacks
-the received data. Although it involves all $\ncpu$ ranks (with zero
-counts for non-neighbours), high-quality MPI implementations exploit
-the sparsity internally and can outperform explicit P2P on certain
-interconnects, particularly for small messages on fat-tree topologies.
-However, the implicit global synchronisation and $\Olog{\ncpu}$ memory
-overhead make it less attractive at very large rank counts.
 
 \subsubsection{Hierarchical K-Section Exchange}
 \label{sec:backend_ksection}
@@ -713,7 +702,7 @@ source of code complexity and a potential source of bugs.
 \subsection{Morton Key Encoding and Neighbour Arithmetic}
 \label{sec:morton_encoding}
 
-A Morton key (also known as a Z-order key) is an integer formed
+A Morton key (also known as a Z-order key) \citep{Morton1966,Samet2006} is an integer formed
 by interleaving the bits of the three-dimensional integer coordinates
 $(i_x, i_y, i_z)$ of a grid at its AMR level:
 \begin{equation}
@@ -813,7 +802,7 @@ breakdowns, is provided in Appendix~\ref{app:memory}.
 \section{MULTIGRID POISSON SOLVER OPTIMIZATIONS}
 \label{sec:multigrid}
 
-The multigrid (MG) Poisson solver consumes a large fraction of the
+The multigrid (MG) Poisson solver \citep{Briggs2000,Trottenberg2001} consumes a large fraction of the
 total runtime in self-gravitating cosmological simulations. In
 baseline \ramses, profiling reveals that the MG solver accounts for
 approximately 55\,per\,cent of the total wall-clock time per coarse
@@ -821,14 +810,44 @@ step. We describe several optimizations that reduce this fraction to
 approximately 39\,per\,cent.
 
 
-We apply several targeted optimizations to the MG smoother and
+\subsection{V-Cycle Algorithm}
+\label{sec:mg_vcycle}
+
+The standard multigrid V-cycle solves the Poisson equation by
+recursively transferring residuals between AMR levels.  Starting at
+the finest level, the algorithm \emph{smooths} the current
+approximation using a red-black Gauss--Seidel (GS) iteration,
+computes the residual, and \emph{restricts} it to the next coarser
+level.  This restriction--smooth sequence descends to the coarsest
+level, where a direct solve (or additional smoothing) is applied.
+The correction is then \emph{prolongated} (interpolated) back up
+through each level, with post-smoothing at each step to damp
+high-frequency errors introduced by the interpolation.
+Figure~\ref{fig:mg_vcycle} illustrates the V-cycle structure and
+the exchange optimizations at each level.
+
+Each smoothing step requires ghost-zone exchanges between MPI ranks.
+We apply several targeted optimizations to the smoother and
 communication pattern.  Neighbour grid indices are precomputed into a
 contiguous cache before the V-cycle, amortising hash table lookups.
-The red and black Gauss--Seidel sweeps are merged by removing the
+The red and black GS sweeps are merged by removing the
 inter-sweep ghost exchange, and two redundant residual exchanges are
 eliminated, reducing the total exchange count from 9 to 5 per
 iteration (44\,per\,cent).  Implementation details are given in
 Appendix~\ref{app:mg_details}.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_mg_vcycle.pdf}
+\caption{Schematic of the multigrid V-cycle for four AMR levels.
+  The left (descending) leg restricts the residual from fine to
+  coarse; the right (ascending) leg prolongates the correction.  At
+  each level, red-black Gauss--Seidel smoothing is applied.  The
+  optimized exchange reduces the number of ghost-zone communications
+  from 9 to 5 per iteration by merging the red and black sweeps and
+  eliminating redundant residual exchanges.}
+\label{fig:mg_vcycle}
+\end{figure}
 
 \subsection{Performance Impact}
 \label{sec:mg_performance}
@@ -860,8 +879,7 @@ FFT (multi-threaded via \textsc{fftw3}+OpenMP) solves the system.
 
 \subsubsection*{Large grid ($N > 256^3$)}
 The global grid is distributed across ranks using FFTW's native slab
-decomposition along the $x$-axis.  Each rank owns $\lceil N_x /
-\ncpu \rceil$ contiguous $x$-slabs.  Data redistribution between
+decomposition along the $x$-axis.  Data redistribution between
 RAMSES's spatial domain decomposition and FFTW's slab layout requires
 an all-to-all exchange in both forward and reverse directions.
 
@@ -888,7 +906,11 @@ slab ranges using a symmetric overlap test,
 \end{equation}
 where $[x_{\min}^{(A)}, x_{\max}^{(A)}]$ is rank~$A$'s spatial
 bounding box and $[s_{\min}^{(B)}, s_{\max}^{(B)}]$ is slab~$B$'s
-grid index range.  The same test is evaluated on both sides (sender
+grid index range.  The asymmetric padding ($-0.5$ and $+1.5$) arises
+from cell-centred positioning: a cell at integer index~$s$ spans
+$[s - 0.5,\, s + 0.5]$ in grid coordinates, and adding one cell of
+ghost padding on the right extends the upper bound by an additional
+$+1$.  The same test is evaluated on both sides (sender
 computes which slabs to reach and the receiver computes which domains
 overlap), guaranteeing that every \code{MPI\_ISEND} has a matching
 \code{MPI\_IRECV}.  Periodic boundary wrapping is handled by
@@ -959,7 +981,7 @@ dominating the feedback time step.
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
 $n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
-\mathrm{INT}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
+\texttt{FLOOR}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
@@ -975,22 +997,21 @@ SNe that could influence the cell. The complexity becomes
 $\Olog{N_{\rm cells} \times \bar{n}_{\rm SN/bin} \times 27}$,
 where $\bar{n}_{\rm SN/bin} = N_{\rm SN} / n_{\rm bin}^3$ is the
 average number of SNe per bin. Figure~\ref{fig:spatial_binning}
-contrasts the two approaches.
+illustrates this approach.
 
-\begin{figure*}
+\begin{figure}
 \centering
-\includegraphics[width=\textwidth]{fig_spatial_binning.pdf}
-\caption{Feedback spatial binning concept (shown in 2D for clarity).
-  (a)~Brute force: every cell (blue square) must check all SN events
-  (orange stars), resulting in $\Olog{N_{\rm cells} \times N_{\rm SN}}$
-  complexity.
-  (b)~Spatial hash binning: the domain is partitioned into a uniform
-  grid of bins.  Each cell checks only the 27 neighbouring bins (9 in
-  2D), shown as shaded regions, reducing the complexity to
-  $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm SN/bin}}$.  Distant SN
-  events (grey) are never examined.}
+\includegraphics[width=\columnwidth]{fig_spatial_binning.pdf}
+\caption{Spatial hash binning for feedback (shown in 2D for clarity).
+  The domain is partitioned into a uniform grid of bins.  The target
+  cell (blue square) checks only the 9 neighbouring bins (27 in 3D),
+  shown as shaded regions.  Solid green lines connect the cell to SN
+  events (orange stars) within the neighbourhood.  Grey dashed lines
+  indicate distant SN events that are skipped, reducing the complexity
+  from $\Olog{N_{\rm cells} \times N_{\rm SN}}$ to
+  $\Olog{N_{\rm cells} \times 27\,\bar{n}_{\rm SN/bin}}$.}
 \label{fig:spatial_binning}
-\end{figure*}
+\end{figure}
 
 \subsection{Performance Results}
 \label{sec:fb_performance}
@@ -1466,7 +1487,7 @@ transfer at each MG V-cycle.
 Table~\ref{tab:gpu_perf} summarises the GPU performance on an NVIDIA
 H100~NVL system (93.1\,GB HBM3 per device, PCIe Gen5) using 2~MPI
 ranks $\times$ 4~OMP threads, running 2 coarse steps of the
-production test problem (Section~\ref{sec:perf_config}).
+testbed simulation (Section~\ref{sec:perf_config}).
 
 \begin{table}
 \centering
@@ -1543,7 +1564,7 @@ with adaptive refinement up to \code{levelmax}=10. The simulation is
 restarted from an HDF5 output at coarse step~5 and evolved to
 step~10 (5 coarse steps).
 
-The \emph{production test}, used for strong scaling
+The \emph{testbed simulation}, used for strong scaling
 (Section~\ref{sec:perf_timing}), is drawn from an ongoing
 Horizon-5 production run.  It contains $135.7\,\mathrm{M}$ dark
 matter particles and $3.2 \times 10^4$ sink particles in the same
@@ -2175,6 +2196,9 @@ author.
 \begin{thebibliography}{99}
 
 
+\bibitem[\protect\citeauthoryear{Briggs, Henson \& McCormick}{Briggs et al.}{2000}]{Briggs2000}
+Briggs W.~L., Henson V.~E., McCormick S.~F., 2000, A Multigrid Tutorial, 2nd edn. SIAM, Philadelphia
+
 \bibitem[\protect\citeauthoryear{Bryan et al.}{Bryan et al.}{2014}]{Bryan2014}
 Bryan G.~L., et al., 2014, ApJS, 211, 19
 
@@ -2257,6 +2281,9 @@ Pillepich A., et al., 2018, MNRAS, 473, 4077
 {RAMSES Team}, 2024, RAMSES User's Guide,
 \url{https://ramses-organisation.readthedocs.io}
 
+\bibitem[\protect\citeauthoryear{Samet}{Samet}{2006}]{Samet2006}
+Samet H., 2006, Foundations of Multidimensional and Metric Data Structures. Morgan Kaufmann
+
 \bibitem[\protect\citeauthoryear{Schaye et al.}{Schaye et al.}{2015}]{Schaye2015}
 Schaye J., et al., 2015, MNRAS, 446, 521
 
@@ -2272,6 +2299,9 @@ Springel V., 2010, MNRAS, 401, 791
 
 \bibitem[\protect\citeauthoryear{Teyssier}{Teyssier}{2002}]{Teyssier2002}
 Teyssier R., 2002, A\&A, 385, 337
+
+\bibitem[\protect\citeauthoryear{Trottenberg, Oosterlee \& Sch\"uller}{Trottenberg et al.}{2001}]{Trottenberg2001}
+Trottenberg U., Oosterlee C.~W., Sch\"uller A., 2001, Multigrid. Academic Press
 
 \bibitem[\protect\citeauthoryear{Tremmel et al.}{Tremmel et al.}{2017}]{Tremmel2017}
 Tremmel M., Karcher M., Governato F., Volonteri M., Quinn T.~R., Pontzen A., Anderson L., Bellovary J., 2017, MNRAS, 470, 1121
