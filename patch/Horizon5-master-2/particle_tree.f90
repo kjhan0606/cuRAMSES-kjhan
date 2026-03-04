@@ -149,12 +149,16 @@ subroutine init_tree
 !  call create_cloud_from_sink
 
   ! Sort particles down to levelmin
+  ! Fix: migrate virtual particles BEFORE kill_tree, so that particles
+  ! on the wrong CPU (from varcpu restore) are moved to real grids first.
+  ! Otherwise kill_tree can't find child grids for remote virtual grids.
   do ilevel=1,levelmin-1
+     call virtual_tree_fine(ilevel)
      call make_tree_fine(ilevel)
      call kill_tree_fine(ilevel)
-     ! Update boundary conditions for remaining particles
-     call virtual_tree_fine(ilevel)
   end do
+  ! Final migration for levelmin
+  call virtual_tree_fine(levelmin)
 
 end subroutine init_tree
 !################################################################
