@@ -190,7 +190,8 @@ module amr_parameters
   real(dp)::w0    =-1.0D0     ! DE equation of state w0 (CPL: w=w0+wa*(1-a))
   real(dp)::wa    = 0.0D0     ! DE equation of state wa (CPL)
   real(dp)::cs2_de= 0.0D0     ! DE sound speed squared (c_s^2)
-  logical ::de_perturb=.false. ! Enable DE perturbation in Poisson solver (cs2_de>0)
+  logical ::de_perturb=.false. ! Enable DE perturbation in Poisson solver
+  character(LEN=256)::de_table=''  ! Path to CAMB DE transfer function table
   ! Neutrino linear response
   logical::use_neutrino=.false.          ! Enable neutrino linear response in Poisson solver
   character(LEN=256)::neutrino_table=''  ! Path to CAMB transfer function table

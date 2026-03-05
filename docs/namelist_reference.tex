@@ -1906,21 +1906,33 @@ in conjunction with \paramref{de_perturb}\texttt{=.true.}\ to include
 dark energy perturbations in the FFT Poisson solver.  Set to~0 for the
 standard smooth dark energy (cosmological constant) assumption.
 
-When $c_s^2 > 0$ and DE perturbations are enabled, the FFT solver
-applies a $k$-dependent correction factor:
-\[
-  \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
-  \frac{k^2 + \kappa^2}{k^2 + \kappa^2 + \alpha}
-\]
-where $\kappa^2$ and $\alpha$ are computed from $c_s^2$, $w(a)$, and
-the background DE density at the current scale factor.
+\textbf{Two DE perturbation modes} are available depending on whether
+\paramref{de_table} is provided:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Table-based linear response} (\paramref{de_table} set):
+    Works for any $c_s^2$ including $c_s^2 = 0$ (clustering DE).
+    The correction factor is
+    $1 + (\rho_{\mathrm{de}}/\rho_{\mathrm{cb}})\,R_{\mathrm{DE}}(k,a)$,
+    where $R_{\mathrm{DE}}$ is read from a CAMB transfer function table.
+    When $c_s^2 < 10^{-4}$, the MG solver on AMR levels also applies
+    a uniform boost (since $R_{\mathrm{DE}}$ is $k$-independent).
+
+  \item \textbf{Quasi-static $\kappa^2/\alpha$ method} (no \paramref{de_table}, $c_s^2 > 0$):
+    The FFT solver applies a $k$-dependent correction:
+    $\hat\phi(\mathbf{k}) \leftarrow \hat\phi(\mathbf{k}) \times
+    (k^2 + \kappa^2)/(k^2 + \kappa^2 + \alpha)$,
+    where $\kappa^2$ and $\alpha$ are computed from $c_s^2$, $w(a)$, and
+    the background DE density.
+\end{enumerate}
 
 Typical values: $c_s^2 = 1$ (speed-of-light sound speed, most common
-in literature) or $c_s^2 \ll 1$ for clustering dark energy models.
+in literature) or $c_s^2 = 0$ for clustering dark energy models
+(requires \paramref{de_table}).
 
-\apinote{Only effective in the FFT solver path (\paramref{use_fftw} or
-\paramref{gpu_fft}).  The multigrid V-cycle on AMR levels does not
-include DE perturbation corrections.}
+\apinote{The quasi-static method is only effective in the FFT solver
+path.  The table-based method with $c_s^2 \approx 0$ also modifies the
+MG V-cycle on AMR levels.}
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -1928,23 +1940,56 @@ include DE perturbation corrections.}
 \label{param:de_perturb}
 
 \begin{quote}
-Enable dark energy density perturbations in the Poisson solver.  When
-\texttt{.true.}\ and \paramref{cs2_de}~$> 0$, the FFT solver modifies
-the gravitational potential in Fourier space to account for the
-clustering of dark energy.
+Enable dark energy density perturbations in the Poisson solver.
+Three modes of operation:
+
+\begin{enumerate}[nosep]
+  \item \paramref{de_table} provided $\to$ \textbf{table-based linear
+    response} (works for any \paramref{cs2_de}, including~0).
+  \item No \paramref{de_table}, \paramref{cs2_de}~$> 0$ $\to$
+    \textbf{quasi-static $\kappa^2/\alpha$ method}.
+  \item No \paramref{de_table}, \paramref{cs2_de}~$\leq 0$ $\to$
+    unsupported; the code disables this flag with a warning.
+\end{enumerate}
 
 \textbf{Requires:}
 \begin{itemize}[nosep]
   \item \paramref{cosmo}\texttt{=.true.}
-  \item \paramref{cs2_de}~$> 0$
+  \item Either \paramref{de_table} or \paramref{cs2_de}~$> 0$
   \item FFT solver active (\paramref{use_fftw} or \paramref{gpu_fft})
 \end{itemize}
 
-If \texttt{cs2\_de}~$\leq 0$ or the run is not cosmological, the code
-prints a warning and disables this flag.
-
 \apinote{Can be combined with \paramref{use_neutrino} --- both
 corrections are applied multiplicatively in Fourier space.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{de\_table}{character(256)}{'' (empty)}
+\label{param:de_table}
+
+\begin{quote}
+Path to a CAMB dark energy transfer function ratio table for the
+table-based linear response method.  The table contains
+$R_{\mathrm{DE}}(k, a) = \delta_{\mathrm{DE}} / \delta_m$ on a
+$(N_k \times N_a)$ grid, in the same ASCII format as
+\paramref{neutrino_table}.
+
+Generate with:
+\begin{verbatim}
+python3 misc/generate_de_table.py --w0=-0.9 --wa=0.1 --cs2=0.0 \
+    -o de_table.dat
+\end{verbatim}
+The script uses CAMB's \texttt{get\_redshift\_evolution()} to compute
+$\delta_{\mathrm{DE}}(k,z)$ and $\delta_m(k,z)$ directly, supporting
+arbitrary $c_s^2$ including $c_s^2 = 0$.  Default grid: 200~$k$-points
+$\times$ 50~$a$-points (same as the neutrino table).
+
+For $c_s^2 = 0$ (clustering DE), $R_{\mathrm{DE}}$ is independent of
+$k$ at each $a$ --- this is a useful verification check.
+
+\textbf{Requires} \paramref{de_perturb}\texttt{=.true.}.
+When this parameter is empty, the code falls back to the quasi-static
+$\kappa^2/\alpha$ method (which requires \paramref{cs2_de}~$> 0$).
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -2185,8 +2230,8 @@ should be set consistently.
   & All three must be set for neutrino response \\
 \addlinespace
 \texttt{de\_perturb}
-  & \texttt{cs2\_de}, \texttt{w0}, \texttt{wa}
-  & DE perturbation requires $c_s^2 > 0$ and CPL EOS \\
+  & \texttt{cs2\_de}, \texttt{de\_table}, \texttt{w0}, \texttt{wa}
+  & DE perturbation: table-based (any $c_s^2$) or quasi-static ($c_s^2 > 0$) \\
 \addlinespace
 \texttt{exchange\_method}
   & \texttt{ordering}

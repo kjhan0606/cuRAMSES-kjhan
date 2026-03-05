@@ -1623,6 +1623,7 @@ subroutine make_fine_bc_rhs(ilevel,icount)
    use pm_commons
    use poisson_commons
    use morton_hash
+   use dark_energy_commons, only: de_table_loaded, get_de_ratio, f_de_val
    implicit none
    integer, intent(in) :: ilevel,icount
 
@@ -1643,6 +1644,7 @@ subroutine make_fine_bc_rhs(ilevel,icount)
 
    integer  :: nx_loc
    real(dp) :: scale, fourpi
+   real(dp) :: omega_de_a_mg, omega_cb_mg
 
    ! Set constants
    nx_loc = icoarse_max-icoarse_min+1
@@ -1653,6 +1655,17 @@ subroutine make_fine_bc_rhs(ilevel,icount)
          fourpi = 1.5D0*(omega_m - omega_nu)*aexp*scale
       else
          fourpi = 1.5D0*omega_m*aexp*scale
+      end if
+      ! DE perturbation boost (table-based, cs2_de~0 only)
+      ! For cs2_de~0, R_DE is k-independent so MG boost is valid
+      if(de_perturb .and. de_table_loaded .and. cs2_de < 1.0d-4) then
+         omega_de_a_mg = omega_l * f_de_val(aexp) * aexp**3
+         if(use_neutrino .and. omega_nu > 0.0d0) then
+            omega_cb_mg = omega_m - omega_nu
+         else
+            omega_cb_mg = omega_m
+         end if
+         fourpi = fourpi * (1.0d0 + (omega_de_a_mg / omega_cb_mg) * get_de_ratio(1.0d-3, aexp))
       end if
    end if
 
@@ -2787,7 +2800,8 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    use poisson_commons
    use poisson_parameters
    use neutrino_commons, only: nu_table_loaded, read_neutrino_table, get_nu_ratio
-   use dark_energy_commons, only: compute_de_kspace_params
+   use dark_energy_commons, only: compute_de_kspace_params, de_table_loaded, &
+        read_de_table, get_de_ratio, f_de_val
    use iso_c_binding
    use omp_lib
    implicit none
@@ -2851,6 +2865,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
 
    ! DE perturbation variables
    real(dp) :: de_kappa2, de_alpha, k_tilde_sq, de_factor
+   real(dp) :: R_DE_val, omega_de_a
 
    ! MPI ALLTOALLV variables for large-grid path
    integer, allocatable :: sendcounts(:), sdispls(:)
@@ -2893,6 +2908,12 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    if(use_neutrino .and. .not. nu_table_loaded) then
       call read_neutrino_table(trim(neutrino_table))
       if(myid==1) write(*,'(A)') '   Neutrino transfer function table loaded'
+   end if
+
+   ! Load DE table (once)
+   if(de_perturb .and. len_trim(de_table) > 0 .and. .not. de_table_loaded) then
+      call read_de_table(trim(de_table))
+      if(myid==1) write(*,'(A)') '   DE transfer function table loaded'
    end if
 
    ! ================================================================
@@ -3285,15 +3306,23 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       ! --- Step 5: Forward R2C FFT ---
       call fftw_mpi_execute_dft_r2c(plan_r2c, rdata_fftw, cdata_fftw)
 
-      ! --- Precompute DE kspace params if needed ---
-      if(de_perturb .and. cs2_de > 0.0d0) then
+      ! --- Precompute DE kspace params if needed (quasi-static fallback) ---
+      if(de_perturb .and. .not. de_table_loaded .and. cs2_de > 0.0d0) then
          call compute_de_kspace_params(aexp, de_kappa2, de_alpha)
+      end if
+      ! Precompute DE table params
+      if(de_perturb .and. de_table_loaded) then
+         omega_de_a = omega_l * f_de_val(aexp) * aexp**3
+         if(use_neutrino .and. omega_nu > 0.0d0) then
+            omega_cb_loc = omega_m - omega_nu
+         else
+            omega_cb_loc = omega_m
+         end if
       end if
 
       ! --- Step 6: Apply Green's function (+ neutrino/DE corrections) ---
       N_complex = int(local_nx_fftw,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
-      if((use_neutrino .and. omega_nu > 0.0d0) .or. &
-         (de_perturb .and. cs2_de > 0.0d0)) then
+      if((use_neutrino .and. omega_nu > 0.0d0) .or. de_perturb) then
          if(use_neutrino .and. omega_nu > 0.0d0) omega_cb_loc = omega_m - omega_nu
          do idx_c = 0, N_complex-1
             ! Compute integer wave numbers for this mode
@@ -3317,10 +3346,20 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
                end if
             end if
 
-            ! DE perturbation correction: (k^2+kappa^2)/(k^2+kappa^2+alpha)
-            if(de_perturb .and. cs2_de > 0.0d0) then
-               k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
-               de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+            ! DE perturbation correction
+            if(de_perturb) then
+               if(de_table_loaded) then
+                  ! Table-based linear response: 1 + (rho_DE/rho_cb) * R_DE(k,a)
+                  k_phys = twopi * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+                  if(k_phys > 0.0d0) then
+                     R_DE_val = get_de_ratio(k_phys, aexp)
+                     de_factor = 1.0d0 + (omega_de_a / omega_cb_loc) * R_DE_val
+                  end if
+               else if(cs2_de > 0.0d0) then
+                  ! Fallback: kappa2/alpha quasi-static method
+                  k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
+                  de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+               end if
             end if
 
             cdata_fftw(idx_c + 1) = cdata_fftw(idx_c + 1) * green(idx_c) * nu_factor * de_factor
@@ -3451,15 +3490,23 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       ! --- Step 3: Forward R2C FFT ---
       call fftw_execute_dft_r2c(plan_r2c, rhs_3d, cdata)
 
-      ! --- Precompute DE kspace params if needed ---
-      if(de_perturb .and. cs2_de > 0.0d0) then
+      ! --- Precompute DE kspace params if needed (quasi-static fallback) ---
+      if(de_perturb .and. .not. de_table_loaded .and. cs2_de > 0.0d0) then
          call compute_de_kspace_params(aexp, de_kappa2, de_alpha)
+      end if
+      ! Precompute DE table params
+      if(de_perturb .and. de_table_loaded) then
+         omega_de_a = omega_l * f_de_val(aexp) * aexp**3
+         if(use_neutrino .and. omega_nu > 0.0d0) then
+            omega_cb_loc = omega_m - omega_nu
+         else
+            omega_cb_loc = omega_m
+         end if
       end if
 
       ! --- Step 4: Apply Green's function (+ neutrino/DE corrections) ---
       N_complex = int(fft_Nx,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
-      if((use_neutrino .and. omega_nu > 0.0d0) .or. &
-         (de_perturb .and. cs2_de > 0.0d0)) then
+      if((use_neutrino .and. omega_nu > 0.0d0) .or. de_perturb) then
          if(use_neutrino .and. omega_nu > 0.0d0) omega_cb_loc = omega_m - omega_nu
          do idx_c = 0, N_complex-1
             kx_i = int(idx_c / (int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b)))
@@ -3482,9 +3529,19 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
             end if
 
             ! DE perturbation correction
-            if(de_perturb .and. cs2_de > 0.0d0) then
-               k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
-               de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+            if(de_perturb) then
+               if(de_table_loaded) then
+                  ! Table-based linear response
+                  k_phys = twopi * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+                  if(k_phys > 0.0d0) then
+                     R_DE_val = get_de_ratio(k_phys, aexp)
+                     de_factor = 1.0d0 + (omega_de_a / omega_cb_loc) * R_DE_val
+                  end if
+               else if(cs2_de > 0.0d0) then
+                  ! Fallback: kappa2/alpha quasi-static
+                  k_tilde_sq = twopi * twopi * dble(kx_i**2 + ky_i**2 + kz_i**2)
+                  de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+               end if
             end if
 
             cdata(idx_c) = cdata(idx_c) * green(idx_c) * nu_factor * de_factor

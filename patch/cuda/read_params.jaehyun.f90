@@ -34,7 +34,7 @@ subroutine read_params
        & ,exchange_method &
        & ,use_neutrino
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de &
-       & ,de_perturb &
+       & ,de_perturb,de_table &
        & ,omega_nu,neutrino_table
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
@@ -233,19 +233,31 @@ subroutine read_params
   end if
 
   !-------------------------------------------------
-  ! DE perturbation (CPL, cs2_de > 0)
+  ! DE perturbation (CPL)
+  ! Three modes:
+  !   1) de_table provided → table-based linear response (any cs2_de)
+  !   2) no de_table, cs2_de>0 → kappa2/alpha quasi-static method
+  !   3) no de_table, cs2_de<=0 → unsupported, disable
   !-------------------------------------------------
   if(de_perturb) then
-     if(cs2_de <= 0.0d0) then
-        if(myid==1) write(*,*) 'WARNING: de_perturb=T but cs2_de<=0, disabling'
-        de_perturb = .false.
-     else if(.not. cosmo) then
+     if(.not. cosmo) then
         if(myid==1) write(*,*) 'WARNING: de_perturb=T but not cosmo run, disabling'
         de_perturb = .false.
+     else if(len_trim(de_table) > 0) then
+        ! Table-based linear response (works for any cs2_de)
+        if(myid==1) then
+           write(*,'(A,A)') ' DE perturbation (table): ', trim(de_table)
+           write(*,'(A,ES10.3,A,F6.3,A,F6.3)') &
+                '   cs2_de=', cs2_de, ' w0=', w0, ' wa=', wa
+        end if
+     else if(cs2_de <= 0.0d0) then
+        if(myid==1) write(*,*) 'WARNING: de_perturb=T, no de_table, cs2_de<=0 -> disabling'
+        de_perturb = .false.
      else
+        ! Fallback: kappa2/alpha quasi-static method
         if(myid==1) then
            write(*,'(A,ES10.3,A,F6.3,A,F6.3)') &
-                ' DE perturbation: cs2_de=', cs2_de, &
+                ' DE perturbation (kappa2/alpha): cs2_de=', cs2_de, &
                 ' w0=', w0, ' wa=', wa
         end if
      end if
