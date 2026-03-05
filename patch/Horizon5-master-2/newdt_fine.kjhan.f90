@@ -161,7 +161,13 @@ subroutine newdt_fine(ilevel)
 !jhshin2
 
   if(hydro)call courant_fine(ilevel)
-  
+
+  ! SIDM timestep constraint: keep P_scatter < sidm_courant
+  if(sidm .and. sidm_Pmax(ilevel) > 0.0d0) then
+     dtnew(ilevel) = MIN(dtnew(ilevel), &
+          sidm_courant / sidm_Pmax(ilevel) * dtold(ilevel))
+  end if
+
 #ifdef _OPENMP
 111 format('  +Entering newdt_fine for level ',I2)
 #else

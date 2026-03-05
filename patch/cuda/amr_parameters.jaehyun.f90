@@ -286,8 +286,22 @@ module amr_parameters
 
   ! SIDM (Self-Interacting Dark Matter) parameters
   logical ::sidm=.false.            ! Enable SIDM Monte Carlo scattering
-  real(dp)::sidm_cross_section=1.0d0 ! sigma/m [cm^2/g]
+  real(dp)::sidm_cross_section=1.0d0 ! sigma/m [cm^2/g] (sigma_0 for velocity-dependent)
   integer ::sidm_npart_min=2         ! Minimum DM particles per cell for scattering
+  ! Velocity-dependent cross-section: 'constant', 'yukawa', 'power_law'
+  character(len=16)::sidm_type='constant'
+  real(dp)::sidm_v0=100.0d0         ! Reference velocity [km/s] for yukawa/power_law
+  real(dp)::sidm_power=-4.0d0       ! Power-law index (only for 'power_law')
+  ! Timestep constraint
+  real(dp)::sidm_courant=0.1d0      ! Max allowed scattering probability per step
+  real(dp),dimension(1:MAXLEVEL)::sidm_Pmax=0.0d0  ! Max P per level (runtime)
+  ! Angular distribution: 'isotropic' or 'rutherford'
+  character(len=16)::sidm_angular='isotropic'
+  real(dp)::sidm_epsilon=0.01d0     ! Rutherford regularization (small=forward-peaked)
+  ! Inelastic scattering (iSIDM)
+  logical ::sidm_inelastic=.false.  ! Enable inelastic scattering
+  real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV]
+  real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction
 
 
 

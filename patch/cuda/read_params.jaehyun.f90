@@ -38,7 +38,11 @@ subroutine read_params
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
-  namelist/sidm_params/sidm_cross_section,sidm_npart_min
+  namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
+       & sidm_type,sidm_v0,sidm_power, &
+       & sidm_courant, &
+       & sidm_angular,sidm_epsilon, &
+       & sidm_inelastic,sidm_delta,sidm_frac_excited
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
@@ -308,9 +312,27 @@ subroutine read_params
         if(myid==1) write(*,*) 'ERROR: sidm=T but sidm_cross_section<=0'
         call clean_stop
      end if
+     if(sidm_inelastic .and. sidm_delta <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: sidm_inelastic=T but sidm_delta<=0'
+        call clean_stop
+     end if
      if(myid==1) then
         write(*,'(A,ES10.3,A)') ' SIDM enabled: sigma/m=', sidm_cross_section, ' cm^2/g'
-        write(*,'(A,I4)')       '   npart_min=', sidm_npart_min
+        write(*,'(A,A)')        '   cross-section type: ', trim(sidm_type)
+        if(trim(sidm_type) /= 'constant') then
+           write(*,'(A,F8.1,A)') '   v0=', sidm_v0, ' km/s'
+           if(trim(sidm_type) == 'power_law') &
+                write(*,'(A,F6.2)') '   power=', sidm_power
+        end if
+        write(*,'(A,I4)')        '   npart_min=', sidm_npart_min
+        write(*,'(A,F5.2)')      '   courant=', sidm_courant
+        write(*,'(A,A)')         '   angular: ', trim(sidm_angular)
+        if(trim(sidm_angular) == 'rutherford') &
+             write(*,'(A,ES10.3)') '   epsilon=', sidm_epsilon
+        if(sidm_inelastic) then
+           write(*,'(A,ES10.3,A)') '   iSIDM: delta=', sidm_delta, ' keV'
+           write(*,'(A,F6.3)')     '   frac_excited=', sidm_frac_excited
+        end if
      end if
   end if
 

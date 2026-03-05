@@ -3,31 +3,49 @@
 !################################################################
 ! SIDM (Self-Interacting Dark Matter) Monte Carlo Scattering
 !
-! Cell-based random pairing with isotropic elastic scattering.
-! Constant cross-section (sigma/m) in cm^2/g.
+! Features:
+! - Velocity-dependent cross-section (constant/yukawa/power_law)
+! - Isotropic or anisotropic (Rutherford-like) scattering angle
+! - Inelastic scattering with mass splitting (iSIDM)
+! - Timestep constraint via P_max tracking
 !################################################################
 subroutine sidm_scatter(ilevel)
   use pm_commons
+  use pm_parameters, only: iseed
   use amr_commons
+  use random
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
   integer,intent(in)::ilevel
 
-  integer::icpu,igrid,subnump,info
+  integer::icpu,igrid,subnump,info,ith
   integer::mythread,nthreads
   integer,dimension(:),allocatable::nparticles,ptrhead
-  integer::sidm_n_scatter,sidm_n_pairs
+  integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
+  real(dp)::sidm_Pmax_level
+  real(dp)::R_dummy
+  integer,dimension(1:ncpu,1:IRandNumSize)::allseed
+  ! Per-thread seed array (deterministic, avoids localseed race)
+  integer,dimension(:,:),allocatable::sidm_seeds
+  logical,save::sidm_excited_init = .false.
   common /sidm_omp/ mythread
-  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs
+  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
+  common /sidm_pmax_c/ sidm_Pmax_level
 !$omp threadprivate(/sidm_omp/)
 
   if(.not.sidm) return
   if(numbtot(1,ilevel)==0) return
   if(verbose) write(*,111) ilevel
+
+  ! Initialize excited DM fraction (once, for iSIDM)
+  if(sidm_inelastic .and. .not.sidm_excited_init) then
+     call sidm_init_excited()
+     sidm_excited_init = .true.
+  end if
 
 !$omp parallel
   mythread = omp_get_thread_num()
@@ -35,13 +53,33 @@ subroutine sidm_scatter(ilevel)
 !$omp end parallel
   allocate(ptrhead(0:nthreads-1), nparticles(0:nthreads-1))
 
+  ! Initialize localseed if first call
+  if(localseed(1)==-1) then
+     call rans(ncpu,iseed,allseed)
+     localseed = allseed(myid,1:IRandNumSize)
+  end if
+
+  ! Initialize per-thread seeds from localseed (deterministic)
+  allocate(sidm_seeds(IRandNumSize, 0:nthreads-1))
+  sidm_seeds(:,0) = localseed
+  do ith=1,nthreads-1
+     sidm_seeds(:,ith) = sidm_seeds(:,ith-1)
+     ! Advance seed 100 steps to decorrelate streams
+     do igrid=1,100
+        call ranf(sidm_seeds(:,ith), R_dummy)
+     end do
+  end do
+
   ! Reset level-wide counters
-  sidm_n_scatter = 0
-  sidm_n_pairs   = 0
-  sidm_dp(:)     = 0.0d0
-  sidm_dEk       = 0.0d0
-  sidm_dp_max    = 0.0d0
-  sidm_dEk_max   = 0.0d0
+  sidm_n_scatter  = 0
+  sidm_n_pairs    = 0
+  sidm_n_up       = 0
+  sidm_n_down     = 0
+  sidm_dp(:)      = 0.0d0
+  sidm_dEk        = 0.0d0
+  sidm_dp_max     = 0.0d0
+  sidm_dEk_max    = 0.0d0
+  sidm_Pmax_level = 0.0d0
 
 #if NDIM==3
   do icpu=1,ncpu
@@ -51,54 +89,83 @@ subroutine sidm_scatter(ilevel)
 !$omp parallel private(subnump,igrid)
      subnump = nparticles(mythread)
      igrid   = ptrhead(mythread)
-     call sub_sidm_scatter(ilevel,icpu,igrid,subnump)
+     call sub_sidm_scatter(ilevel,icpu,igrid,subnump,sidm_seeds)
 !$omp end parallel
   end do
 #endif
 
-  deallocate(ptrhead, nparticles)
+  ! Update localseed deterministically: advance last thread's seed
+  localseed = sidm_seeds(:,nthreads-1)
+  do igrid=1,100
+     call ranf(localseed, R_dummy)
+  end do
 
-  ! Report scattering statistics (MPI reduce)
+  deallocate(ptrhead, nparticles, sidm_seeds)
+
+  ! MPI reduce all diagnostics
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_scatter,1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_pairs,  1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_up,     1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_n_down,   1,MPI_INTEGER,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dp,   3,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dEk,  1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dp_max, 1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dEk_max,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
-  if(myid==1 .and. sidm_n_scatter>0) then
-     write(*,'(A,I2,A,I8,A,I10)') &
-          ' SIDM level ',ilevel,': scattered=',sidm_n_scatter,' pairs=',sidm_n_pairs
-     write(*,'(A,3ES12.4)') '   dp(x,y,z)=', sidm_dp(1:3)
-     write(*,'(A,ES12.4,A,ES12.4)') '   dEk_total=', sidm_dEk, '  dp_max=', sidm_dp_max
-     write(*,'(A,ES12.4)') '   dEk_max  =', sidm_dEk_max
+  call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_Pmax_level,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
+
+  ! Store P_max for timestep constraint in newdt_fine
+  sidm_Pmax(ilevel) = sidm_Pmax_level
+
+  ! Report statistics
+  if(myid==1 .and. sidm_n_pairs>0) then
+     write(*,'(A,I2,A,I8,A,I10,A,ES9.2)') &
+          ' SIDM level ',ilevel,': scattered=',sidm_n_scatter, &
+          ' pairs=',sidm_n_pairs,' Pmax=',sidm_Pmax_level
+     if(sidm_n_scatter>0) then
+        write(*,'(A,3ES12.4)') '   dp(x,y,z)=', sidm_dp(1:3)
+        write(*,'(A,ES12.4,A,ES12.4)') '   dEk_total=', sidm_dEk, &
+             '  dp_max=', sidm_dp_max
+        write(*,'(A,ES12.4)') '   dEk_max  =', sidm_dEk_max
+     end if
+     if(sidm_inelastic .and. (sidm_n_up>0 .or. sidm_n_down>0)) then
+        write(*,'(A,I6,A,I6)') '   iSIDM: up-scatter=', &
+             sidm_n_up,' down-scatter=',sidm_n_down
+     end if
   end if
 
 111 format('   Entering sidm_scatter for level ',I2)
 end subroutine sidm_scatter
 !################################################################
 !################################################################
-subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
+subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   use pm_commons
-  use pm_parameters, only: iseed
   use amr_commons
   use random
   implicit none
   integer,intent(in)::ilevel,icpu,kgrid,subnump
+  integer,dimension(IRandNumSize,0:*)::thread_seeds
 
   ! External function
   integer,external::cell_index_from_part
 
   ! Shared counters (common with sidm_scatter)
-  integer::sidm_n_scatter,sidm_n_pairs
+  integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
-  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs
+  real(dp)::sidm_Pmax_level
+  common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
+  common /sidm_pmax_c/ sidm_Pmax_level
+
+  ! Thread ID from sidm_scatter wrapper
+  integer::mythread_loc
+  common /sidm_omp/ mythread_loc
+!$omp threadprivate(/sidm_omp/)
 
   ! Local variables
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
   real(dp)::dx,dx_loc,scale,vol_phys,dt_phys,sigma_over_m
   real(dp)::mp_phys,P_scatter,twopi
-  real(dp)::cos_theta,sin_theta,phi_rand,v_rel_mag
+  real(dp)::cos_theta,sin_theta,phi_rand,v_rel_mag,v_rel_kms
   real(dp),dimension(1:3)::v1,v2,v_cm,v_rel_vec,nhat,v_rel_new
   real(dp),dimension(1:3)::p_before,p_after,v1_new,v2_new
   real(dp)::Ek_before,Ek_after,dp_mag,dEk_evt
@@ -108,12 +175,20 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
   integer,dimension(1:nvector)::ind_dm
   integer::itemp,ipair
   integer,dimension(IRandNumSize)::seed_loc
-  integer,dimension(1:ncpu,1:IRandNumSize)::allseed
 
   ! Scattering counters (thread-local)
-  integer::n_scatter_loc,n_pairs_loc
+  integer::n_scatter_loc,n_pairs_loc,n_up_loc,n_down_loc
   ! Conservation diagnostics (thread-local)
   real(dp)::dp_loc(3),dEk_loc,dp_max_loc,dEk_max_loc
+  real(dp)::P_max_loc
+
+  ! Anisotropic scattering variables
+  real(dp)::eps2,a_ruth,b_ruth,e1_mag
+  real(dp),dimension(1:3)::v_hat,e1,e2
+
+  ! Inelastic scattering variables
+  real(dp)::delta_phys,mu,KE_cm,KE_cm_new,delta_KE,v_rel_new_mag
+  logical::is_excited_1,is_excited_2,do_transition
 
   if(subnump<=0) return
 
@@ -134,22 +209,32 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
   ! Physical timestep [s]
   dt_phys = dtnew(ilevel)*scale_t
 
-  ! sigma/m in CGS [cm^2/g]
-  sigma_over_m = sidm_cross_section
-
-  ! Initialize thread-local random seed from global localseed
-  if(localseed(1)==-1) then
-     call rans(ncpu,iseed,allseed)
-     localseed = allseed(myid,1:IRandNumSize)
+  ! Inelastic mass splitting [erg] (1 keV = 1.602e-9 erg)
+  if(sidm_inelastic) then
+     delta_phys = sidm_delta * 1.602d-9
+  else
+     delta_phys = 0.0d0
   end if
-  seed_loc = localseed
+
+  ! Precompute Rutherford parameters
+  if(trim(sidm_angular) == 'rutherford') then
+     eps2 = 2.0d0*sidm_epsilon
+     a_ruth = 1.0d0/eps2
+     b_ruth = 1.0d0/(2.0d0+eps2)
+  end if
+
+  ! Use per-thread seed from thread_seeds array
+  seed_loc = thread_seeds(:,mythread_loc)
 
   n_scatter_loc = 0
-  n_pairs_loc = 0
+  n_pairs_loc   = 0
+  n_up_loc      = 0
+  n_down_loc    = 0
   dp_loc(:)     = 0.0d0
   dEk_loc       = 0.0d0
   dp_max_loc    = 0.0d0
   dEk_max_loc   = 0.0d0
+  P_max_loc     = 0.0d0
 
   ! Loop over grids assigned to this thread
   igrid = kgrid
@@ -170,13 +255,13 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
         if(son(icell)/=0) cycle
 
         ! Collect DM particles in this subcell
+        ! DM: idp>0 and tp<=0 (ground: tp=0, excited: tp=-1)
         ndm_cell = 0
         ipart = headp(igrid)
         do jp=1,npart1
            ! Check if this particle belongs to subcell 'ind'
            if(cell_index_from_part(ipart,igrid,ilevel)==ind) then
-              ! DM particle: idp>0 and tp==0 (not star, not sink)
-              if(idp(ipart)>0 .and. tp(ipart)==0.0d0) then
+              if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
                  ndm_cell = ndm_cell+1
                  if(ndm_cell<=nvector) ind_dm(ndm_cell) = ipart
               end if
@@ -220,9 +305,32 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
 
            ! Relative velocity
            v_rel_vec(1:3) = v1(1:3) - v2(1:3)
-           v_rel_mag = sqrt(v_rel_vec(1)**2 + v_rel_vec(2)**2 + v_rel_vec(3)**2)
+           v_rel_mag = sqrt(v_rel_vec(1)**2 + v_rel_vec(2)**2 &
+                          + v_rel_vec(3)**2)
 
            if(v_rel_mag==0.0d0) cycle
+
+           ! --- Velocity-dependent cross-section ---
+           v_rel_kms = v_rel_mag * 1.0d-5  ! cm/s -> km/s
+           select case(trim(sidm_type))
+           case('yukawa')
+              ! sigma(v) = sigma_0 / (1 + (v/v0)^2)^2
+              sigma_over_m = sidm_cross_section &
+                   / (1.0d0 + (v_rel_kms/sidm_v0)**2)**2
+           case('power_law')
+              ! sigma(v) = sigma_0 * (v/v0)^n, capped
+              if(v_rel_kms > 1.0d0) then
+                 sigma_over_m = sidm_cross_section &
+                      * (v_rel_kms/sidm_v0)**sidm_power
+              else
+                 sigma_over_m = sidm_cross_section &
+                      * (1.0d0/sidm_v0)**sidm_power
+              end if
+              sigma_over_m = min(sigma_over_m, &
+                   1.0d4*sidm_cross_section)
+           case default  ! 'constant'
+              sigma_over_m = sidm_cross_section
+           end select
 
            ! Scattering probability
            ! P = (sigma/m) * m_p * v_rel * dt / V_cell * (N_dm - 1)
@@ -230,18 +338,21 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
            P_scatter = sigma_over_m * mp_phys * v_rel_mag * dt_phys &
                      / vol_phys * dble(ndm_cell-1)
 
+           ! Track P_max for timestep constraint
+           if(P_scatter > P_max_loc) P_max_loc = P_scatter
+
            ! Warning if P > 1 (timestep too large for SIDM)
            if(P_scatter > 1.0d0 .and. myid==1) then
               write(*,'(A,ES10.3,A,I2,A,I10)') &
-                   ' WARNING: SIDM P=', P_scatter, ' > 1 at level ', ilevel, &
-                   ' cell ', icell
+                   ' WARNING: SIDM P=', P_scatter, &
+                   ' > 1 at level ', ilevel, ' cell ', icell
            end if
 
            ! Monte Carlo: scatter if random < P
            call ranf(seed_loc, R1)
            if(R1 >= P_scatter) cycle
 
-           ! --- Isotropic elastic scattering ---
+           ! === SCATTER EVENT ===
            n_scatter_loc = n_scatter_loc + 1
 
            ! Before: momentum and kinetic energy (physical)
@@ -252,29 +363,116 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
            ! Center-of-mass velocity (physical)
            v_cm(1:3) = (m1*v1(1:3) + m2*v2(1:3)) / mtot
 
-           ! Random unit vector (isotropic)
-           call ranf(seed_loc, R1)
-           call ranf(seed_loc, R2)
-           cos_theta = 2.0d0*R1 - 1.0d0
-           sin_theta = sqrt(1.0d0 - cos_theta**2)
-           phi_rand  = twopi*R2
-           nhat(1) = sin_theta*cos(phi_rand)
-           nhat(2) = sin_theta*sin(phi_rand)
-           nhat(3) = cos_theta
+           ! --- Inelastic energy change ---
+           delta_KE = 0.0d0
+           do_transition = .false.
+           if(sidm_inelastic .and. delta_phys > 0.0d0) then
+              is_excited_1 = (tp(ind_dm(ipair))   < -0.5d0)
+              is_excited_2 = (tp(ind_dm(ipair+1)) < -0.5d0)
 
-           ! New relative velocity: same magnitude, random direction
-           v_rel_new(1:3) = v_rel_mag * nhat(1:3)
+              if(.not.is_excited_1 .and. .not.is_excited_2) then
+                 ! g+g -> e+e (endothermic): requires KE_cm > 2*delta
+                 mu = m1*m2/mtot
+                 KE_cm = 0.5d0 * mu * v_rel_mag**2
+                 if(KE_cm > 2.0d0*delta_phys) then
+                    delta_KE = -2.0d0*delta_phys
+                    do_transition = .true.
+                    n_up_loc = n_up_loc + 1
+                 end if
+              else if(is_excited_1 .and. is_excited_2) then
+                 ! e+e -> g+g (exothermic): always allowed
+                 delta_KE = 2.0d0*delta_phys
+                 do_transition = .true.
+                 n_down_loc = n_down_loc + 1
+              end if
+              ! Mixed (g+e or e+g): elastic, no transition
+           end if
+
+           ! New relative velocity magnitude
+           mu = m1*m2/mtot
+           if(delta_KE == 0.0d0) then
+              v_rel_new_mag = v_rel_mag  ! elastic
+           else
+              KE_cm_new = 0.5d0*mu*v_rel_mag**2 + delta_KE
+              if(KE_cm_new < 0.0d0) cycle  ! safety
+              v_rel_new_mag = sqrt(2.0d0*KE_cm_new/mu)
+           end if
+
+           ! --- Scattering angle ---
+           select case(trim(sidm_angular))
+           case('rutherford')
+              ! Rutherford-like: dsigma/dOmega ~ 1/(1-cos_theta+2*eps)^2
+              ! CDF inversion: cos_theta = 1+2*eps - 1/(b + R*(a-b))
+              call ranf(seed_loc, R1)
+              call ranf(seed_loc, R2)
+              cos_theta = 1.0d0 + eps2 &
+                   - 1.0d0/(b_ruth + R1*(a_ruth - b_ruth))
+              cos_theta = max(-1.0d0, min(1.0d0, cos_theta))
+              sin_theta = sqrt(max(0.0d0, 1.0d0 - cos_theta**2))
+              phi_rand = twopi*R2
+
+              ! Rotate scattering angle from v_rel frame to lab frame
+              v_hat(1:3) = v_rel_vec(1:3) / v_rel_mag
+              ! Orthonormal basis: e1 perp to v_hat
+              if(abs(v_hat(3)) < 0.9d0) then
+                 e1(1) =  v_hat(2)
+                 e1(2) = -v_hat(1)
+                 e1(3) =  0.0d0
+              else
+                 e1(1) =  0.0d0
+                 e1(2) =  v_hat(3)
+                 e1(3) = -v_hat(2)
+              end if
+              e1_mag = sqrt(e1(1)**2 + e1(2)**2 + e1(3)**2)
+              e1(1:3) = e1(1:3) / e1_mag
+              ! e2 = v_hat x e1
+              e2(1) = v_hat(2)*e1(3) - v_hat(3)*e1(2)
+              e2(2) = v_hat(3)*e1(1) - v_hat(1)*e1(3)
+              e2(3) = v_hat(1)*e1(2) - v_hat(2)*e1(1)
+              ! Scattered direction in lab frame
+              nhat(1:3) = sin_theta*cos(phi_rand)*e1(1:3) &
+                        + sin_theta*sin(phi_rand)*e2(1:3) &
+                        + cos_theta*v_hat(1:3)
+
+           case default  ! 'isotropic'
+              ! Random unit vector (isotropic)
+              call ranf(seed_loc, R1)
+              call ranf(seed_loc, R2)
+              cos_theta = 2.0d0*R1 - 1.0d0
+              sin_theta = sqrt(1.0d0 - cos_theta**2)
+              phi_rand  = twopi*R2
+              nhat(1) = sin_theta*cos(phi_rand)
+              nhat(2) = sin_theta*sin(phi_rand)
+              nhat(3) = cos_theta
+           end select
+
+           ! New relative velocity vector
+           v_rel_new(1:3) = v_rel_new_mag * nhat(1:3)
 
            ! New velocities in COM frame
            v1_new(1:3) = v_cm(1:3) + (m2/mtot)*v_rel_new(1:3)
            v2_new(1:3) = v_cm(1:3) - (m1/mtot)*v_rel_new(1:3)
 
-           ! After: momentum and kinetic energy (physical)
-           p_after(1:3) = m1*v1_new(1:3) + m2*v2_new(1:3)
-           Ek_after = 0.5d0*(m1*(v1_new(1)**2+v1_new(2)**2+v1_new(3)**2) &
-                            +m2*(v2_new(1)**2+v2_new(2)**2+v2_new(3)**2))
+           ! Apply state transitions (iSIDM)
+           if(do_transition) then
+              if(.not.is_excited_1) then
+                 ! g+g -> e+e
+                 tp(ind_dm(ipair))   = -1.0d0
+                 tp(ind_dm(ipair+1)) = -1.0d0
+              else
+                 ! e+e -> g+g
+                 tp(ind_dm(ipair))   = 0.0d0
+                 tp(ind_dm(ipair+1)) = 0.0d0
+              end if
+           end if
 
-           ! Accumulate conservation error
+           ! Conservation diagnostics (momentum: exact, energy: exact
+           ! for elastic; intentional change for inelastic)
+           p_after(1:3) = m1*v1_new(1:3) + m2*v2_new(1:3)
+           Ek_after = 0.5d0*(m1*(v1_new(1)**2+v1_new(2)**2 &
+                                +v1_new(3)**2) &
+                            +m2*(v2_new(1)**2+v2_new(2)**2 &
+                                +v2_new(3)**2))
            dp_loc(1:3) = dp_loc(1:3) + (p_after(1:3) - p_before(1:3))
            dEk_evt = Ek_after - Ek_before
            dEk_loc = dEk_loc + dEk_evt
@@ -294,18 +492,109 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump)
      igrid = next(igrid)
   end do  ! grids
 
+  ! Save seed back to per-thread array (no race)
+  thread_seeds(:,mythread_loc) = seed_loc
+
   ! Accumulate thread-local counters to shared counters
   !$omp critical
   sidm_n_scatter = sidm_n_scatter + n_scatter_loc
   sidm_n_pairs   = sidm_n_pairs + n_pairs_loc
+  sidm_n_up      = sidm_n_up + n_up_loc
+  sidm_n_down    = sidm_n_down + n_down_loc
   sidm_dp(1:3)   = sidm_dp(1:3) + dp_loc(1:3)
   sidm_dEk       = sidm_dEk + dEk_loc
   if(dp_max_loc > sidm_dp_max) sidm_dp_max = dp_max_loc
   if(dEk_max_loc > sidm_dEk_max) sidm_dEk_max = dEk_max_loc
-  localseed = seed_loc
+  if(P_max_loc > sidm_Pmax_level) sidm_Pmax_level = P_max_loc
   !$omp end critical
 
 end subroutine sub_sidm_scatter
+!################################################################
+!################################################################
+! Initialize excited DM fraction for iSIDM
+!################################################################
+subroutine sidm_init_excited()
+  use pm_commons
+  use pm_parameters, only: iseed
+  use amr_commons
+  use random
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer::ilevel,icpu,igrid,jgrid,ipart,jpart,npart1
+  integer::ndm_total,ndm_excited,ndm_existing,info
+  integer,dimension(1:ncpu,1:IRandNumSize)::allseed
+  integer,dimension(1:IRandNumSize)::seed_init
+  real(dp)::R1
+
+  if(sidm_frac_excited <= 0.0d0) return
+
+  ! Check if already initialized (restart case: some DM have tp<0)
+  ndm_existing = 0
+  do ilevel=levelmin,nlevelmax
+     igrid = headl(myid,ilevel)
+     do jgrid=1,numbl(myid,ilevel)
+        ipart = headp(igrid)
+        do jpart=1,numbp(igrid)
+           if(idp(ipart)>0 .and. tp(ipart)<-0.5d0) then
+              ndm_existing = ndm_existing + 1
+           end if
+           ipart = nextp(ipart)
+        end do
+        igrid = next(igrid)
+     end do
+  end do
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_existing,1,MPI_INTEGER, &
+       MPI_SUM,MPI_COMM_WORLD,info)
+  if(ndm_existing > 0) then
+     if(myid==1) write(*,'(A,I10,A)') &
+          ' iSIDM: found ', ndm_existing, &
+          ' pre-excited DM particles (skipping init)'
+     return
+  end if
+
+  ! Initialize seed (offset to avoid correlation with main RNG)
+  call rans(ncpu,iseed+12345,allseed)
+  seed_init = allseed(myid,1:IRandNumSize)
+
+  ndm_total = 0
+  ndm_excited = 0
+
+  ! Loop over own grids and randomly excite DM particles
+  do ilevel=levelmin,nlevelmax
+     igrid = headl(myid,ilevel)
+     do jgrid=1,numbl(myid,ilevel)
+        ipart = headp(igrid)
+        do jpart=1,numbp(igrid)
+           ! DM: idp>0, tp==0 (ground state)
+           if(idp(ipart)>0 .and. tp(ipart)==0.0d0) then
+              ndm_total = ndm_total + 1
+              call ranf(seed_init, R1)
+              if(R1 < sidm_frac_excited) then
+                 tp(ipart) = -1.0d0
+                 ndm_excited = ndm_excited + 1
+              end if
+           end if
+           ipart = nextp(ipart)
+        end do
+        igrid = next(igrid)
+     end do
+  end do
+
+  ! Report
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,  1,MPI_INTEGER, &
+       MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_excited,1,MPI_INTEGER, &
+       MPI_SUM,MPI_COMM_WORLD,info)
+  if(myid==1) then
+     write(*,'(A,I10,A,I10,A,F6.3,A)') &
+          ' iSIDM: excited ', ndm_excited, ' of ', ndm_total, &
+          ' DM particles (frac=', &
+          dble(ndm_excited)/dble(max(1,ndm_total)), ')'
+  end if
+
+end subroutine sidm_init_excited
 !################################################################
 !################################################################
 ! Helper: determine subcell index (1..8) for a particle in a grid

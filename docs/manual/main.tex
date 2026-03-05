@@ -2442,47 +2442,112 @@ reference run without the neutrino module:
 
 cuRAMSES implements self-interacting dark matter (SIDM) via cell-based
 Monte Carlo scattering.  Dark matter particles within the same leaf cell
-are randomly paired, and each pair undergoes isotropic elastic scattering
+are randomly paired, and each pair undergoes scattering
 with probability proportional to the cross-section.
+
+The implementation supports four extensions beyond the basic constant
+isotropic elastic model:
+\begin{enumerate}[nosep]
+  \item Velocity-dependent cross-section (Yukawa, power-law)
+  \item Adaptive timestep constraint ($P < $ \texttt{sidm\_courant})
+  \item Anisotropic scattering (Rutherford-like forward-peaked)
+  \item Inelastic scattering with mass splitting (iSIDM)
+\end{enumerate}
 
 \section{Algorithm}
 
 For each leaf cell at each AMR level:
 \begin{enumerate}[nosep]
-  \item Collect all DM particles (identified by \texttt{idp}>0 and \texttt{tp}=0).
+  \item Collect all DM particles (\texttt{idp}>0 and \texttt{tp}$\le$0; ground state: \texttt{tp}=0, excited: \texttt{tp}=$-1$).
   \item Fisher--Yates shuffle the particle list.
   \item Form sequential pairs: $(1,2)$, $(3,4)$, \ldots
-  \item For each pair, compute scattering probability:
+  \item For each pair, compute cross-section $\sigma(v)/m$ based on the model (see below).
+  \item Compute scattering probability:
     \[
-      P = \frac{\sigma}{m}\,m_p\,v_{\mathrm{rel}}\,\frac{\Delta t}{V_{\mathrm{cell}}}\,(N_{\mathrm{DM}}-1)
+      P = \frac{\sigma(v)}{m}\,m_p\,v_{\mathrm{rel}}\,\frac{\Delta t}{V_{\mathrm{cell}}}\,(N_{\mathrm{DM}}-1)
     \]
-  \item If a uniform random number $< P$, rotate the relative velocity to a random isotropic direction in the center-of-mass frame (elastic scattering).
+  \item If a uniform random number $< P$, scatter the pair in the center-of-mass frame.
 \end{enumerate}
 
-Momentum and kinetic energy are exactly conserved by construction.
+\subsection{Velocity-Dependent Cross-Section}
+
+Three models are available via \texttt{sidm\_type}:
+\begin{itemize}[nosep]
+  \item \texttt{`constant'}: $\sigma/m = \sigma_0$ (default)
+  \item \texttt{`yukawa'}: $\sigma/m = \sigma_0 / (1 + (v/v_0)^2)^2$
+  \item \texttt{`power\_law'}: $\sigma/m = \sigma_0\,(v/v_0)^n$, capped at $10^4\sigma_0$
+\end{itemize}
+where $\sigma_0$ = \texttt{sidm\_cross\_section}, $v_0$ = \texttt{sidm\_v0} (km/s), $n$ = \texttt{sidm\_power}.
+
+\subsection{Anisotropic Scattering}
+
+When \texttt{sidm\_angular=`rutherford'}, the scattering angle $\theta$ is sampled from a
+Rutherford-like differential cross-section:
+\[
+  \frac{d\sigma}{d\Omega} \propto \frac{1}{(1-\cos\theta+2\epsilon)^2}
+\]
+where $\epsilon$ = \texttt{sidm\_epsilon} controls the forward-peakedness
+($\epsilon\to 0$: strongly peaked, $\epsilon\to\infty$: isotropic).
+The CDF is analytically invertible:
+\[
+  \cos\theta = 1+2\epsilon - \frac{1}{b + R(a-b)}, \quad a=\frac{1}{2\epsilon},\; b=\frac{1}{2+2\epsilon}
+\]
+The scattered direction is then rotated from the $\hat{v}_{\mathrm{rel}}$ frame to the lab frame.
+
+\subsection{Inelastic Scattering (iSIDM)}
+
+When \texttt{sidm\_inelastic=.true.}, DM particles have two states:
+ground (mass $m$, \texttt{tp}=0) and excited (mass $m+\delta$, \texttt{tp}=$-1$),
+where $\delta$ = \texttt{sidm\_delta} in keV.
+Scattering channels:
+\begin{itemize}[nosep]
+  \item $g+g \to e+e$ (endothermic): requires $\tfrac{1}{2}\mu v_{\mathrm{rel}}^2 > 2\delta c^2$
+  \item $e+e \to g+g$ (exothermic): always allowed, releases $2\delta c^2$
+  \item $g+e \to g+e$ (elastic): no energy change
+\end{itemize}
+The relative velocity magnitude is adjusted to conserve total energy in the COM frame.
+Initial excited fraction is set by \texttt{sidm\_frac\_excited} (applied once at startup;
+restart-safe via pre-existing excited particle detection).
+
+\subsection{Timestep Constraint}
+
+The maximum scattering probability $P_{\max}$ is tracked per level.
+In \texttt{newdt\_fine}, the timestep is constrained:
+\[
+  \Delta t_{\mathrm{new}} \le \frac{C_{\mathrm{SIDM}}}{P_{\max}} \,\Delta t_{\mathrm{old}}
+\]
+where $C_{\mathrm{SIDM}}$ = \texttt{sidm\_courant} (default 0.1).
+
+Momentum is exactly conserved for all scattering types.
+Kinetic energy is exactly conserved for elastic scattering and changes by
+$\pm 2\delta c^2$ for inelastic events.
 
 \section{Diagnostic Output}
 
 At each AMR level, if any scattering events occur, the code reports:
 \begin{lstlisting}[style=fortran,numbers=none]
- SIDM level 14: scattered=      19 pairs=     52129
+ SIDM level 14: scattered=      19 pairs=     52129 Pmax= 1.23E-04
    dp(x,y,z)=  1.8692E+35  2.5961E+34 -5.1923E+34
    dEk_total= -1.2631E+44  dp_max=  1.1749E+35
    dEk_max  =  5.0177E+43
+   iSIDM: up-scatter=     2 down-scatter=     3
 \end{lstlisting}
 where:
 \begin{itemize}[nosep]
   \item \texttt{scattered}: number of pairs that actually scattered (Monte Carlo accepted)
   \item \texttt{pairs}: total number of DM particle pairs evaluated
+  \item \texttt{Pmax}: maximum scattering probability (used for timestep constraint)
   \item \texttt{dp(x,y,z)}: cumulative momentum change $\Delta\mathbf{p}$ (g\,cm/s)
   \item \texttt{dEk\_total}: cumulative kinetic energy change $\Delta E_k$ (erg)
   \item \texttt{dp\_max}, \texttt{dEk\_max}: maximum single-event $|\Delta\mathbf{p}|$ and $|\Delta E_k|$
+  \item \texttt{iSIDM}: endothermic (up) and exothermic (down) scatter counts (only with \texttt{sidm\_inelastic})
 \end{itemize}
-These should all be at machine-precision level ($\sim 10^{-15}$ relative to particle momentum, $\sim 10^{-13}$ relative to kinetic energy), confirming exact conservation up to floating-point roundoff.
+For elastic scattering, \texttt{dp} and \texttt{dEk} should be at machine-precision level ($\sim 10^{-15}$ relative), confirming exact conservation.
+For inelastic scattering, \texttt{dEk} reflects the intentional energy transfer $\pm 2\delta c^2$.
 
 \section{Namelist Configuration}
 
-\begin{codebox}[SIDM example ($\sigma/m = 1\,$cm$^2$/g)]
+\begin{codebox}[SIDM basic example ($\sigma/m = 1\,$cm$^2$/g, isotropic elastic)]
 \begin{lstlisting}[style=fortran,numbers=none]
 &RUN_PARAMS
 sidm = .true.
@@ -2496,6 +2561,22 @@ sidm_npart_min     = 2      ! min DM particles per cell
 \end{lstlisting}
 \end{codebox}
 
+\begin{codebox}[SIDM extended example (Yukawa + Rutherford + iSIDM)]
+\begin{lstlisting}[style=fortran,numbers=none]
+&SIDM_PARAMS
+sidm_cross_section = 10.0   ! sigma_0/m [cm^2/g]
+sidm_type          = 'yukawa'
+sidm_v0            = 100.0   ! reference velocity [km/s]
+sidm_courant       = 0.1     ! max allowed P per step
+sidm_angular       = 'rutherford'
+sidm_epsilon       = 0.01    ! forward-peaked
+sidm_inelastic     = .true.
+sidm_delta         = 100.0   ! mass splitting [keV]
+sidm_frac_excited  = 0.1     ! 10% initially excited
+/
+\end{lstlisting}
+\end{codebox}
+
 \section{Modified Files}
 
 \begin{longtable}{L{6.5cm} L{7cm}}
@@ -2503,10 +2584,11 @@ sidm_npart_min     = 2      ! min DM particles per cell
 \textbf{File} & \textbf{Changes} \\
 \midrule
 \endhead
-\texttt{sidm\_scatter.f90} & New module: OpenMP Monte Carlo scattering \\
-\texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{sidm}, \texttt{sidm\_cross\_section}, \texttt{sidm\_npart\_min} \\
+\texttt{sidm\_scatter.f90} & Monte Carlo scattering with all 4 extensions \\
+\texttt{amr\_parameters.jaehyun.f90} & All SIDM parameters (12 variables) \\
 \texttt{read\_params.jaehyun.f90} & Read \texttt{\&SIDM\_PARAMS} namelist; validation \\
 \texttt{amr\_step.jaehyun.f90} & Call \texttt{sidm\_scatter} after \texttt{synchro\_fine} \\
+\texttt{newdt\_fine.kjhan.f90} & SIDM timestep constraint via $P_{\max}$ \\
 \texttt{Makefile} & Add \texttt{sidm\_scatter.o} to \texttt{SIDM\_OBJ} \\
 \bottomrule
 \end{longtable}
@@ -2868,9 +2950,8 @@ See Chapter~\ref{ch:neutrino} for the implementation details.
 \label{ch:sidm_params_nml}
 %======================================================
 
-SIDM Monte Carlo scattering parameters.  Cell-based random pairing with
-isotropic elastic scattering.  The scattering probability per pair is
-$P = (\sigma/m)\,m_p\,v_{\mathrm{rel}}\,\Delta t / V_{\mathrm{cell}} \times (N-1)$.
+SIDM Monte Carlo scattering parameters.  Supports constant, velocity-dependent,
+anisotropic, and inelastic scattering.
 Requires \texttt{sidm=.true.}\ in \texttt{\&RUN\_PARAMS} and \texttt{pic=.true.}.
 See Chapter~\ref{ch:sidm} for the algorithm description.
 
@@ -2879,8 +2960,24 @@ See Chapter~\ref{ch:sidm} for the algorithm description.
 \textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
 \endhead
-\texttt{sidm\_cross\_section} & real(dp) & 1.0 & Cross-section per unit mass $\sigma/m$ (cm$^2$/g) \\
-\texttt{sidm\_npart\_min} & integer & 2 & Minimum DM particles per cell for scattering \\
+\multicolumn{4}{l}{\textit{Cross-section}} \\
+\texttt{sidm\_cross\_section} & real(dp) & 1.0 & $\sigma_0/m$ (cm$^2$/g) \\
+\texttt{sidm\_type} & char(16) & \texttt{constant} & Model: \texttt{constant}, \texttt{yukawa}, \texttt{power\_law} \\
+\texttt{sidm\_v0} & real(dp) & 100 & Reference velocity $v_0$ (km/s) \\
+\texttt{sidm\_power} & real(dp) & $-4$ & Power-law index $n$ \\
+\texttt{sidm\_npart\_min} & integer & 2 & Min DM particles per cell \\
+\midrule
+\multicolumn{4}{l}{\textit{Timestep}} \\
+\texttt{sidm\_courant} & real(dp) & 0.1 & Max allowed $P$ per step \\
+\midrule
+\multicolumn{4}{l}{\textit{Angular distribution}} \\
+\texttt{sidm\_angular} & char(16) & \texttt{isotropic} & \texttt{isotropic} or \texttt{rutherford} \\
+\texttt{sidm\_epsilon} & real(dp) & 0.01 & Rutherford regularization $\epsilon$ \\
+\midrule
+\multicolumn{4}{l}{\textit{Inelastic (iSIDM)}} \\
+\texttt{sidm\_inelastic} & logical & F & Enable inelastic scattering \\
+\texttt{sidm\_delta} & real(dp) & 0 & Mass splitting $\delta$ (keV) \\
+\texttt{sidm\_frac\_excited} & real(dp) & 0 & Initial excited DM fraction \\
 \bottomrule
 \end{longtable}
 

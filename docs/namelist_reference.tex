@@ -2112,7 +2112,9 @@ neutrino mass sum (default $0.06\,$eV) and outputs a table with
 %======================================================================
 
 Parameters for self-interacting dark matter (SIDM) Monte Carlo
-scattering.  Requires \paramref{sidm}\texttt{=.true.}\ and
+scattering.  Supports velocity-dependent cross-sections, anisotropic
+and inelastic scattering.
+Requires \paramref{sidm}\texttt{=.true.}\ and
 \paramref{pic}\texttt{=.true.}\ in \texttt{\&RUN\_PARAMS}.
 
 % ------------------------------------------------------------------
@@ -2120,25 +2122,36 @@ scattering.  Requires \paramref{sidm}\texttt{=.true.}\ and
 \label{param:sidm_cross_section}
 
 \begin{quote}
-DM self-interaction cross-section per unit mass $\sigma/m$ in
-cm$^2$\,g$^{-1}$.  Controls the scattering probability for each
-particle pair within a cell:
-\[
-  P = \frac{\sigma}{m} \times m_p \times v_{\mathrm{rel}} \times
-  \frac{\Delta t}{V_{\mathrm{cell}}} \times (N - 1)
-\]
-where $m_p$ is the DM particle mass, $v_{\mathrm{rel}}$ is the
-relative velocity of the pair, $\Delta t$ is the time step,
-$V_{\mathrm{cell}}$ is the cell volume, and $N$ is the number of DM
-particles in the cell.
+DM self-interaction cross-section per unit mass $\sigma_0/m$ in
+cm$^2$\,g$^{-1}$.  For velocity-dependent models (\texttt{sidm\_type}),
+this is the reference value $\sigma_0$.
+\end{quote}
 
-Typical observational constraints allow $\sigma/m \sim 0.1$--$10\;
-\mathrm{cm}^2\,\mathrm{g}^{-1}$, with values $\gtrsim 1$ producing
-significant core formation in dwarf galaxy haloes.
+% ------------------------------------------------------------------
+\paramheader{sidm\_type}{character(16)}{'constant'}
+\label{param:sidm_type}
 
-\apinote{Upon scattering, the two particles' velocities are isotropically
-randomised in their centre-of-mass frame, conserving total momentum
-and kinetic energy (elastic scattering).}
+\begin{quote}
+Cross-section velocity dependence:
+\texttt{`constant'}: $\sigma/m = \sigma_0$;
+\texttt{`yukawa'}: $\sigma/m = \sigma_0/(1+(v/v_0)^2)^2$;
+\texttt{`power\_law'}: $\sigma/m = \sigma_0(v/v_0)^n$, capped at $10^4\sigma_0$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_v0}{real(dp)}{100.0}
+\label{param:sidm_v0}
+
+\begin{quote}
+Reference velocity $v_0$ in km/s for velocity-dependent models.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_power}{real(dp)}{$-4$}
+\label{param:sidm_power}
+
+\begin{quote}
+Power-law index $n$ (only for \texttt{sidm\_type='power\_law'}).
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -2147,22 +2160,74 @@ and kinetic energy (elastic scattering).}
 
 \begin{quote}
 Minimum number of DM particles per cell required for scattering.
-Cells with fewer than \texttt{sidm\_npart\_min} dark matter particles
-are skipped entirely.  The default value of~2 is the physical minimum
-(a pair is needed for scattering).
+The default of~2 is the physical minimum.
+\end{quote}
 
-Increasing this value can reduce noise in poorly sampled regions at the
-cost of suppressing scattering in low-density cells.
+% ------------------------------------------------------------------
+\paramheader{sidm\_courant}{real(dp)}{0.1}
+\label{param:sidm_courant}
+
+\begin{quote}
+Maximum allowed scattering probability per timestep.
+The timestep is constrained by
+$\Delta t_{\mathrm{new}} \le C_{\mathrm{SIDM}}/P_{\max} \times \Delta t_{\mathrm{old}}$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_angular}{character(16)}{'isotropic'}
+\label{param:sidm_angular}
+
+\begin{quote}
+Angular distribution of scattered velocity:
+\texttt{`isotropic'} (uniform on sphere) or
+\texttt{`rutherford'} (forward-peaked, $d\sigma/d\Omega \propto 1/(1-\cos\theta+2\epsilon)^2$).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_epsilon}{real(dp)}{0.01}
+\label{param:sidm_epsilon}
+
+\begin{quote}
+Regularisation parameter $\epsilon$ for Rutherford-like scattering.
+Small values give stronger forward-peaking; $\epsilon\to\infty$ recovers isotropic.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_inelastic}{logical}{.false.}
+\label{param:sidm_inelastic}
+
+\begin{quote}
+Enable inelastic scattering (iSIDM).  DM particles have ground (tp=0)
+and excited (tp=$-1$) states with mass splitting $\delta$.
+Channels: $g+g\to e+e$ (endothermic, threshold $\frac{1}{2}\mu v^2 > 2\delta c^2$),
+$e+e\to g+g$ (exothermic), $g+e$ (elastic).
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_delta}{real(dp)}{0.0}
+\label{param:sidm_delta}
+
+\begin{quote}
+Mass splitting $\delta$ in keV for inelastic scattering.
+Required when \texttt{sidm\_inelastic=.true.}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_frac\_excited}{real(dp)}{0.0}
+\label{param:sidm_frac_excited}
+
+\begin{quote}
+Initial fraction of DM particles in the excited state.
+Applied once at startup (restart-safe: skipped if excited particles already exist).
 \end{quote}
 
 \paragraph{Diagnostic output.}
 When scattering events occur, the code prints per-level statistics
-including the number of scattered pairs, cumulative momentum change
-$\Delta\mathbf{p}$ (g\,cm/s), cumulative kinetic energy change
-$\Delta E_k$ (erg), and the maximum single-event values.
-These quantities should be at machine-precision level
-($\sim 10^{-15}$ relative to particle momentum), confirming
-exact conservation up to floating-point roundoff.
+including scattered count, pairs count, $P_{\max}$, conservation diagnostics
+($\Delta\mathbf{p}$, $\Delta E_k$), and iSIDM up/down-scatter counts.
+For elastic scattering, conservation is at machine precision
+($\sim 10^{-15}$ relative).
+For inelastic events, $\Delta E_k$ reflects the intentional $\pm 2\delta c^2$ transfer.
 
 
 %======================================================================
