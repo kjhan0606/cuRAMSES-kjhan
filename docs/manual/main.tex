@@ -2461,6 +2461,25 @@ For each leaf cell at each AMR level:
 
 Momentum and kinetic energy are exactly conserved by construction.
 
+\section{Diagnostic Output}
+
+At each AMR level, if any scattering events occur, the code reports:
+\begin{lstlisting}[style=fortran,numbers=none]
+ SIDM level 14: scattered=      19 pairs=     52129
+   dp(x,y,z)=  1.8692E+35  2.5961E+34 -5.1923E+34
+   dEk_total= -1.2631E+44  dp_max=  1.1749E+35
+   dEk_max  =  5.0177E+43
+\end{lstlisting}
+where:
+\begin{itemize}[nosep]
+  \item \texttt{scattered}: number of pairs that actually scattered (Monte Carlo accepted)
+  \item \texttt{pairs}: total number of DM particle pairs evaluated
+  \item \texttt{dp(x,y,z)}: cumulative momentum change $\Delta\mathbf{p}$ (g\,cm/s)
+  \item \texttt{dEk\_total}: cumulative kinetic energy change $\Delta E_k$ (erg)
+  \item \texttt{dp\_max}, \texttt{dEk\_max}: maximum single-event $|\Delta\mathbf{p}|$ and $|\Delta E_k|$
+\end{itemize}
+These should all be at machine-precision level ($\sim 10^{-15}$ relative to particle momentum, $\sim 10^{-13}$ relative to kinetic energy), confirming exact conservation up to floating-point roundoff.
+
 \section{Namelist Configuration}
 
 \begin{codebox}[SIDM example ($\sigma/m = 1\,$cm$^2$/g)]

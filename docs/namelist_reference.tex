@@ -2155,6 +2155,15 @@ Increasing this value can reduce noise in poorly sampled regions at the
 cost of suppressing scattering in low-density cells.
 \end{quote}
 
+\paragraph{Diagnostic output.}
+When scattering events occur, the code prints per-level statistics
+including the number of scattered pairs, cumulative momentum change
+$\Delta\mathbf{p}$ (g\,cm/s), cumulative kinetic energy change
+$\Delta E_k$ (erg), and the maximum single-event values.
+These quantities should be at machine-precision level
+($\sim 10^{-15}$ relative to particle momentum), confirming
+exact conservation up to floating-point roundoff.
+
 
 %======================================================================
 \section{Complete Example: Cosmological Zoom-In}
