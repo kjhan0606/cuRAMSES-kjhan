@@ -32,10 +32,14 @@ subroutine read_params
        & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
        & ,use_fftw &
        & ,exchange_method &
-       & ,use_neutrino
-  namelist/cosmo_params/omega_b,omega_m,omega_l,h0,w0,wa,cs2_de &
-       & ,de_perturb,de_table &
-       & ,omega_nu,neutrino_table
+       & ,use_neutrino &
+       & ,sidm &
+       & ,de_perturb
+  ! Non-standard model namelists (read only when enabled)
+  namelist/cpl_params/w0,wa,cs2_de,de_table
+  namelist/neutrino_params/omega_nu,neutrino_table
+  namelist/sidm_params/sidm_cross_section,sidm_npart_min
+  namelist/cosmo_params/omega_b,omega_m,omega_l,h0
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
        & ,informat,outformat
@@ -179,6 +183,15 @@ subroutine read_params
   rewind(1)
   read(1,NML=cosmo_params,END=80)
 80 continue
+  rewind(1)
+  read(1,NML=cpl_params,END=79)
+79 continue
+  rewind(1)
+  read(1,NML=neutrino_params,END=78)
+78 continue
+  rewind(1)
+  read(1,NML=sidm_params,END=77)
+77 continue
 
   !-------------------------------------------------
   ! Read optional nrestart command-line argument
@@ -280,6 +293,24 @@ subroutine read_params
                 ' omega_cb=', omega_m - omega_nu
            write(*,'(A,A)') '   table: ', trim(neutrino_table)
         end if
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! SIDM (Self-Interacting Dark Matter) scattering
+  !-------------------------------------------------
+  if(sidm) then
+     if(.not. pic) then
+        if(myid==1) write(*,*) 'ERROR: sidm=T requires pic=T'
+        call clean_stop
+     end if
+     if(sidm_cross_section <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: sidm=T but sidm_cross_section<=0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A,ES10.3,A)') ' SIDM enabled: sigma/m=', sidm_cross_section, ' cm^2/g'
+        write(*,'(A,I4)')       '   npart_min=', sidm_npart_min
      end if
   end if
 

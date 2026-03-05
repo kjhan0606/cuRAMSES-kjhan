@@ -2211,10 +2211,11 @@ requires $c_s^2 > 0$; it is undefined for $c_s^2 = 0$.
 
 \section{Namelist Configuration}
 
-CPL parameters are specified in the \texttt{\&COSMO\_PARAMS} namelist block:
+CPL parameters are specified in the \texttt{\&CPL\_PARAMS} namelist block,
+with the activation flag \texttt{de\_perturb} in \texttt{\&RUN\_PARAMS}:
 \begin{codebox}[CPL dark energy example]
 \begin{lstlisting}[style=fortran,numbers=none]
-&COSMO_PARAMS
+&CPL_PARAMS
 w0    = -0.9
 wa    =  0.1
 /
@@ -2225,11 +2226,14 @@ When this block is absent (or when $w_0 = -1$, $w_a = 0$), the code produces res
 To enable DE perturbations with the table-based method ($c_s^2 = 0$):
 \begin{codebox}[DE perturbation with CAMB table]
 \begin{lstlisting}[style=fortran,numbers=none]
-&COSMO_PARAMS
+&RUN_PARAMS
+de_perturb = .true.
+/
+
+&CPL_PARAMS
 w0         = -0.9
 wa         =  0.1
 cs2_de     =  0.0
-de_perturb = .true.
 de_table   = 'de_table.dat'
 /
 \end{lstlisting}
@@ -2243,7 +2247,7 @@ de_table   = 'de_table.dat'
 \midrule
 \endhead
 \texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{w0}, \texttt{wa}, \texttt{cs2\_de}, \texttt{de\_table} \\
-\texttt{read\_params.jaehyun.f90} & Define and read \texttt{\&COSMO\_PARAMS} namelist; 3-way DE validation \\
+\texttt{read\_params.jaehyun.f90} & Define and read \texttt{\&CPL\_PARAMS} namelist; 3-way DE validation \\
 \texttt{init\_time.f90} & Add \texttt{f\_de}; modify \texttt{dadtau}, \texttt{dadt}, \texttt{friedman}, \texttt{fy}, \texttt{d1a}, \texttt{fpeebl}, \texttt{vfact} \\
 \texttt{cooling\_module.f90} & Modify \texttt{HsurH0} to use \texttt{f\_de} \\
 \texttt{dark\_energy\_commons.f90} & Table I/O (\texttt{read\_de\_table}, \texttt{get\_de\_ratio}), quasi-static params \\
@@ -2374,7 +2378,9 @@ clamping to table boundaries.
 
 \section{Namelist Configuration}
 
-Neutrino parameters are split across two namelist blocks:
+Neutrino parameters are split across two namelist blocks: the activation
+flag \texttt{use\_neutrino} in \texttt{\&RUN\_PARAMS} and the physical
+parameters in the dedicated \texttt{\&NEUTRINO\_PARAMS} block:
 
 \begin{codebox}[Neutrino configuration example ($\Sigma m_\nu=0.06\,$eV)]
 \begin{lstlisting}[style=fortran,numbers=none]
@@ -2382,7 +2388,7 @@ Neutrino parameters are split across two namelist blocks:
 use_neutrino=.true.
 /
 
-&COSMO_PARAMS
+&NEUTRINO_PARAMS
 omega_nu=0.00140
 neutrino_table='neutrino_table.dat'
 /
@@ -2422,9 +2428,67 @@ reference run without the neutrino module:
 \texttt{neutrino\_commons.f90} & New module: table I/O, bilinear interpolation \\
 \texttt{generate\_neutrino\_table.py} & New script: CAMB transfer function table generation \\
 \texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{omega\_nu}, \texttt{use\_neutrino}, \texttt{neutrino\_table} \\
-\texttt{read\_params.jaehyun.f90} & Read neutrino parameters from namelist \\
+\texttt{read\_params.jaehyun.f90} & Read \texttt{\&NEUTRINO\_PARAMS} namelist; validation \\
 \texttt{multigrid\_fine\_commons.f90} & MG: \texttt{fourpi} uses $\Omega_{\mathrm{cb}}$; FFT: neutrino factor \\
 \texttt{Makefile} & Add \texttt{neutrino\_commons.o} to \texttt{MODOBJ} \\
+\bottomrule
+\end{longtable}
+
+
+%======================================================
+\chapter{Self-Interacting Dark Matter}
+\label{ch:sidm}
+%======================================================
+
+cuRAMSES implements self-interacting dark matter (SIDM) via cell-based
+Monte Carlo scattering.  Dark matter particles within the same leaf cell
+are randomly paired, and each pair undergoes isotropic elastic scattering
+with probability proportional to the cross-section.
+
+\section{Algorithm}
+
+For each leaf cell at each AMR level:
+\begin{enumerate}[nosep]
+  \item Collect all DM particles (identified by \texttt{idp}>0 and \texttt{tp}=0).
+  \item Fisher--Yates shuffle the particle list.
+  \item Form sequential pairs: $(1,2)$, $(3,4)$, \ldots
+  \item For each pair, compute scattering probability:
+    \[
+      P = \frac{\sigma}{m}\,m_p\,v_{\mathrm{rel}}\,\frac{\Delta t}{V_{\mathrm{cell}}}\,(N_{\mathrm{DM}}-1)
+    \]
+  \item If a uniform random number $< P$, rotate the relative velocity to a random isotropic direction in the center-of-mass frame (elastic scattering).
+\end{enumerate}
+
+Momentum and kinetic energy are exactly conserved by construction.
+
+\section{Namelist Configuration}
+
+\begin{codebox}[SIDM example ($\sigma/m = 1\,$cm$^2$/g)]
+\begin{lstlisting}[style=fortran,numbers=none]
+&RUN_PARAMS
+sidm = .true.
+pic  = .true.
+/
+
+&SIDM_PARAMS
+sidm_cross_section = 1.0    ! sigma/m [cm^2/g]
+sidm_npart_min     = 2      ! min DM particles per cell
+/
+\end{lstlisting}
+\end{codebox}
+
+\section{Modified Files}
+
+\begin{longtable}{L{6.5cm} L{7cm}}
+\toprule
+\textbf{File} & \textbf{Changes} \\
+\midrule
+\endhead
+\texttt{sidm\_scatter.f90} & New module: OpenMP Monte Carlo scattering \\
+\texttt{amr\_parameters.jaehyun.f90} & Declare \texttt{sidm}, \texttt{sidm\_cross\_section}, \texttt{sidm\_npart\_min} \\
+\texttt{read\_params.jaehyun.f90} & Read \texttt{\&SIDM\_PARAMS} namelist; validation \\
+\texttt{amr\_step.jaehyun.f90} & Call \texttt{sidm\_scatter} after \texttt{synchro\_fine} \\
+\texttt{Makefile} & Add \texttt{sidm\_scatter.o} to \texttt{SIDM\_OBJ} \\
 \bottomrule
 \end{longtable}
 
@@ -2481,6 +2545,11 @@ Runtime control parameters.
 \multicolumn{4}{l}{\textit{Neutrino linear response (new)}} \\
 \midrule
 \texttt{use\_neutrino} & logical & \texttt{.false.} & Enable massive neutrino correction in Poisson solver (Ch.~\ref{ch:neutrino}) \\
+\midrule
+\multicolumn{4}{l}{\textit{Non-standard models (new)}} \\
+\midrule
+\texttt{de\_perturb} & logical & \texttt{.false.} & Enable DE density perturbation (Ch.~\ref{ch:cpl}) \\
+\texttt{sidm} & logical & \texttt{.false.} & Enable SIDM Monte Carlo scattering (Ch.~\ref{ch:sidm}) \\
 \midrule
 \multicolumn{4}{l}{\textit{Exchange method auto-tuning (new)}} \\
 \midrule
@@ -2676,9 +2745,6 @@ Subgrid physics parameters (star formation, feedback, cooling).
 \texttt{omega\_m} & real(dp) & 1.0 & Matter density $\Omega_m$ \\
 \texttt{omega\_l} & real(dp) & 0.0 & Dark energy $\Omega_\Lambda$ \\
 \texttt{h0} & real(dp) & 1.0 & Hubble constant $H_0$ (km/s/Mpc) \\
-\texttt{w0} & real(dp) & $-1$ & CPL DE equation of state $w_0$ (see Ch.~\ref{ch:cpl}) \\
-\texttt{wa} & real(dp) & 0 & CPL DE time variation $w_a$ \\
-\texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (see Sec.~\ref{sec:de_perturb}) \\
 \midrule
 \multicolumn{4}{l}{\textit{Feedback}} \\
 \midrule
@@ -2694,10 +2760,11 @@ Subgrid physics parameters (star formation, feedback, cooling).
 \label{ch:cosmo_params_nml}
 %======================================================
 
-Optional block for CPL dark energy equation-of-state parameters and
-cosmological parameter overrides.  When absent, defaults recover
-$\Lambda$CDM.  See Chapter~\ref{ch:cpl} for the full mathematical
-description.
+Optional block for cosmological parameter overrides.  When absent,
+values are read from the IC header.  CPL dark energy parameters have
+moved to \texttt{\&CPL\_PARAMS} (Ch.~\ref{ch:cpl_params_nml}), neutrino
+parameters to \texttt{\&NEUTRINO\_PARAMS} (Ch.~\ref{ch:neutrino_params_nml}),
+and SIDM parameters to \texttt{\&SIDM\_PARAMS} (Ch.~\ref{ch:sidm_params_nml}).
 
 \begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
 \toprule
@@ -2708,22 +2775,35 @@ description.
 \texttt{omega\_m} & real(dp) & 1.0 & Matter density $\Omega_m$ \\
 \texttt{omega\_l} & real(dp) & 0.0 & Dark energy density $\Omega_{\mathrm{de}}$ \\
 \texttt{h0} & real(dp) & 1.0 & Hubble constant $H_0$ (km/s/Mpc) \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item The cosmological parameters (\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, \texttt{h0}) in this block override values read from the IC header.
+  \item Omitting the block entirely is safe; the code will use IC header values.
+\end{itemize}
+
+
+%======================================================
+\chapter{CPL\_PARAMS}
+\label{ch:cpl_params_nml}
+%======================================================
+
+CPL dark energy equation-of-state parameters.  When absent (or when
+$w_0 = -1$, $w_a = 0$), the code recovers $\Lambda$CDM.
+See Chapter~\ref{ch:cpl} for the full mathematical description.
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
 \midrule
-\multicolumn{4}{l}{\textit{CPL dark energy (new)}} \\
-\midrule
+\endhead
 \texttt{w0} & real(dp) & $-1$ & Present-day DE EoS: $w(a) = w_0 + w_a(1-a)$ \\
 \texttt{wa} & real(dp) & 0 & Time variation of DE EoS \\
 \texttt{cs2\_de} & real(dp) & 0 & DE sound speed squared $c_s^2$ (for DE perturbation) \\
-\midrule
-\multicolumn{4}{l}{\textit{Dark energy perturbation (new)}} \\
-\midrule
-\texttt{de\_perturb} & logical & \texttt{.false.} & Enable DE density perturbation in Poisson solver (Sec.~\ref{sec:de_perturb}) \\
 \texttt{de\_table} & char(256) & \texttt{''} & Path to CAMB DE transfer function table ($R_{\mathrm{DE}}(k,a)$) \\
-\midrule
-\multicolumn{4}{l}{\textit{Massive neutrino (new)}} \\
-\midrule
-\texttt{omega\_nu} & real(dp) & 0 & Neutrino density $\Omega_\nu$ ($\Omega_m$ includes $\Omega_\nu$) \\
-\texttt{neutrino\_table} & char(256) & \texttt{''} & Path to CAMB transfer function table \\
 \bottomrule
 \end{longtable}
 
@@ -2732,12 +2812,58 @@ description.
 \begin{itemize}[nosep]
   \item $w_0$, $w_a$ are not stored in the GRAFIC2 IC header (fixed 44-byte layout).  They must be specified here when using CPL dark energy.
   \item Setting $w_0=-1$, $w_a=0$ (or omitting the block) produces results \textbf{bit-identical} to the original $\Lambda$CDM code.
-  \item The cosmological parameters (\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, \texttt{h0}) in this block override values read from the IC header.
-  \item \texttt{omega\_nu}: $\Omega_\nu = \Sigma m_\nu / (93.14\,h^2\;\text{eV})$.  For the minimal mass ($\Sigma m_\nu = 0.06\,$eV, $h=0.6774$): $\Omega_\nu \approx 0.00140$.
-  \item \texttt{de\_perturb}: with \texttt{de\_table} $\to$ table-based (any $c_s^2$); without $\to$ requires $c_s^2 > 0$.
+  \item \texttt{de\_perturb} (activation flag) is in \texttt{\&RUN\_PARAMS}.
   \item \texttt{de\_table}: generate with \texttt{python3 misc/generate\_de\_table.py --w0=... --wa=... --cs2=...}.
+\end{itemize}
+
+
+%======================================================
+\chapter{NEUTRINO\_PARAMS}
+\label{ch:neutrino_params_nml}
+%======================================================
+
+Massive neutrino linear response parameters.
+See Chapter~\ref{ch:neutrino} for the implementation details.
+
+\begin{longtable}{L{3.5cm} C{1.8cm} C{1.8cm} L{6cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{omega\_nu} & real(dp) & 0 & Neutrino density $\Omega_\nu$ ($\Omega_m$ includes $\Omega_\nu$) \\
+\texttt{neutrino\_table} & char(256) & \texttt{''} & Path to CAMB transfer function table \\
+\bottomrule
+\end{longtable}
+
+\noindent
+\textbf{Notes:}
+\begin{itemize}[nosep]
+  \item \texttt{use\_neutrino} (activation flag) is in \texttt{\&RUN\_PARAMS}.
+  \item \texttt{omega\_nu}: $\Omega_\nu = \Sigma m_\nu / (93.14\,h^2\;\text{eV})$.  For the minimal mass ($\Sigma m_\nu = 0.06\,$eV, $h=0.6774$): $\Omega_\nu \approx 0.00140$.
   \item \texttt{neutrino\_table}: generate with \texttt{python3 misc/generate\_neutrino\_table.py}.
 \end{itemize}
+
+
+%======================================================
+\chapter{SIDM\_PARAMS}
+\label{ch:sidm_params_nml}
+%======================================================
+
+SIDM Monte Carlo scattering parameters.  Cell-based random pairing with
+isotropic elastic scattering.  The scattering probability per pair is
+$P = (\sigma/m)\,m_p\,v_{\mathrm{rel}}\,\Delta t / V_{\mathrm{cell}} \times (N-1)$.
+Requires \texttt{sidm=.true.}\ in \texttt{\&RUN\_PARAMS} and \texttt{pic=.true.}.
+See Chapter~\ref{ch:sidm} for the algorithm description.
+
+\begin{longtable}{L{3.8cm} C{1.8cm} C{1.8cm} L{5.7cm}}
+\toprule
+\textbf{Parameter} & \textbf{Type} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\endhead
+\texttt{sidm\_cross\_section} & real(dp) & 1.0 & Cross-section per unit mass $\sigma/m$ (cm$^2$/g) \\
+\texttt{sidm\_npart\_min} & integer & 2 & Minimum DM particles per cell for scattering \\
+\bottomrule
+\end{longtable}
 
 
 %======================================================

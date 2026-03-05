@@ -671,8 +671,9 @@ by the Friedmann equation (where $\Omega_m$ includes neutrinos).
 
 \textbf{Requires:}
 \begin{itemize}[nosep]
-  \item \paramref{omega_nu} $> 0$ in \texttt{\&COSMO\_PARAMS}
+  \item \paramref{omega_nu} $> 0$ in \texttt{\&NEUTRINO\_PARAMS}
   \item \paramref{neutrino_table} pointing to a valid CAMB table file
+        in \texttt{\&NEUTRINO\_PARAMS}
 \end{itemize}
 
 If either is missing, the code prints a warning and disables neutrinos.
@@ -682,6 +683,59 @@ If either is missing, the code prints a warning and disables neutrinos.
 200~$k$-point $\times$ 50~$a$-point table using CAMB (default:
 $\Sigma m_\nu = 0.06\,$eV).  When $\Omega_\nu = 0$, the code produces
 bit-identical results to a run without this flag.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{de\_perturb}{logical}{.false.}
+\label{param:de_perturb}
+
+\begin{quote}
+Enable dark energy density perturbations in the Poisson solver.
+When \texttt{.true.}, the gravitational potential receives a
+scale-dependent correction from dark energy perturbations, computed
+via the CAMB transfer function ratio or the quasi-static
+$\kappa^2/\alpha$ method.
+
+Three modes of operation:
+\begin{enumerate}[nosep]
+  \item \paramref{de_table} provided $\to$ \textbf{table-based linear
+    response} (works for any \paramref{cs2_de}, including~0).
+  \item No \paramref{de_table}, \paramref{cs2_de}~$> 0$ $\to$
+    \textbf{quasi-static $\kappa^2/\alpha$ method}.
+  \item No \paramref{de_table}, \paramref{cs2_de}~$\leq 0$ $\to$
+    unsupported; the code disables this flag with a warning.
+\end{enumerate}
+
+\textbf{Requires:}
+\begin{itemize}[nosep]
+  \item \paramref{cosmo}\texttt{=.true.}
+  \item Either \paramref{de_table} or \paramref{cs2_de}~$> 0$
+        in \texttt{\&CPL\_PARAMS}
+  \item FFT solver active (\paramref{use_fftw} or \paramref{gpu_fft})
+\end{itemize}
+
+\apinote{Can be combined with \paramref{use_neutrino} --- both
+corrections are applied multiplicatively in Fourier space.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm}{logical}{.false.}
+\label{param:sidm}
+
+\begin{quote}
+Enable self-interacting dark matter (SIDM) Monte Carlo scattering.
+When \texttt{.true.}, pairs of dark matter particles within the same
+AMR cell undergo probabilistic elastic scattering with cross-section
+$\sigma/m$ set by \paramref{sidm_cross_section} in
+\texttt{\&SIDM\_PARAMS}.
+
+\textbf{Requires} \paramref{pic}\texttt{=.true.}\ (particles must be
+active).
+
+\apinote{Scattering is computed cell-by-cell on AMR leaf cells.
+Cells with fewer than \paramref{sidm_npart_min} dark matter particles
+are skipped.  See Section~\ref{sec:sidm_params} for the full set of
+SIDM parameters.}
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -1815,9 +1869,15 @@ centre and radius of the sphere.
 %======================================================================
 
 Optional block for overriding cosmological parameters read from the
-IC file header and for specifying CPL dark energy equation-of-state
-parameters.  When this block is absent, default values are used
-($w_0=-1$, $w_a=0$, which recovers the standard $\Lambda$CDM model).
+IC file header.  Contains the four fundamental cosmological parameters:
+\texttt{omega\_b}, \texttt{omega\_m}, \texttt{omega\_l}, and
+\texttt{h0}.  These override the values stored in the GRAFIC2 IC
+header.
+
+Dark energy equation-of-state parameters ($w_0$, $w_a$, etc.)\ have
+been moved to \texttt{\&CPL\_PARAMS}
+(Section~\ref{sec:cpl_params}).  Neutrino parameters have been moved
+to \texttt{\&NEUTRINO\_PARAMS} (Section~\ref{sec:neutrino_params}).
 
 % ------------------------------------------------------------------
 \paramheader{omega\_b}{real(dp)}{0.0}
@@ -1856,13 +1916,25 @@ Hubble constant $H_0$ in km\,s$^{-1}$\,Mpc$^{-1}$.  Read from the
 IC header by default; this namelist entry overrides it.
 \end{quote}
 
+
+
+%======================================================================
+\section{\texttt{\&CPL\_PARAMS} -- CPL Dark Energy}
+\label{sec:cpl_params}
+%======================================================================
+
+Parameters for the CPL (Chevallier--Polarski--Linder) dark energy
+equation of state.  When this block is absent, default values are used
+($w_0=-1$, $w_a=0$, $c_s^2=0$), which recovers the standard
+$\Lambda$CDM model with \textbf{bit-identical} results.
+
 % ------------------------------------------------------------------
 \paramheader{w0}{real(dp)}{$-1$}
 \label{param:w0}
 
 \begin{quote}
 Present-day dark energy equation-of-state parameter $w_0$ in the CPL
-(Chevallier--Polarski--Linder) parametrization:
+parametrization:
 \[
   w(a) = w_0 + w_a\,(1 - a)
 \]
@@ -1902,9 +1974,10 @@ observational constraints give $w_a \in [-1, 1]$.
 
 \begin{quote}
 Dark energy sound speed squared $c_s^2$ (in units of $c^2$).  Used
-in conjunction with \paramref{de_perturb}\texttt{=.true.}\ to include
-dark energy perturbations in the FFT Poisson solver.  Set to~0 for the
-standard smooth dark energy (cosmological constant) assumption.
+in conjunction with \paramref{de_perturb}\texttt{=.true.}\ (set in
+\texttt{\&RUN\_PARAMS}) to include dark energy perturbations in the
+FFT Poisson solver.  Set to~0 for the standard smooth dark energy
+(cosmological constant) assumption.
 
 \textbf{Two DE perturbation modes} are available depending on whether
 \paramref{de_table} is provided:
@@ -1936,34 +2009,6 @@ MG V-cycle on AMR levels.}
 \end{quote}
 
 % ------------------------------------------------------------------
-\paramheader{de\_perturb}{logical}{.false.}
-\label{param:de_perturb}
-
-\begin{quote}
-Enable dark energy density perturbations in the Poisson solver.
-Three modes of operation:
-
-\begin{enumerate}[nosep]
-  \item \paramref{de_table} provided $\to$ \textbf{table-based linear
-    response} (works for any \paramref{cs2_de}, including~0).
-  \item No \paramref{de_table}, \paramref{cs2_de}~$> 0$ $\to$
-    \textbf{quasi-static $\kappa^2/\alpha$ method}.
-  \item No \paramref{de_table}, \paramref{cs2_de}~$\leq 0$ $\to$
-    unsupported; the code disables this flag with a warning.
-\end{enumerate}
-
-\textbf{Requires:}
-\begin{itemize}[nosep]
-  \item \paramref{cosmo}\texttt{=.true.}
-  \item Either \paramref{de_table} or \paramref{cs2_de}~$> 0$
-  \item FFT solver active (\paramref{use_fftw} or \paramref{gpu_fft})
-\end{itemize}
-
-\apinote{Can be combined with \paramref{use_neutrino} --- both
-corrections are applied multiplicatively in Fourier space.}
-\end{quote}
-
-% ------------------------------------------------------------------
 \paramheader{de\_table}{character(256)}{'' (empty)}
 \label{param:de_table}
 
@@ -1987,10 +2032,21 @@ $\times$ 50~$a$-points (same as the neutrino table).
 For $c_s^2 = 0$ (clustering DE), $R_{\mathrm{DE}}$ is independent of
 $k$ at each $a$ --- this is a useful verification check.
 
-\textbf{Requires} \paramref{de_perturb}\texttt{=.true.}.
+\textbf{Requires} \paramref{de_perturb}\texttt{=.true.}\ (set in
+\texttt{\&RUN\_PARAMS}).
 When this parameter is empty, the code falls back to the quasi-static
 $\kappa^2/\alpha$ method (which requires \paramref{cs2_de}~$> 0$).
 \end{quote}
+
+
+%======================================================================
+\section{\texttt{\&NEUTRINO\_PARAMS} -- Massive Neutrino}
+\label{sec:neutrino_params}
+%======================================================================
+
+Parameters for the massive neutrino linear response correction in the
+Poisson solver.  Requires \paramref{use_neutrino}\texttt{=.true.}\ in
+\texttt{\&RUN\_PARAMS}.
 
 % ------------------------------------------------------------------
 \paramheader{omega\_nu}{real(dp)}{0}
@@ -2047,6 +2103,56 @@ neutrino mass sum (default $0.06\,$eV) and outputs a table with
 
 \textbf{Requires} \paramref{use_neutrino}\texttt{=.true.}\ and
 \paramref{omega_nu}~$> 0$.
+\end{quote}
+
+
+%======================================================================
+\section{\texttt{\&SIDM\_PARAMS} -- Self-Interacting Dark Matter}
+\label{sec:sidm_params}
+%======================================================================
+
+Parameters for self-interacting dark matter (SIDM) Monte Carlo
+scattering.  Requires \paramref{sidm}\texttt{=.true.}\ and
+\paramref{pic}\texttt{=.true.}\ in \texttt{\&RUN\_PARAMS}.
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_cross\_section}{real(dp)}{1.0}
+\label{param:sidm_cross_section}
+
+\begin{quote}
+DM self-interaction cross-section per unit mass $\sigma/m$ in
+cm$^2$\,g$^{-1}$.  Controls the scattering probability for each
+particle pair within a cell:
+\[
+  P = \frac{\sigma}{m} \times m_p \times v_{\mathrm{rel}} \times
+  \frac{\Delta t}{V_{\mathrm{cell}}} \times (N - 1)
+\]
+where $m_p$ is the DM particle mass, $v_{\mathrm{rel}}$ is the
+relative velocity of the pair, $\Delta t$ is the time step,
+$V_{\mathrm{cell}}$ is the cell volume, and $N$ is the number of DM
+particles in the cell.
+
+Typical observational constraints allow $\sigma/m \sim 0.1$--$10\;
+\mathrm{cm}^2\,\mathrm{g}^{-1}$, with values $\gtrsim 1$ producing
+significant core formation in dwarf galaxy haloes.
+
+\apinote{Upon scattering, the two particles' velocities are isotropically
+randomised in their centre-of-mass frame, conserving total momentum
+and kinetic energy (elastic scattering).}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sidm\_npart\_min}{integer}{2}
+\label{param:sidm_npart_min}
+
+\begin{quote}
+Minimum number of DM particles per cell required for scattering.
+Cells with fewer than \texttt{sidm\_npart\_min} dark matter particles
+are skipped entirely.  The default value of~2 is the physical minimum
+(a pair is needed for scattering).
+
+Increasing this value can reduce noise in poorly sampled regions at the
+cost of suppressing scattering in low-density cells.
 \end{quote}
 
 
@@ -2141,6 +2247,13 @@ sink_AGN       = .true.
 bondi          = .true.
 Mseed          = 1.0e5
 /
+
+! --- Optional: Self-Interacting Dark Matter ---
+! &SIDM_PARAMS
+! sidm_cross_section = 1.0   ! sigma/m in cm^2/g
+! sidm_npart_min     = 2
+! /
+! (also set sidm = .true. in &RUN_PARAMS)
 \end{lstlisting}
 
 
@@ -2227,11 +2340,11 @@ should be set consistently.
 \addlinespace
 \texttt{use\_neutrino}
   & \texttt{omega\_nu}, \texttt{neutrino\_table}
-  & All three must be set for neutrino response \\
+  & All three must be set; \texttt{omega\_nu} and \texttt{neutrino\_table} are in \texttt{\&NEUTRINO\_PARAMS} \\
 \addlinespace
 \texttt{de\_perturb}
   & \texttt{cs2\_de}, \texttt{de\_table}, \texttt{w0}, \texttt{wa}
-  & DE perturbation: table-based (any $c_s^2$) or quasi-static ($c_s^2 > 0$) \\
+  & DE perturbation (in \texttt{\&RUN\_PARAMS}); DE parameters in \texttt{\&CPL\_PARAMS} \\
 \addlinespace
 \texttt{exchange\_method}
   & \texttt{ordering}
@@ -2240,6 +2353,10 @@ should be set consistently.
 \texttt{memory\_balance}
   & \texttt{mem\_weight\_sink}
   & Sink cost weight for load balancing \\
+\addlinespace
+\texttt{sidm}
+  & \texttt{sidm\_cross\_section}, \texttt{sidm\_npart\_min}
+  & SIDM requires \texttt{pic=.true.}; parameters in \texttt{\&SIDM\_PARAMS} \\
 \end{longtable}
 
 

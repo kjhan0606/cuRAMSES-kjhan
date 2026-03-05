@@ -284,6 +284,11 @@ module amr_parameters
   logical ::selfgrav=.true.
   logical ::mad_jet=.false.
 
+  ! SIDM (Self-Interacting Dark Matter) parameters
+  logical ::sidm=.false.            ! Enable SIDM Monte Carlo scattering
+  real(dp)::sidm_cross_section=1.0d0 ! sigma/m [cm^2/g]
+  integer ::sidm_npart_min=2         ! Minimum DM particles per cell for scattering
+
 
 
 !chemo flags and variables

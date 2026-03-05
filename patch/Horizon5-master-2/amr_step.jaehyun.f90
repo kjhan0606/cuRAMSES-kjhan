@@ -509,6 +509,10 @@ recursive subroutine amr_step(ilevel,icount)
         call synchro_fine(ilevel)
         call system_clock(pt_t2)
         pt_synchro = pt_synchro + dble(pt_t2-pt_t1)/dble(pt_rate)
+
+        ! SIDM scattering (after velocity sync, before timestep)
+        if(sidm) call sidm_scatter(ilevel)
+
      end if
 !############################################################
 !       call getmem(real_mem)

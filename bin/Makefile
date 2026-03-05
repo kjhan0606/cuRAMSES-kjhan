@@ -115,6 +115,9 @@ MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o p
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
 	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 
+# SIDM object (depends on amr_commons, pm_commons, random)
+SIDM_OBJ = sidm_scatter.o
+
 AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loop.jaehyun.o amr_step.jaehyun.o update_time.o \
          output_amr.kjhan.o flag_utils.kjhan.o physical_boundaries.kjhan.o virtual_boundaries.kjhan.o refine_utils.o nbors_utils.kjhan.o \
          hilbert.o load_balance.kjhan.o title.o sort.o cooling_fine.kjhan.o units.o light_cone.part.o light_cone.hydro2.o light_cone.sink2.o movie_mod.yonghwi_org.o kjhan.o\
@@ -135,7 +138,7 @@ HYDROOBJ = init_hydro.o init_flow_fine.o write_screen.o output_hydro.o courant_f
            uplmde.kjhan.o umuscl.kjhan.o interpol_hydro.kjhan.o godunov_utils.kjhan.o condinit.o hydro_flag.kjhan.o hydro_boundary.o \
            boundana.o read_hydro_params.o synchro_hydro_fine.kjhan.o
 # All objects
-AMRLIB = $(AMROBJ) $(HYDROOBJ) $(PMOBJ) $(POISSONOBJ)
+AMRLIB = $(AMROBJ) $(HYDROOBJ) $(PMOBJ) $(POISSONOBJ) $(SIDM_OBJ)
 # ATON objects
 ATON_MODOBJ = timing.o radiation_commons.o rad_step.o
 ATON_OBJ = observe.o init_radiation.o rad_init.o rad_boundary.o rad_stars.o rad_backup.o ../aton/atonlib/libaton.a
