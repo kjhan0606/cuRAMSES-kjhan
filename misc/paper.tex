@@ -797,59 +797,107 @@ breakdowns, is provided in Appendix~\ref{app:memory}.
 
 
 % ===================================================================
-% 5. MULTIGRID SOLVER OPTIMIZATIONS
+% 5. POISSON SOLVER OPTIMIZATIONS
 % ===================================================================
-\section{MULTIGRID POISSON SOLVER OPTIMIZATIONS}
+\section{POISSON SOLVER OPTIMIZATIONS}
 \label{sec:multigrid}
 
-The multigrid (MG) Poisson solver \citep{Briggs2000,Trottenberg2001} consumes a large fraction of the
-total runtime in self-gravitating cosmological simulations. In
-baseline \ramses, profiling reveals that the MG solver accounts for
-approximately 55\,per\,cent of the total wall-clock time per coarse
-step. We describe several optimizations that reduce this fraction to
-approximately 39\,per\,cent.
+Solving the Poisson equation $\nabla^2\phi = 4\pi G\rho$ for
+self-gravity is one of the most expensive operations in cosmological
+AMR simulations.  In baseline \ramses, profiling reveals that the
+Poisson solver accounts for approximately 55\,per\,cent of the total
+wall-clock time per coarse step.  We describe two complementary
+strategies: optimizing the iterative multigrid solver that operates on
+all AMR levels (Section~\ref{sec:mg_method}), and replacing it with a
+direct FFT solve on the uniform base level
+(Section~\ref{sec:fftw3}).  Together these reduce the Poisson
+fraction to approximately 39\,per\,cent.
 
+\subsection{Multi-Grid Method}
+\label{sec:mg_method}
 
-\subsection{V-Cycle Algorithm}
+The multigrid (MG) method
+\citep{Brandt1977,Briggs2000,Trottenberg2001} solves elliptic partial
+differential equations by exploiting the complementary strengths of
+fine and coarse grids: a local iterative smoother efficiently damps
+high-frequency error components on the fine grid, while the remaining
+low-frequency errors, which converge slowly on the fine grid, are
+projected onto progressively coarser grids where they appear as
+high-frequency modes and can again be damped cheaply.  This recursive
+strategy yields an $O(N)$ solver, in contrast to the $O(N^2)$ scaling
+of single-grid relaxation methods.
+
+\ramses\ employs the standard V-cycle variant, in which the hierarchy
+of grids is traversed once downward (restriction) and once upward
+(prolongation).  At each AMR level the smoother is a \emph{red-black
+Gauss--Seidel} (RBGS) iteration
+\citep{Wesseling1992,Trottenberg2001}: the grid cells are partitioned
+into two disjoint subsets (``red'' and ``black'') that form a
+chequerboard pattern, and each subset is updated in turn using the
+latest values from the other.  This two-colour ordering satisfies a
+diagonal dominance condition that guarantees convergence for the
+discrete Laplacian, and the decoupled updates within each colour are
+trivially parallelisable \citep{Adams2001}.
+
+\subsubsection{V-Cycle Algorithm and Exchange Optimization}
 \label{sec:mg_vcycle}
 
-The standard multigrid V-cycle solves the Poisson equation by
-recursively transferring residuals between AMR levels.  Starting at
-the finest level, the algorithm \emph{smooths} the current
-approximation using a red-black Gauss--Seidel (GS) iteration,
-computes the residual, and \emph{restricts} it to the next coarser
-level.  This restriction--smooth sequence descends to the coarsest
-level, where a direct solve (or additional smoothing) is applied.
-The correction is then \emph{prolongated} (interpolated) back up
-through each level, with post-smoothing at each step to damp
-high-frequency errors introduced by the interpolation.
-Figure~\ref{fig:mg_vcycle} illustrates the V-cycle structure and
-the exchange optimizations at each level.
+Starting at the finest AMR level, the algorithm applies RBGS
+pre-smoothing, computes the residual $r = f - A\phi$, and
+\emph{restricts} the residual to the next coarser level.  This
+restriction--smooth sequence descends to the coarsest level, where a
+direct solve (or additional smoothing) is applied.  The correction is
+then \emph{prolongated} (interpolated) back up through each level,
+with post-smoothing at each step to damp high-frequency errors
+introduced by the interpolation.  Figure~\ref{fig:mg_vcycle}
+illustrates the V-cycle structure and the exchange positions.
 
-Each smoothing step requires ghost-zone exchanges between MPI ranks.
-We apply several targeted optimizations to the smoother and
-communication pattern.  Neighbour grid indices are precomputed into a
-contiguous cache before the V-cycle, amortising hash table lookups.
-The red and black GS sweeps are merged by removing the
-inter-sweep ghost exchange, and two redundant residual exchanges are
-eliminated, reducing the total exchange count from 9 to 5 per
-iteration (44\,per\,cent).  Implementation details are given in
+In a distributed-memory implementation each smoothing step requires
+ghost-zone exchanges between MPI ranks to update boundary values.
+In the original code, every red sweep, black sweep, residual
+computation, and norm reduction each triggers a separate exchange,
+totalling 9~communications per smoothing cycle per level (4 for
+pre-smoothing, 4 for post-smoothing, plus 1 for prolongation).
+
+We apply several targeted optimizations:
+\begin{enumerate}
+\item \textbf{Precomputed neighbour cache.}  Neighbour grid indices
+  are precomputed into a contiguous array before the V-cycle,
+  amortising the cost of hash table lookups over all iterations
+  (see Appendix~\ref{app:mg_details}).
+\item \textbf{Merged red-black sweep.}  The inter-sweep ghost
+  exchange between the red and black passes is removed: both colours
+  are updated using locally available data, relying on the fact that
+  the one-step-stale boundary values introduce only an $O(h^2)$
+  perturbation that is corrected by subsequent iterations.
+\item \textbf{Fused residual and norm.}  The residual $r$ and its
+  $L^2$ norm $\|r\|_2^2$ are computed in a single pass, eliminating
+  a redundant exchange.
+\end{enumerate}
+These reduce the exchange count from 9 to 5 per iteration
+($-44$\,per\,cent), as shown in the lower panel of
+Figure~\ref{fig:mg_vcycle}.  Implementation details are given in
 Appendix~\ref{app:mg_details}.
 
 \begin{figure}
 \centering
 \includegraphics[width=\columnwidth]{fig_mg_vcycle.pdf}
 \caption{Schematic of the multigrid V-cycle for four AMR levels.
-  The left (descending) leg restricts the residual from fine to
-  coarse; the right (ascending) leg prolongates the correction.  At
-  each level, red-black Gauss--Seidel smoothing is applied.  The
-  optimized exchange reduces the number of ghost-zone communications
-  from 9 to 5 per iteration by merging the red and black sweeps and
-  eliminating redundant residual exchanges.}
+  \emph{Upper:} The left (descending) leg restricts the residual from
+  fine to coarse; the right (ascending) leg prolongates the
+  correction.  Orange diamonds on the prolongation arrows mark
+  ghost-zone exchanges.
+  \emph{Lower:} Exchange positions within one smoothing step.
+  The original code requires 4~exchanges (after red, after black,
+  residual, norm); the optimized code merges the red-black sweep and
+  fuses the residual and norm computation, reducing the count to~2.
+  With two smoothing steps (pre + post) plus one prolongation
+  exchange, the total decreases from~9 to~5 per level per iteration
+  ($-44$\,per\,cent).}
 \label{fig:mg_vcycle}
 \end{figure}
 
-\subsection{Performance Impact}
+\subsubsection{Performance Impact}
 \label{sec:mg_performance}
 
 Combining all optimizations, the MG Poisson solver's share of total
@@ -2195,6 +2243,11 @@ author.
 
 \begin{thebibliography}{99}
 
+\bibitem[\protect\citeauthoryear{Adams}{Adams}{2001}]{Adams2001}
+Adams M.~F., 2001, in Proc.\ SC01. ACM, Denver, doi:10.1145/582034.582076
+
+\bibitem[\protect\citeauthoryear{Brandt}{Brandt}{1977}]{Brandt1977}
+Brandt A., 1977, Mathematics of Computation, 31, 333
 
 \bibitem[\protect\citeauthoryear{Briggs, Henson \& McCormick}{Briggs et al.}{2000}]{Briggs2000}
 Briggs W.~L., Henson V.~E., McCormick S.~F., 2000, A Multigrid Tutorial, 2nd edn. SIAM, Philadelphia
@@ -2305,6 +2358,9 @@ Trottenberg U., Oosterlee C.~W., Sch\"uller A., 2001, Multigrid. Academic Press
 
 \bibitem[\protect\citeauthoryear{Tremmel et al.}{Tremmel et al.}{2017}]{Tremmel2017}
 Tremmel M., Karcher M., Governato F., Volonteri M., Quinn T.~R., Pontzen A., Anderson L., Bellovary J., 2017, MNRAS, 470, 1121
+
+\bibitem[\protect\citeauthoryear{Wesseling}{Wesseling}{1992}]{Wesseling1992}
+Wesseling P., 1992, An Introduction to Multigrid Methods. Wiley, Chichester
 
 \bibitem[\protect\citeauthoryear{Vogelsberger et al.}{Vogelsberger et al.}{2014}]{Vogelsberger2014}
 Vogelsberger M., et al., 2014, MNRAS, 444, 1518
