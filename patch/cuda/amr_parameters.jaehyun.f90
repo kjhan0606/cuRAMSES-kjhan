@@ -390,6 +390,7 @@ module amr_parameters
   real(dp),dimension(1:MAXLEVEL)::m_basic_refine=-1 ! Lagrangian threshold default ! (ONS)  
   real(dp)::m_refine_effective = 10000 ! (ONS)
   logical::q_refine_holdback=.true. !(ONS) ! default to the original form
+  logical::jeans_bypass_holdback=.false. ! If .true., Jeans refine ignores holdback
   real(dp)::ref_fall_rate = 60.
 
   ! Initial condition files for each level

@@ -446,10 +446,16 @@ subroutine userflag_fine(ilevel)
   use cooling_module
   implicit none
   integer::ilevel
-  ! -------------------------------------------------------------------
-  ! This routine flag for refinement cells that satisfies
-  ! some user-defined physical criteria at the level ilevel. 
-  ! -------------------------------------------------------------------
+  ! ================================================================
+  ! AMR Refinement Logic (current, jeans_bypass_holdback=.false.):
+  !   R = NOT(holdback) AND geometry
+  !       AND (m_refine OR sink OR grad_d OR grad_p OR grad_u OR jeans)
+  !
+  ! Proposed (jeans_bypass_holdback=.true., future):
+  !   R' = [NOT(holdback) AND geometry
+  !         AND (m_refine OR sink OR grad_d OR grad_p OR grad_u)]
+  !        OR [geometry AND jeans]
+  ! ================================================================
   integer::i,j,ncache,nok,ix,iy,iz,iskip,iflag,jflag
   integer::igrid,ind,idim,ngrid,ivar
   integer::nx_loc
