@@ -1,0 +1,665 @@
+% Jeans-Independent Holdback Bypass for AMR Refinement
+% Technical note — cuRAMSES / Horizon-5
+%
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{natbib}
+
+\lstset{
+  language=[90]Fortran,
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{blue},
+  commentstyle=\color{gray},
+  frame=single,
+  breaklines=true
+}
+
+\newcommand{\lJ}{\lambda_{\rm J}}
+\newcommand{\nstar}{n_\star}
+\newcommand{\Tstar}{T_{2,\star}}
+\newcommand{\gstar}{g_\star}
+\newcommand{\dx}{\Delta x}
+\newcommand{\ramses}{\textsc{ramses}}
+\newcommand{\curamses}{\textsc{cuRAMSES}}
+\newcommand{\nlevelmax}{N_{\rm levelmax}}
+\newcommand{\twotondim}{2^{N_{\rm dim}}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\title{Jeans-Independent Holdback Bypass\\for AMR Refinement in Cosmological Simulations}
+\author{Juhan Kim (KIAS)}
+\date{March 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Cosmological AMR simulations employ a \emph{holdback} mechanism that
+progressively releases refinement levels as the universe expands,
+preventing premature over-refinement at high redshift.  However, this
+mechanism blocks \emph{all} refinement criteria simultaneously, including
+the Jeans length criterion, which is a numerical stability requirement
+rather than merely a resolution preference.  When a holdback level is
+finally released, a large number of cells suddenly satisfy the
+refinement condition, triggering an abrupt starburst.  We implement a
+\code{jeans\_bypass\_holdback} option that allows the Jeans criterion to
+operate independently of the holdback, with a configurable level limit
+(\code{n\_jeans\_bypass\_levels}) to prevent uncontrolled refinement
+cascades.  We discuss the interplay between the Jeans criterion, the
+polytropic equation of state, and the density threshold
+\code{d\_jeans\_thre}, showing that the polytropic temperature floor
+provides a natural self-regulation mechanism for the bypass.
+\end{abstract}
+
+%======================================================================
+\section{AMR Refinement in \ramses}
+\label{sec:amr_refine}
+%======================================================================
+
+In \ramses, each cell at level $\ell < \nlevelmax$ is tested for
+refinement at every coarse time-step.  The decision to subdivide a
+cell into $\twotondim$ children is governed by a combination of
+physical, geometric, and cosmological criteria.
+
+\subsection{Refinement logic}
+\label{sec:refine_logic}
+
+The overall refinement flag for a cell is determined by the following
+Boolean expression:
+\begin{equation}
+\mathcal{R} = \lnot\,\mathcal{H}
+  \;\land\; \mathcal{G}
+  \;\land\; \bigl(
+    \mathcal{M} \lor \mathcal{S} \lor \mathcal{D} \lor \mathcal{P}
+    \lor \mathcal{U} \lor \mathcal{J}
+  \bigr),
+\label{eq:refine_flag}
+\end{equation}
+where each symbol is defined below.
+
+\subsubsection{Physical criteria (OR)}
+
+\begin{enumerate}
+
+\item \textbf{Quasi-Lagrangian mass criterion ($\mathcal{M}$).}
+  The cell is flagged if its gas density exceeds a
+  level-dependent threshold:
+  \begin{equation}
+    \rho_{\rm cell} \;\ge\; m_{\rm refine}(\ell)
+      \;\frac{m_{\rm sph}}{V_{\rm cell}},
+  \end{equation}
+  where $m_{\rm sph}$ is the effective SPH kernel mass and
+  $V_{\rm cell} = (\dx_\ell)^3$.
+  This criterion ensures that regions containing roughly
+  $m_{\rm refine}$ or more particles per cell are refined,
+  providing a quasi-Lagrangian resolution that tracks gravitational
+  collapse.  Controlled by the namelist array
+  \code{m\_refine(1:nlevelmax)}.
+
+\item \textbf{Sink particle forcing ($\mathcal{S}$).}
+  If \code{sink\_refine=.true.}, any cell containing a sink cloud
+  particle (identified by $\code{idp} < 0$ and $\code{tp} = 0$) is
+  unconditionally flagged up to $\nlevelmax$, guaranteeing maximum
+  resolution around each accretion region.
+
+\item \textbf{Density gradient ($\mathcal{D}$).}
+  The normalised density gradient between a cell and each of its
+  $2N_{\rm dim}$ face-neighbours is computed as
+  \begin{equation}
+    \epsilon_\rho = 2\,\max\!\left(
+      \frac{|\rho_+ - \rho_0|}{|\rho_+ + \rho_0| + \rho_{\rm floor}},\;
+      \frac{|\rho_0 - \rho_-|}{|\rho_0 + \rho_-| + \rho_{\rm floor}}
+    \right).
+  \end{equation}
+  If $\epsilon_\rho > \code{err\_grad\_d}$ along any axis, the cell
+  is flagged.  This captures density discontinuities such as shocks
+  and contact waves.
+
+\item \textbf{Pressure gradient ($\mathcal{P}$).}
+  Analogous to the density gradient but applied to the thermal
+  pressure:
+  \begin{equation}
+    \epsilon_P = 2\,\max\!\left(
+      \frac{|P_+ - P_0|}{|P_+ + P_0| + P_{\rm floor}},\;
+      \frac{|P_0 - P_-|}{|P_0 + P_-| + P_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_P > \code{err\_grad\_p}$.
+
+\item \textbf{Velocity gradient ($\mathcal{U}$).}
+  A normalised velocity jump relative to the local sound speed:
+  \begin{equation}
+    \epsilon_v = 2\,\max\!\left(
+      \frac{|v_+ - v_0|}{c_{s,+} + c_{s,0} + |v_+| + |v_0|
+                          + v_{\rm floor}},\;
+      \frac{|v_0 - v_-|}{c_{s,0} + c_{s,-} + |v_0| + |v_-|
+                          + v_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_v > \code{err\_grad\_u}$ in any component.
+  This criterion targets strong velocity shears and accretion shocks.
+
+\item \textbf{Jeans length ($\mathcal{J}$).}
+  When \code{jeans\_refine($\ell$)} $= N_J > 0$, the cell is flagged if
+  the local Jeans length is shorter than $N_J$ cell widths:
+  \begin{equation}
+    \lJ = \sqrt{\frac{\pi\,c_s^2}{G\,\rho}}
+    < N_J\,\dx_\ell,
+    \label{eq:jeans_crit}
+  \end{equation}
+  implementing the \citet{Truelove1997} condition to prevent artificial
+  fragmentation in self-gravitating gas.
+
+  An additional density threshold \code{d\_jeans\_thre} restricts this
+  criterion to cells with $n_{\rm H} \ge \code{d\_jeans\_thre}$.
+
+\end{enumerate}
+
+\subsubsection{Geometry mask (AND)}
+
+\textbf{Ellipsoidal region ($\mathcal{G}$).}
+When \code{r\_refine($\ell$)} $> -1$, only cells inside a generalised
+ellipsoidal region are permitted to refine.  The test is
+\begin{equation}
+  \left(
+    \frac{2|\Delta x|}{r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta y|}{a\,r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta z|}{b\,r}
+  \right)^{e_r}
+  < 1,
+\end{equation}
+where $r = \code{r\_refine}$ is the region diameter,
+$a = \code{a\_refine}$ and $b = \code{b\_refine}$ are the
+axis ratios, and $e_r = \code{exp\_refine}$ is the norm exponent
+($e_r = 2$ gives an ellipsoid; $e_r \to \infty$ a rectangular box).
+Cells outside this region are \emph{un-flagged} regardless of
+physical criteria, restricting high resolution to a zoom-in target.
+
+\subsubsection{Cosmological holdback (NOT)}
+
+\textbf{Resolution holdback ($\mathcal{H}$).}
+In cosmological runs with cooling (\code{cosmo=.true.},
+\code{cooling=.true.}), an overly eager refinement at high redshift
+can exhaust memory before the epoch of interest.
+When \code{q\_refine\_holdback=.true.} and the physical cell size
+$\dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\nlevelmax}/a_{\rm exp}$
+for levels $\ell > \code{nlevelmax\_part} + 3$, the \emph{entire}
+level is blocked from further refinement:
+\begin{equation}
+  \mathcal{H}(\ell) = \bigl[\ell > \ell_{\rm part} + \ell_{\rm collapse}\bigr]
+  \;\wedge\;
+  \bigl[\dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\rm min}/a\bigr],
+  \label{eq:holdback}
+\end{equation}
+where $\ell_{\rm part}$ is the particle initial-condition level
+(typically $\ell_{\rm min}$) and $\ell_{\rm collapse}=3$.
+This enforces a constant physical resolution at low redshift and a
+constant comoving resolution at high redshift, gradually releasing
+deeper levels as the universe expands.
+
+The first holdback level $\ell_{\rm hb}$ is the smallest $\ell$ satisfying
+Eq.~\eqref{eq:holdback}:
+\begin{equation}
+  \ell_{\rm hb} = \min\bigl\{\ell > \ell_{\rm part}+\ell_{\rm collapse}
+  \;:\; \dx_\ell < 4^{1/N_{\rm dim}}\,\dx_{\rm min}/a\bigr\}.
+  \label{eq:lhb}
+\end{equation}
+
+\subsection{Buffer zones}
+
+After applying equation~(\ref{eq:refine_flag}), flagged cells are
+expanded by \code{nexpand($\ell$)} cell widths in each direction via a
+dilation operator (\code{smooth\_fine}).
+This cubic buffer ensures smooth refinement boundaries, preventing
+the Godunov solver from encountering abrupt level transitions that
+would degrade numerical accuracy.
+
+
+%======================================================================
+\section{The Starburst Problem}
+\label{sec:starburst}
+%======================================================================
+
+The holdback mechanism blocks \emph{all} refinement criteria at levels
+$\ell \ge \ell_{\rm hb}$, including the Jeans criterion.  This creates
+two related problems:
+
+\paragraph{Artificial fragmentation.}
+The Jeans length criterion $\mathcal{J}$ differs fundamentally from
+the other refinement triggers: it is a \emph{numerical stability}
+requirement \citep{Truelove1997}, not merely a resolution preference.
+Violating the Jeans condition leads to artificial fragmentation ---
+a qualitatively wrong result --- regardless of epoch.  Yet in the
+standard \ramses\ logic (equation~\ref{eq:refine_flag}), the
+cosmological holdback $\mathcal{H}$ blocks $\mathcal{J}$ uniformly
+with all other criteria.  At high redshift, dense self-gravitating
+regions may therefore be held at insufficient resolution, producing
+spurious fragmentation that propagates into lower-redshift structure.
+
+\paragraph{Abrupt SFR transition.}
+When the holdback releases level $\ell$ (i.e.\ $\mathcal{H}(\ell)$
+transitions from true to false), all accumulated criteria fire
+simultaneously.  Many cells that have been gravitationally collapsing
+during the holdback period now suddenly satisfy the refinement
+condition, leading to a burst of new cells and an abrupt spike in
+the star formation rate.
+
+
+%======================================================================
+\section{Jeans Bypass: Design and Implementation}
+\label{sec:bypass}
+%======================================================================
+
+\subsection{Modified refinement logic}
+
+The key observation is that the Jeans length criterion is
+\emph{cell-local}: it depends only on the density and temperature of the
+cell itself (\code{uold}), with no neighbor information required.  This
+allows a lightweight evaluation even when the full refinement machinery
+(which requires neighbor gathering for $\mathcal{D}$, $\mathcal{P}$,
+$\mathcal{U}$) is skipped by the holdback.
+
+With \code{jeans\_bypass\_holdback=.true.}, the refinement logic becomes
+\begin{equation}
+\mathcal{R}' = \Bigl[
+  \lnot\,\mathcal{H} \;\land\; \mathcal{G} \;\land\;
+  \bigl(\mathcal{M} \lor \mathcal{S} \lor \mathcal{D}
+        \lor \mathcal{P} \lor \mathcal{U} \lor \mathcal{J}\bigr)
+\Bigr]
+\;\lor\;
+\Bigl[ \mathcal{H} \;\land\; \mathcal{J} \;\land\;
+  (\ell < \ell_{\rm hb} + n_{\rm bypass}) \Bigr],
+\label{eq:refine_bypass}
+\end{equation}
+where $n_{\rm bypass} \equiv$ \code{n\_jeans\_bypass\_levels} (default 1).
+The geometry mask $\mathcal{G}$ still applies through the non-holdback
+branch, preserving zoom-in spatial restrictions.  Only the temporal
+holdback $\mathcal{H}$ is bypassed for $\mathcal{J}$, and only within
+a limited number of levels.
+
+This modification is analogous to the existing treatment of sink
+particles: $\mathcal{S}$ is already evaluated inside the
+holdback-protected block in the current code, but unlike $\mathcal{J}$
+it only triggers in cells that already host a sink.  Extending the same
+exemption to $\mathcal{J}$ ensures numerical integrity for gas that is
+\emph{about to} form a sink.
+
+
+\subsection{Level limitation: preventing cascades}
+\label{sec:cascade}
+
+Without a level limit ($n_{\rm bypass}\to\infty$), the Jeans bypass
+creates a catastrophic cascade.  When a cell at the holdback level
+$\ell_{\rm hb}$ is flagged by the Jeans criterion, child cells are
+created at level $\ell_{\rm hb}+1$.  Since level $\ell_{\rm hb}+1$ is
+also in the holdback zone, the bypass applies again, flagging cells at
+$\ell_{\rm hb}+2$, and so on until $\ell_{\rm max}$.  This rapidly
+exhausts available memory.
+
+The cascade occurs because the Jeans length in radiatively cooling gas
+(below the star-formation density threshold) shrinks without bound as
+the temperature drops.  There is no physical mechanism to halt the
+Jeans criterion from triggering at every successive level --- only the
+polytropic temperature floor (Section~\ref{sec:polytropic}) or a hard
+level limit can stop it.
+
+Table~\ref{tab:cascade} shows the progression observed in a test run
+without level limit:
+
+\begin{table}[h]
+\centering
+\caption{Cascade refinement without level limit ($a=0.164$,
+$\ell_{\rm hb}=14$, $\ell_{\rm max}=17$).  All levels $\ge 14$ are
+in the holdback zone.}
+\label{tab:cascade}
+\begin{tabular}{cccccl}
+\toprule
+Level & $\dx/\dx_{\rm min}$ & Holdback & Bypass & $\mathcal{J}$ fires & Result \\
+\midrule
+$\le 12$ & $\ge 32$  & No  & --- & Yes (normal) & Normal \\
+13       & 16        & No  & --- & Yes (normal) & Normal \\
+14       & 8         & Yes & Active & Yes & $\to$ lv.~15 created \\
+15       & 4         & Yes & Active & Yes & $\to$ lv.~16 created \\
+16       & 2         & Yes & Active & Yes & $\to$ lv.~17 created \\
+17       & 1         & $\ell_{\rm max}$ & --- & --- & OOM crash \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The memory footprint grew from 81\% to 88.5\% in a single coarse step
+before crashing (Job 122644).  The fine-step timestep also decreased by
+$8\times$ due to subcycling at levels 15--17.
+
+With $n_{\rm bypass}=1$, only level $\ell_{\rm hb}=14$ is bypassed,
+creating cells at level 15 but no further.  This provides a controlled
+pre-refinement before the holdback releases.
+
+
+%======================================================================
+\section{Role of the Polytropic Temperature Floor}
+\label{sec:polytropic}
+%======================================================================
+
+\subsection{Jeans length in the polytropic regime}
+
+In \ramses, the star-formation module enforces a polytropic equation
+of state above the density threshold $\nstar$:
+\begin{equation}
+  T(n) = \Tstar\,\Bigl(\frac{n}{\nstar}\Bigr)^{\gstar - 1},
+  \qquad n \ge \nstar,
+  \label{eq:polytropic}
+\end{equation}
+with default parameters $\Tstar = 750\,{\rm K}$,
+$\nstar = 0.1\,{\rm cm}^{-3}$, $\gstar = 5/3$.  This floor is
+applied in the cooling routine and is already reflected in \code{uold},
+so the Jeans length computation in \code{jeans\_length\_refine()}
+automatically includes the polytropic stabilisation.
+
+Substituting Eq.~\eqref{eq:polytropic} into Eq.~\eqref{eq:jeans_crit}:
+\begin{equation}
+  \lJ \propto \sqrt{\frac{T}{\rho}} \propto
+  \sqrt{\rho^{\gstar-1}/\rho} = \rho^{(\gstar-2)/2}.
+  \label{eq:jeans_poly}
+\end{equation}
+For $\gstar = 5/3$: $\lJ \propto \rho^{-1/6}$.  The Jeans length
+\emph{decreases very slowly} with density --- one or two additional
+levels of refinement are typically sufficient to resolve it.
+
+In contrast, for gas below $\nstar$ (no polytropic floor), radiative
+cooling can drive $T$ to very low values while $\rho$ remains moderate.
+This yields $\lJ \ll \dx_\ell$ at many levels, causing the cascade.
+
+\subsection{Self-regulation via \code{d\_jeans\_thre}}
+
+The density threshold parameter \code{d\_jeans\_thre} (in units of
+$n_{\rm H}\,[{\rm cm}^{-3}]$) restricts the Jeans criterion to cells
+above a given density:
+\begin{equation}
+  \mathcal{J}(\text{cell}) =
+  \begin{cases}
+    N_J\,\dx_\ell \ge \lJ & \text{if } n \ge
+    \code{d\_jeans\_thre}, \\
+    \text{false} & \text{otherwise}.
+  \end{cases}
+\end{equation}
+
+Setting $\code{d\_jeans\_thre} \approx \nstar$ restricts the Jeans
+criterion to the polytropic regime.  The cascade then self-limits
+through the following mechanism:
+
+\begin{enumerate}
+  \item At level $\ell_{\rm hb}$: only cells with $n \ge \nstar$ are
+    checked.  The polytropic floor guarantees $T \ge \Tstar$, so $\lJ$
+    is relatively large.
+  \item If $N_J\,\dx_{\ell_{\rm hb}} > \lJ$, the cell is flagged and
+    children at $\ell_{\rm hb}+1$ are created.
+  \item At level $\ell_{\rm hb}+1$: $\dx$ is halved, density is
+    approximately unchanged (refinement preserves cell-averaged
+    quantities), $\lJ$ is approximately unchanged.
+  \item $N_J\,\dx_{\ell_{\rm hb}+1} = N_J\,\dx_{\ell_{\rm hb}}/2
+    < \lJ$ $\Rightarrow$ Jeans criterion is \emph{satisfied}
+    (the Jeans length is now resolved) $\Rightarrow$ no further
+    flagging $\Rightarrow$ cascade stops naturally.
+\end{enumerate}
+
+This provides a \emph{physics-based} self-regulation, complementary to
+the \emph{hard limit} imposed by \code{n\_jeans\_bypass\_levels}.
+
+The two regulators are compared in Table~\ref{tab:regulators}.
+
+\begin{table}[h]
+\centering
+\caption{Two complementary mechanisms for preventing the bypass cascade.}
+\label{tab:regulators}
+\begin{tabular}{lll}
+\toprule
+Mechanism & Type & Behaviour \\
+\midrule
+\code{n\_jeans\_bypass\_levels} & Hard limit &
+  Caps extra levels regardless of physics \\
+\code{d\_jeans\_thre} $\approx \nstar$ & Physics-based &
+  Polytropic floor limits $\lJ$ decrease \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+When \code{d\_jeans\_thre}$\,=0$ (default), \emph{all} cells are
+checked, including low-density gas where cooling produces arbitrarily
+small $\lJ$.  This is the root cause of the unlimited cascade observed
+in Section~\ref{sec:cascade}.
+
+
+%======================================================================
+\section{Implementation Details}
+\label{sec:implementation}
+%======================================================================
+
+\subsection{Code structure}
+
+The implementation modifies two source files (plus parameter declaration
+and namelist reading).
+
+\paragraph{\code{flag\_utils.kjhan.f90} --- \code{userflag\_fine()}}
+The holdback early-return is modified from a simple \code{return} to a
+conditional block:
+
+\begin{lstlisting}
+if(prevent_refine .and. q_refine_holdback) then
+   if(jeans_bypass_holdback .and. hydro &
+      .and. n_jeans_bypass_levels > 0) then
+      ! Find the first holdback level
+      dx_min = (0.5D0**nlevelmax)*scale
+      holdback_threshold = (4d0**(1d0/ndim))*(dx_min/aexp)
+      holdback_first = nlevelmax + 1
+      do jlevel = nlevelmax_part+nlevel_collapse+1, nlevelmax
+         dx_test = (0.5d0**jlevel)*scale
+         if(dx_test < holdback_threshold) then
+            holdback_first = jlevel
+            exit
+         endif
+      end do
+      ! Only bypass within allowed range
+      if(ilevel < holdback_first &
+         + n_jeans_bypass_levels) then
+         call jeans_only_flag(ilevel)
+      endif
+   endif
+   return
+endif
+\end{lstlisting}
+
+\paragraph{\code{hydro\_flag.kjhan.f90} --- \code{jeans\_only\_flag()}}
+A new lightweight subroutine that:
+\begin{enumerate}
+  \item Loops over active grids with OpenMP parallelism.
+  \item Computes cell indices without neighbor gathering.
+  \item Calls the existing \code{jeans\_length\_refine()} subroutine
+    (no code duplication).
+  \item Sets \code{flag1} for flagged cells and updates \code{nflag}.
+\end{enumerate}
+
+This is possible because \code{jeans\_length\_refine()} only accesses
+cell-local data (\code{uold(ind\_cell,...)}) and requires no neighbor
+information, unlike the gradient-based criteria
+$\mathcal{D}$, $\mathcal{P}$, $\mathcal{U}$.
+
+\subsection{Namelist parameters}
+
+In \code{amr\_parameters.jaehyun.f90}:
+\begin{lstlisting}
+logical :: jeans_bypass_holdback = .false.
+integer :: n_jeans_bypass_levels = 1
+\end{lstlisting}
+
+Both are read via \code{\&REFINE\_PARAMS} in
+\code{read\_hydro\_params.f90}.
+
+\subsection{Safety properties}
+
+\begin{itemize}
+  \item \textbf{Default off}: With \code{jeans\_bypass\_holdback=.false.}
+    (default), the new code path is never entered.  Results are
+    bit-identical to the unmodified code.
+  \item \textbf{No neighbor access}: \code{jeans\_only\_flag()} is
+    safe to call at any point in the refinement cycle.
+  \item \textbf{OMP safety}: \code{flag1} writes are grid-partitioned
+    (no race conditions); \code{nflag} uses reduction.
+  \item \textbf{Hard level limit}: \code{n\_jeans\_bypass\_levels}
+    provides a fail-safe even if the physics-based regulation
+    (\code{d\_jeans\_thre}) is misconfigured.
+\end{itemize}
+
+
+%======================================================================
+\section{Summary of Parameters}
+\label{sec:params}
+%======================================================================
+
+Table~\ref{tab:refine_params} lists all refinement-related
+namelist parameters, including the new bypass parameters.
+
+\begin{table}[h]
+\centering
+\caption{AMR refinement parameters in the \code{\&AMR\_PARAMS} and
+\code{\&REFINE\_PARAMS} namelists.  New parameters are marked with $\star$.}
+\label{tab:refine_params}
+\small
+\begin{tabular}{lll}
+\toprule
+Parameter & Default & Role \\
+\midrule
+\code{m\_refine}      & 8.0  & Lagrangian mass threshold (per level) \\
+\code{sink\_refine}   & F    & Force max level around sinks \\
+\code{err\_grad\_d}   & $-1$ & Density gradient threshold \\
+\code{err\_grad\_p}   & $-1$ & Pressure gradient threshold \\
+\code{err\_grad\_u}   & $-1$ & Velocity gradient threshold \\
+\code{jeans\_refine}  & $-1$ & Jeans length in cells (per level) \\
+\code{d\_jeans\_thre} & 0    & Density threshold for Jeans ($n_{\rm H}\,$cm$^{-3}$) \\
+\code{r\_refine}      & $-1$ & Geometry region diameter (per level) \\
+\code{a\_refine}      & 1.0  & Ellipticity $Y/X$ \\
+\code{b\_refine}      & 1.0  & Ellipticity $Z/X$ \\
+\code{exp\_refine}    & 2.0  & Norm exponent \\
+\code{x/y/z\_refine}  & 0.5  & Region centre \\
+\code{nexpand}        & 1    & Buffer zone width (per level) \\
+\code{q\_refine\_holdback} & F & Cosmological holdback \\
+$\star$ \code{jeans\_bypass\_holdback} & F & Enable Jeans bypass of holdback \\
+$\star$ \code{n\_jeans\_bypass\_levels} & 1 & Max extra levels beyond $\ell_{\rm hb}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The recommended configuration for cosmological runs with star formation is:
+\begin{lstlisting}
+&REFINE_PARAMS
+m_refine          = 9*8.,
+jeans_refine      = 9*4.,
+jeans_bypass_holdback  = .true.
+n_jeans_bypass_levels  = 1
+d_jeans_thre      = 0.1         ! = n_star
+q_refine_holdback = .true.
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{Test Results}
+\label{sec:tests}
+%======================================================================
+
+All tests use the HR5 medium-box setup: $\ell_{\rm min}=9$,
+$\ell_{\rm max}=17$, 12 MPI ranks, OMP=5, restarting from output 5
+($a=0.164$, $z\approx 5.1$, nstep\_coarse=241).
+
+\subsection{Bit-identical verification}
+
+With \code{jeans\_bypass\_holdback=.false.} (default) and no
+\code{jeans\_refine}, the new binary produces results identical to
+the reference run: econs=$6.13\times10^{-4}$ at step 242,
+econs=$6.71\times10^{-4}$ at step 243 (Job 122643).
+
+\subsection{Unlimited bypass ($n_{\rm bypass}=\infty$, $\code{d\_jeans\_thre}=0$)}
+
+With \code{jeans\_refine=9*4.},
+\code{jeans\_bypass\_holdback=.true.}, and no level limit:
+cascade refinement from level 14 through 17 within a single coarse
+step.  Memory grew from 81\% to 88.5\% before OOM crash at fine step
+1580.  Fine-step timestep decreased by $8\times$ due to subcycling
+(Job 122644).
+
+\subsection{Limited bypass ($n_{\rm bypass}=1$, $\code{d\_jeans\_thre}=0$)}
+
+With \code{n\_jeans\_bypass\_levels=1}: only level 14 is bypassed,
+cells at level 15 may be created but no further cascade.
+Results: Job 122663 (pending).
+
+\subsection{Future: $\code{d\_jeans\_thre}=\nstar$}
+
+A test with \code{d\_jeans\_thre=0.1} will verify the physics-based
+self-regulation, potentially allowing $n_{\rm bypass} > 1$ without
+cascade, since only gas in the polytropic regime would trigger the
+Jeans criterion.
+
+
+%======================================================================
+\section{Discussion}
+\label{sec:discussion}
+%======================================================================
+
+\subsection{Physical motivation}
+
+The holdback mechanism was designed to prevent over-refinement from the
+mass criterion at early times.  However, it inadvertently blocks the
+Jeans criterion, which has a different physical motivation: resolving
+the Jeans length prevents artificial fragmentation and ensures
+numerically converged star formation.
+
+By allowing the Jeans criterion to operate ahead of the holdback
+release, we expect:
+\begin{itemize}
+  \item Dense gas that will form stars is pre-refined before the
+    holdback releases.
+  \item When the holdback releases, the transition is smoother because
+    the densest regions are already at the appropriate resolution.
+  \item The SFR curve shows a gradual onset rather than an abrupt step.
+\end{itemize}
+
+\subsection{Interplay of the three parameters}
+
+The bypass is controlled by three parameters that form a layered
+defence:
+
+\paragraph{Layer 1: \code{jeans\_bypass\_holdback} (on/off)}
+Master switch.  When off (default), the system is identical to
+standard \ramses.
+
+\paragraph{Layer 2: \code{d\_jeans\_thre} (physics-based regulation)}
+Restricts the Jeans check to dense gas where the polytropic floor
+operates.  In this regime, $\lJ \propto \rho^{-1/6}$ varies slowly,
+and 1--2 extra refinement levels suffice to resolve it.  Provides
+self-consistent, physics-driven cascade termination.
+
+\paragraph{Layer 3: \code{n\_jeans\_bypass\_levels} (hard safety limit)}
+Absolute cap on the number of extra levels.  Prevents OOM regardless
+of physics configuration.  Essential when
+\code{d\_jeans\_thre=0} (all cells checked).
+
+
+\bibliographystyle{plainnat}
+\begin{thebibliography}{2}
+\bibitem[Truelove et al.(1997)]{Truelove1997}
+Truelove, J.~K., et al., 1997, ApJ, 489, L179
+
+\bibitem[Dubois et al.(2021)]{Dubois2021}
+Dubois, Y., et al., 2021, A\&A, 651, A109
+\end{thebibliography}
+
+\end{document}
