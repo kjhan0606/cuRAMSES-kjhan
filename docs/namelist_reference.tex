@@ -719,6 +719,27 @@ corrections are applied multiplicatively in Fourier space.}
 \end{quote}
 
 % ------------------------------------------------------------------
+\paramheader{dump\_pk}{logical}{.false.}
+\label{param:dump_pk}
+
+\begin{quote}
+When \texttt{.true.}, compute and write the matter power spectrum
+$P(k)$ at each snapshot output.  The spectrum is computed via NGP
+grid assignment on the base-level grid followed by an FFTW3 FFT.
+The output file \texttt{pk\_NNNNN.dat} is written in the corresponding
+\texttt{output\_NNNNN/} directory with columns:
+$k$~[$h$/Mpc], $P(k)$~[($h^{-1}$Mpc)$^3$],
+$P(k) - P_{\rm shot}$, and $N_{\rm modes}$.
+
+\textbf{Requires} \paramref{use_fftw}\texttt{=.true.}\ or
+\paramref{gpu_fft}\texttt{=.true.}\ (an FFT solver must be active).
+
+\apinote{Useful for validating dark energy perturbation and neutrino
+linear response implementations against CAMB linear theory
+predictions.}
+\end{quote}
+
+% ------------------------------------------------------------------
 \paramheader{sidm}{logical}{.false.}
 \label{param:sidm}
 
@@ -2014,20 +2035,21 @@ MG V-cycle on AMR levels.}
 
 \begin{quote}
 Path to a CAMB dark energy transfer function ratio table for the
-table-based linear response method.  The table contains
-$R_{\mathrm{DE}}(k, a) = \delta_{\mathrm{DE}} / \delta_m$ on a
-$(N_k \times N_a)$ grid, in the same ASCII format as
-\paramref{neutrino_table}.
+table-based linear response method.  The table contains the effective
+$R_{\mathrm{DE}}(k, a)$ on a $(N_k \times N_a)$ grid, in the same
+ASCII format as \paramref{neutrino_table}.
 
 Generate with:
 \begin{verbatim}
 python3 misc/generate_de_table.py --w0=-0.9 --wa=0.1 --cs2=0.0 \
     -o de_table.dat
 \end{verbatim}
-The script uses CAMB's \texttt{get\_redshift\_evolution()} to compute
-$\delta_{\mathrm{DE}}(k,z)$ and $\delta_m(k,z)$ directly, supporting
-arbitrary $c_s^2$ including $c_s^2 = 0$.  Default grid: 200~$k$-points
-$\times$ 50~$a$-points (same as the neutrino table).
+The script uses the \textbf{Weyl potential method}: two CAMB runs
+(target $c_s^2$ vs.\ reference $c_s^2=1$) extract the gauge-invariant
+Weyl potential ratio, yielding an effective $R_{\mathrm{DE}}$ in the
+Newtonian gauge.  This avoids the synchronous-gauge $\delta_{\rm DE}$
+which can overestimate the correction by a factor of ${\sim}26$.
+Default grid: 200~$k$-points $\times$ 50~$a$-points.
 
 For $c_s^2 = 0$ (clustering DE), $R_{\mathrm{DE}}$ is independent of
 $k$ at each $a$ --- this is a useful verification check.

@@ -31,6 +31,7 @@ subroutine read_params
        & ,jobcontrolfile &
        & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
        & ,use_fftw &
+       & ,dump_pk &
        & ,exchange_method &
        & ,use_neutrino &
        & ,sidm &

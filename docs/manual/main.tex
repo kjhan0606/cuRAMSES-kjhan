@@ -2165,8 +2165,14 @@ perturbations in the Poisson equation.  Two methods are available:
 \subsection{Table-Based Linear Response}
 
 Analogous to the neutrino linear response (Chapter~\ref{ch:neutrino}),
-a CAMB transfer function table provides $R_{\mathrm{DE}}(k,a) =
-\delta_{\mathrm{DE}} / \delta_m$.  The FFT solver applies the correction:
+a CAMB transfer function table provides an effective $R_{\mathrm{DE}}(k,a)$.
+The table is generated using the \textbf{Weyl potential method}: two CAMB
+runs (target $c_s^2$ and reference $c_s^2=1$) yield the gauge-invariant
+Weyl potential ratio, from which an effective $R_{\mathrm{DE}}$ in the
+Newtonian gauge is extracted (see equation below).  This avoids the
+synchronous-gauge $\delta_{\mathrm{DE}}$ which can overestimate the
+correction by a factor of ${\sim}26$ for $c_s^2=0$.
+The FFT solver applies the correction:
 \begin{equation}\label{eq:de_factor_table}
   \hat\phi(\mathbf{k}) \;\leftarrow\; \hat\phi(\mathbf{k}) \times
   \left[1 + \frac{\rho_{\mathrm{de}}(a)}{\rho_{\mathrm{cb}}}\,
@@ -2650,6 +2656,7 @@ Runtime control parameters.
 \multicolumn{4}{l}{\textit{Non-standard models (new)}} \\
 \midrule
 \texttt{de\_perturb} & logical & \texttt{.false.} & Enable DE density perturbation (Ch.~\ref{ch:cpl}) \\
+\texttt{dump\_pk} & logical & \texttt{.false.} & Dump matter $P(k)$ at each snapshot output \\
 \texttt{sidm} & logical & \texttt{.false.} & Enable SIDM Monte Carlo scattering (Ch.~\ref{ch:sidm}) \\
 \midrule
 \multicolumn{4}{l}{\textit{Exchange method auto-tuning (new)}} \\
@@ -3142,6 +3149,17 @@ mpirun -np 12 ./ramses_final3d \
 
 Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \texttt{ekin=1.23E-06}.
 
+\begin{codebox}[DE P(k) Validation Test]
+\begin{lstlisting}[style=bash,numbers=none]
+cd test_ksection/run_de_pk_test
+python3 ../../misc/de_linear_test_setup.py
+bash run_all.sh     # runs 4 models (LCDM, wCDM, thaw, phantom)
+python3 ../../misc/compare_pk_camb.py --basedir .
+\end{lstlisting}
+\end{codebox}
+
+Verify that $P_{\rm sim}(k)/P_{\rm CAMB}(k) \approx 0.96$ in the linear regime ($k < 0.1\,h$/Mpc) for all four models across redshifts $z=0$--5.  The wCDM and CPL-thaw models should show 1--2\% enhancement relative to $\Lambda$CDM due to dark energy perturbations.
+
 
 %------------------------------------------------------
 % Appendix
@@ -3191,7 +3209,8 @@ Verify that at step 10: \texttt{econs=3.77E-03}, \texttt{epot=-1.88E-06}, \textt
 \texttt{ramses\_hdf5\_io.f90} & HDF5 wrapper module (parallel create/open/write/read) \\
 \texttt{backup\_hdf5.f90} & HDF5 output: AMR, hydro, gravity, particles, sinks \\
 \texttt{restore\_hdf5.f90} & HDF5 restart: AMR tree rebuild + data restore \\
-\texttt{output\_amr.kjhan.f90} & HDF5 dispatch in \texttt{dump\_all} \\
+\texttt{output\_amr.kjhan.f90} & HDF5 dispatch in \texttt{dump\_all}; $P(k)$ call when \texttt{dump\_pk} \\
+\texttt{power\_spectrum.f90} & NGP+FFTW3 matter power spectrum module \\
 \bottomrule
 \end{longtable}
 

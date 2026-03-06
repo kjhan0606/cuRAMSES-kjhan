@@ -72,6 +72,9 @@ module amr_parameters
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
 
+  ! Power spectrum measurement at output time (requires USE_FFTW)
+  logical::dump_pk=.false.     ! Dump P(k) at each output snapshot
+
   ! Exchange method auto-tune (P2P vs K-Section hierarchical)
   ! 'auto': auto-tune per component, 'p2p': force P2P, 'ksection': force K-Section
   character(len=16)::exchange_method='auto'

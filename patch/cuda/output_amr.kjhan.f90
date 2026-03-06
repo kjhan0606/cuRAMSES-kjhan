@@ -7,6 +7,7 @@ subroutine dump_all
   use pm_commons
   use hydro_commons
   use cooling_module
+  use power_spectrum_mod, only: compute_power_spectrum
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -199,6 +200,17 @@ subroutine dump_all
         if(myid==1.and.print_when_io) write(*,*)'End backup gadget format'
      end if
 998  continue
+
+     ! Power spectrum measurement at base level
+     if(dump_pk .and. poisson) then
+        if(myid==1.and.print_when_io) write(*,*)'Start power spectrum'
+        call compute_power_spectrum(levelmin, filedir, nchar)
+#ifndef WITHOUTMPI
+        if(synchro_when_io) call MPI_BARRIER(MPI_COMM_WORLD,info)
+#endif
+        if(myid==1.and.print_when_io) write(*,*)'End power spectrum'
+     end if
+
   end if
 
 end subroutine dump_all

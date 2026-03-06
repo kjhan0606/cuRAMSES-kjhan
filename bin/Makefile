@@ -111,7 +111,7 @@ VPATH = ../patch/cuda:../patch/oct_tree:$(PATCH):../$(SOLVER):../aton:../hydro:.
 # All objects
 MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o pm_commons.o poisson_parameters.o \
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
-	 morton_keys.o morton_hash.o neutrino_commons.o dark_energy_commons.o \
+	 morton_keys.o morton_hash.o neutrino_commons.o dark_energy_commons.o power_spectrum.o \
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
 	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 
@@ -177,6 +177,7 @@ poisson_cuda_interface.o: cuda_commons.o
 sink_cuda_interface.o: cuda_commons.o
 cuda_commons.o: amr_commons.kjhan.o
 endif
+power_spectrum.o: amr_parameters.jaehyun.o amr_commons.kjhan.o poisson_commons.o
 FORCE:
 #############################################################################
 clean :
