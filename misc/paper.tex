@@ -2091,7 +2091,230 @@ Krylov approach used in \curamses' multigrid V-cycle smoother.
 
 
 % ===================================================================
-% 10. CONCLUSIONS
+% 10. AMR REFINEMENT CRITERIA
+% ===================================================================
+\section{AMR REFINEMENT CRITERIA}
+\label{sec:amr_refine}
+
+In \ramses, each cell at level $\ell < \nlevelmax$ is tested for
+refinement at every coarse time-step.  The decision to subdivide a
+cell into $\twotondim$ children is governed by a combination of
+physical, geometric, and cosmological criteria that we summarise here.
+
+\subsection{Refinement logic}
+\label{sec:refine_logic}
+
+The overall refinement flag for a cell is determined by the following
+Boolean expression:
+\begin{equation}
+\mathcal{R} = \lnot\,\mathcal{H}
+  \;\land\; \mathcal{G}
+  \;\land\; \bigl(
+    \mathcal{M} \lor \mathcal{S} \lor \mathcal{D} \lor \mathcal{P}
+    \lor \mathcal{U} \lor \mathcal{J}
+  \bigr),
+\label{eq:refine_flag}
+\end{equation}
+where each symbol is defined below.
+
+\subsubsection{Physical criteria (OR)}
+
+\begin{enumerate}
+
+\item \textbf{Quasi-Lagrangian mass criterion ($\mathcal{M}$).}
+  The cell is flagged if its gas density exceeds a
+  level-dependent threshold:
+  \begin{equation}
+    \rho_{\rm cell} \;\ge\; m_{\rm refine}(\ell)
+      \;\frac{m_{\rm sph}}{V_{\rm cell}},
+  \end{equation}
+  where $m_{\rm sph}$ is the effective SPH kernel mass and
+  $V_{\rm cell} = (\Delta x_\ell)^3$.
+  This criterion ensures that regions containing roughly
+  $m_{\rm refine}$ or more particles per cell are refined,
+  providing a quasi-Lagrangian resolution that tracks gravitational
+  collapse.  Controlled by the namelist array
+  \code{m\_refine(1:nlevelmax)}.
+
+\item \textbf{Sink particle forcing ($\mathcal{S}$).}
+  If \code{sink\_refine=.true.}, any cell containing a sink cloud
+  particle (identified by $\code{idp} < 0$ and $\code{tp} = 0$) is
+  unconditionally flagged up to $\nlevelmax$, guaranteeing maximum
+  resolution around each accretion region.
+
+\item \textbf{Density gradient ($\mathcal{D}$).}
+  The normalised density gradient between a cell and each of its
+  $2N_{\rm dim}$ face-neighbours is computed as
+  \begin{equation}
+    \epsilon_\rho = 2\,\max\!\left(
+      \frac{|\rho_+ - \rho_0|}{|\rho_+ + \rho_0| + \rho_{\rm floor}},\;
+      \frac{|\rho_0 - \rho_-|}{|\rho_0 + \rho_-| + \rho_{\rm floor}}
+    \right).
+  \end{equation}
+  If $\epsilon_\rho > \code{err\_grad\_d}$ along any axis, the cell
+  is flagged.  This captures density discontinuities such as shocks
+  and contact waves.
+
+\item \textbf{Pressure gradient ($\mathcal{P}$).}
+  Analogous to the density gradient but applied to the thermal
+  pressure:
+  \begin{equation}
+    \epsilon_P = 2\,\max\!\left(
+      \frac{|P_+ - P_0|}{|P_+ + P_0| + P_{\rm floor}},\;
+      \frac{|P_0 - P_-|}{|P_0 + P_-| + P_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_P > \code{err\_grad\_p}$.
+
+\item \textbf{Velocity gradient ($\mathcal{U}$).}
+  A normalised velocity jump relative to the local sound speed:
+  \begin{equation}
+    \epsilon_v = 2\,\max\!\left(
+      \frac{|v_+ - v_0|}{c_{s,+} + c_{s,0} + |v_+| + |v_0|
+                          + v_{\rm floor}},\;
+      \frac{|v_0 - v_-|}{c_{s,0} + c_{s,-} + |v_0| + |v_-|
+                          + v_{\rm floor}}
+    \right),
+  \end{equation}
+  flagging when $\epsilon_v > \code{err\_grad\_u}$ in any component.
+  This criterion targets strong velocity shears and accretion shocks.
+
+\item \textbf{Jeans length ($\mathcal{J}$).}
+  When \code{jeans\_refine($\ell$)} $= N_J > 0$, the cell is flagged if
+  the local Jeans length is shorter than $N_J$ cell widths:
+  \begin{equation}
+    \lambda_J = \sqrt{\frac{\pi\,c_s^2}{G\,\rho}}
+    < N_J\,\Delta x_\ell,
+  \end{equation}
+  implementing the \citet{Truelove1997} condition to prevent artificial
+  fragmentation in self-gravitating gas.
+
+\end{enumerate}
+
+\subsubsection{Geometry mask (AND)}
+
+\textbf{Ellipsoidal region ($\mathcal{G}$).}
+When \code{r\_refine($\ell$)} $> -1$, only cells inside a generalised
+ellipsoidal region are permitted to refine.  The test is
+\begin{equation}
+  \left(
+    \frac{2|\Delta x|}{r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta y|}{a\,r}
+  \right)^{e_r}
+  + \left(
+    \frac{2|\Delta z|}{b\,r}
+  \right)^{e_r}
+  < 1,
+\end{equation}
+where $r = \code{r\_refine}$ is the region diameter,
+$a = \code{a\_refine}$ and $b = \code{b\_refine}$ are the
+axis ratios, and $e_r = \code{exp\_refine}$ is the norm exponent
+($e_r = 2$ gives an ellipsoid; $e_r \to \infty$ a rectangular box).
+Cells outside this region are \emph{un-flagged} regardless of
+physical criteria, restricting high resolution to a zoom-in target.
+
+\subsubsection{Cosmological holdback (NOT)}
+
+\textbf{Resolution holdback ($\mathcal{H}$).}
+In cosmological runs with cooling (\code{cosmo=.true.},
+\code{cooling=.true.}), an overly eager refinement at high redshift
+can exhaust memory before the epoch of interest.
+When \code{q\_refine\_holdback=.true.} and the physical cell size
+$\Delta x_\ell < 4^{1/N_{\rm dim}}\,\Delta x_{\nlevelmax}/a_{\rm exp}$
+for levels $\ell > \code{nlevelmax\_part} + 3$, the \emph{entire}
+level is blocked from further refinement.
+This enforces a constant physical resolution at low redshift and a
+constant comoving resolution at high redshift, gradually releasing
+deeper levels as the universe expands.
+
+\subsection{Buffer zones}
+
+After applying equation~(\ref{eq:refine_flag}), flagged cells are
+expanded by \code{nexpand($\ell$)} cell widths in each direction via a
+dilation operator (\code{smooth\_fine}).
+This cubic buffer ensures smooth refinement boundaries, preventing
+the Godunov solver from encountering abrupt level transitions that
+would degrade numerical accuracy.
+
+\subsection{Proposed modification: Jeans-independent holdback}
+\label{sec:refine_proposed}
+
+The Jeans length criterion $\mathcal{J}$ differs fundamentally from
+the other refinement triggers: it is a \emph{numerical stability}
+requirement \citep{Truelove1997}, not merely a resolution preference.
+Violating the Jeans condition leads to artificial fragmentation ---
+a qualitatively wrong result --- regardless of epoch.  Yet in the
+standard \ramses\ logic (equation~\ref{eq:refine_flag}), the
+cosmological holdback $\mathcal{H}$ blocks \emph{all} criteria
+uniformly, including $\mathcal{J}$.  At high redshift, dense
+self-gravitating regions may therefore be held at insufficient
+resolution, producing spurious fragmentation that propagates into
+lower-redshift structure.
+
+We propose separating the Jeans criterion from the holdback:
+\begin{equation}
+\mathcal{R}' = \Bigl[
+  \lnot\,\mathcal{H} \;\land\; \mathcal{G} \;\land\;
+  \bigl(\mathcal{M} \lor \mathcal{S} \lor \mathcal{D}
+        \lor \mathcal{P} \lor \mathcal{U}\bigr)
+\Bigr]
+\;\lor\;
+\Bigl[ \mathcal{G} \;\land\; \mathcal{J} \Bigr].
+\label{eq:refine_proposed}
+\end{equation}
+The geometry mask $\mathcal{G}$ still applies to both branches,
+preserving zoom-in spatial restrictions.  Only the temporal holdback
+$\mathcal{H}$ is bypassed for $\mathcal{J}$, ensuring that the
+Truelove condition is satisfied at all epochs.
+
+In practice, the Jeans criterion triggers only in compact,
+self-gravitating regions (dense gas cores), so the additional
+refinement is spatially localised and does not cause the widespread
+memory growth that the holdback was designed to prevent.  This
+modification is analogous to the existing treatment of sink particles:
+$\mathcal{S}$ is already evaluated inside the holdback-protected block
+in the current code, but unlike $\mathcal{J}$ it only triggers in
+cells that already host a sink.  Extending the same exemption to
+$\mathcal{J}$ ensures numerical integrity for gas that is
+\emph{about to} form a sink.
+
+\subsection{Summary}
+
+Table~\ref{tab:refine_params} lists all refinement-related
+namelist parameters.
+
+\begin{table}
+\centering
+\caption{AMR refinement parameters in the \code{\&AMR\_PARAMS} and
+\code{\&REFINE\_PARAMS} namelists.}
+\label{tab:refine_params}
+\small
+\begin{tabular}{lll}
+\toprule
+Parameter & Default & Role \\
+\midrule
+\code{m\_refine}      & 8.0  & Lagrangian mass threshold (per level) \\
+\code{sink\_refine}   & F    & Force max level around sinks \\
+\code{err\_grad\_d}   & $-1$ & Density gradient threshold \\
+\code{err\_grad\_p}   & $-1$ & Pressure gradient threshold \\
+\code{err\_grad\_u}   & $-1$ & Velocity gradient threshold \\
+\code{jeans\_refine}  & $-1$ & Jeans length in cells (per level) \\
+\code{r\_refine}      & $-1$ & Geometry region diameter (per level) \\
+\code{a\_refine}      & 1.0  & Ellipticity $Y/X$ \\
+\code{b\_refine}      & 1.0  & Ellipticity $Z/X$ \\
+\code{exp\_refine}    & 2.0  & Norm exponent \\
+\code{x/y/z\_refine}  & 0.5  & Region centre \\
+\code{nexpand}        & 1    & Buffer zone width (per level) \\
+\code{q\_refine\_holdback} & F & Cosmological holdback \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+% ===================================================================
+% 11. CONCLUSIONS
 % ===================================================================
 \section{CONCLUSIONS}
 \label{sec:conclusions}
@@ -2431,6 +2654,11 @@ Warren M.~S., Salmon J.~K., 1993, in Proc.\ Supercomputing '93. ACM, New York, p
 Weinberger R., et al., 2017, MNRAS, 465, 3291,
 \href{https://doi.org/10.1093/mnras/stw2944}{doi:10.1093/mnras/stw2944},
 \href{https://arxiv.org/abs/1607.03486}{arXiv:1607.03486}
+
+\bibitem[\protect\citeauthoryear{Truelove et al.}{Truelove et al.}{1997}]{Truelove1997}
+Truelove J.~K., Klein R.~I., McKee C.~F., Holliman J.~H., Howell L.~H.,
+Greenough J.~A., 1997, ApJ, 489, L179,
+\href{https://doi.org/10.1086/310975}{doi:10.1086/310975}
 
 \end{thebibliography}
 
