@@ -588,6 +588,115 @@ Jeans criterion.
 
 
 %======================================================================
+\section{Cooling Module Comparison: RAMSES vs Grackle}
+\label{sec:cooling}
+%======================================================================
+
+The cooling module is a critical component of the simulation, as it
+determines the equilibrium temperature of the gas and hence the Jeans
+length.  Different cooling implementations can therefore affect the
+refinement behaviour through the Jeans criterion~$\mathcal{J}$.
+
+We compare the standard \ramses\ cooling module (implicit
+Newton--Raphson solver with Courty UV background and Cloudy~07 metal
+cooling tables) against the Grackle equilibrium cooling library
+\citep{Smith2017} using the Townsend (2009) exact Y-function
+integration with Haardt \& Madau (2012) UV background.
+
+\subsection{Comparison on the Density--Temperature Plane}
+
+To quantify the systematic differences between the two cooling models,
+we compute the net cooling rate $\Lambda_{\rm net}(n_{\rm H}, T)$ on a
+grid of $60 \times 256$ points spanning
+$n_{\rm H} = 10^{-8}$--$10^{4}\,{\rm cm}^{-3}$ and
+$T = 10$--$10^{9}\,{\rm K}$ at $z = 5.1$ (the redshift of the test
+restart).
+
+\paragraph{Low metallicity ($Z = 10^{-3}\,Z_\odot$).}
+Figure~\ref{fig:cool_diff_lowZ} shows the comparison at the simulation
+average metallicity ($\code{z\_ave} = 10^{-3}$).  At this low
+metallicity, the dominant cooling processes are H/He line emission and
+bremsstrahlung, while the dominant heating is UV photoheating.
+
+The lower-left panel shows the log ratio of the cooling rates:
+$\log_{10}(|\Lambda_{\rm RAMSES}|/|\Lambda_{\rm Grackle}|)$.
+Contour lines mark the equilibrium temperature
+($\Lambda_{\rm net} = 0$) for each model: the yellow solid line for
+RAMSES and the green dashed line for Grackle.  The two equilibrium
+curves differ most at low densities ($n_{\rm H} < 1\,{\rm cm}^{-3}$),
+reflecting the different UV backgrounds (Courty vs HM2012).
+
+The lower-right panel shows the mean molecular weight difference
+$\Delta\mu = \mu_{\rm RAMSES} - \mu_{\rm Grackle}$.  At
+$T > 10^{5}\,{\rm K}$, the RAMSES CIE calculation gives a higher
+$\mu$ than the Grackle non-LTE treatment, while at intermediate
+temperatures ($10^{4}$--$10^{5}\,{\rm K}$), the density-dependent
+Grackle $\mu$ shows significant departures from the RAMSES
+density-independent equilibrium.
+
+\begin{figure*}[ht!]
+\centering
+\includegraphics[width=\textwidth]{cooling_rate_difference.png}
+\caption{Comparison of the RAMSES and Grackle net cooling rates at
+$z = 5.1$ and $Z = 1.1\times10^{-3}\,Z_\odot$.
+\textit{Top left:} RAMSES net cooling rate (Courty UV, CC07 metals).
+\textit{Top right:} Grackle net cooling rate (HM2012 UV, non-LTE).
+Red indicates cooling (energy loss), blue indicates heating (energy gain).
+\textit{Bottom left:} Log ratio of the absolute cooling rates;
+yellow solid = RAMSES equilibrium ($\Lambda=0$),
+green dashed = Grackle equilibrium.
+\textit{Bottom right:} Mean molecular weight difference
+$\mu_{\rm RAMSES} - \mu_{\rm Grackle}$.}
+\label{fig:cool_diff_lowZ}
+\end{figure*}
+
+\paragraph{Solar metallicity ($Z \approx Z_\odot$).}
+Figure~\ref{fig:cool_diff_Zsol} shows the same comparison at solar
+metallicity, where metal line cooling dominates the temperature range
+$10^{4}$--$10^{5.5}\,{\rm K}$.  The differences between the two models
+are more pronounced here: the Grackle table includes a richer set of
+metal species and density-dependent ionisation corrections, leading to
+up to $\sim10\times$ stronger cooling in the $10^{4.5}$--$10^{5}\,{\rm K}$
+range compared to the CC07 CIE table used by RAMSES.
+
+The equilibrium temperature contours show a larger separation at low
+densities, where the UV suppression of metal cooling differs between
+the two models.
+
+\begin{figure*}[ht!]
+\centering
+\includegraphics[width=\textwidth]{cooling_rate_difference_Zsolar.png}
+\caption{Same as Figure~\ref{fig:cool_diff_lowZ} but at solar
+metallicity ($Z = 0.84\,Z_\odot$).  Metal cooling dominates the net
+rate at $T \sim 10^{4}$--$10^{5.5}\,{\rm K}$, amplifying the
+differences between the two models.}
+\label{fig:cool_diff_Zsol}
+\end{figure*}
+
+\subsection{Implications for the Jeans Criterion}
+
+The key differences between the two cooling models are:
+\begin{enumerate}
+  \item \textbf{UV background:} The Courty and HM2012 models predict
+    different equilibrium temperatures at low densities, affecting the
+    Jeans length by a factor of $\sim 2$--$3$ in the diffuse IGM.
+  \item \textbf{Metal cooling:} At solar metallicity, the Grackle
+    non-LTE metal cooling is significantly stronger than CC07 CIE in
+    the $10^{4}$--$10^{5}\,{\rm K}$ range, potentially leading to
+    faster cooling and earlier star formation.
+  \item \textbf{Mean molecular weight:} The $\Delta\mu$ of up to
+    $\pm 0.6$ translates directly into a temperature mapping error
+    when converting between $T/\mu$ (RAMSES internal variable) and
+    physical temperature $T$.
+\end{enumerate}
+
+These differences motivate the implementation of the Eunha exact
+cooling integrator (Section~\ref{sec:bypass}) as an alternative to the
+standard RAMSES solver, particularly for high-resolution cosmological
+simulations where the Jeans criterion is critical for star formation.
+
+
+%======================================================================
 \section{Discussion}
 \label{sec:discussion}
 %======================================================================
@@ -631,9 +740,15 @@ of physics configuration.  Essential when
 \code{d\_jeans\_thre=0} (all cells checked).
 
 
-\begin{thebibliography}{2}
+\begin{thebibliography}{4}
 \bibitem[Dubois et al.(2021)]{Dubois2021}
 Dubois, Y., et al.\ 2021, \aap, 651, A109
+
+\bibitem[Haardt \& Madau(2012)]{HM2012}
+Haardt, F., \& Madau, P.\ 2012, \apj, 746, 125
+
+\bibitem[Smith et al.(2017)]{Smith2017}
+Smith, B.~D., Bryan, G.~L., Glover, S.~C.~O., et al.\ 2017, \mnras, 466, 2217
 
 \bibitem[Truelove et al.(1997)]{Truelove1997}
 Truelove, J.~K., Klein, R.~I., McKee, C.~F., et al.\ 1997, \apjl, 489, L179

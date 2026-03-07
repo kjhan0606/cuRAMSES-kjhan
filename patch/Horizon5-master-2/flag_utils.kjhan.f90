@@ -446,16 +446,10 @@ subroutine userflag_fine(ilevel)
   use cooling_module
   implicit none
   integer::ilevel
-  ! ================================================================
-  ! AMR Refinement Logic (current, jeans_bypass_holdback=.false.):
-  !   R = NOT(holdback) AND geometry
-  !       AND (m_refine OR sink OR grad_d OR grad_p OR grad_u OR jeans)
-  !
-  ! Proposed (jeans_bypass_holdback=.true., future):
-  !   R' = [NOT(holdback) AND geometry
-  !         AND (m_refine OR sink OR grad_d OR grad_p OR grad_u)]
-  !        OR [geometry AND jeans]
-  ! ================================================================
+  ! -------------------------------------------------------------------
+  ! This routine flag for refinement cells that satisfies
+  ! some user-defined physical criteria at the level ilevel. 
+  ! -------------------------------------------------------------------
   integer::i,j,ncache,nok,ix,iy,iz,iskip,iflag,jflag
   integer::igrid,ind,idim,ngrid,ivar
   integer::nx_loc
@@ -473,9 +467,7 @@ subroutine userflag_fine(ilevel)
   real(dp),dimension(1:nvector,1:ndim)::xx
   real(dp):: demoninator !(ONS)
   integer :: nlevel_collapse =3
-  integer :: holdback_first, jlevel
-  real(dp):: dx_test, holdback_threshold
-
+  
   logical::prevent_refine
 
   if(ilevel==nlevelmax)return
@@ -524,28 +516,7 @@ subroutine userflag_fine(ilevel)
       
   endif
 
-  if(prevent_refine .and. q_refine_holdback) then
-     ! Jeans bypass: allow Jeans refinement for n_jeans_bypass_levels
-     ! beyond the first holdback level
-     if(jeans_bypass_holdback .and. hydro .and. n_jeans_bypass_levels > 0) then
-        ! Find the first level where holdback activates
-        dx_min=(0.5D0**nlevelmax)*scale
-        holdback_threshold=(4d0**(1d0/ndim))*(dx_min/aexp)
-        holdback_first=nlevelmax+1
-        do jlevel=nlevelmax_part+nlevel_collapse+1,nlevelmax
-           dx_test=(0.5d0**jlevel)*scale
-           if(dx_test < holdback_threshold) then
-              holdback_first=jlevel
-              exit
-           endif
-        end do
-        ! Only bypass if within allowed range
-        if(ilevel < holdback_first + n_jeans_bypass_levels) then
-           call jeans_only_flag(ilevel)
-        endif
-     endif
-     return
-  endif
+  if(prevent_refine .and. q_refine_holdback) return
 
   ! Set position of cell centers relative to grid center
   do ind=1,twotondim
