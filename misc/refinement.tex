@@ -1539,6 +1539,149 @@ the framework presented here, and will be the subject of a future
 paper.
 
 
+\subsection{Can Turbulence Replace the Holdback?}
+\label{sec:turb_vs_holdback}
+
+A natural question is whether turbulent pressure support alone can
+prevent the refinement cascades that the holdback mechanism was
+designed to suppress, thereby rendering the holdback unnecessary.
+We present both a quantitative scaling analysis and a direct
+numerical test.
+
+\textbf{Scaling analysis.}
+Including turbulence, the Jeans length increases by a factor
+$\lJ^{\rm turb}/\lJ = (1 + \mathcal{M}_{\rm turb}^2)^{1/2}$,
+where $\mathcal{M}_{\rm turb} = \sigma_{\rm turb}/c_s$ is the
+turbulent Mach number.  In terms of refinement levels, turbulence
+prevents the cascade from extending by
+\begin{equation}
+  \Delta\ell_{\rm turb} = \tfrac{1}{2}\log_2(1 + \mathcal{M}_{\rm turb}^2)
+  \label{eq:turb_levels}
+\end{equation}
+levels.  Table~\ref{tab:turb_holdback} compares this with the
+holdback, which prevents approximately
+$\Delta\ell_{\rm hb} \approx \log_2(4^{1/3}/a_{\rm exp})$ levels at
+a given expansion factor.
+
+\begin{table}
+\centering
+\caption{Comparison of cascade prevention by turbulence and holdback.
+The turbulent Mach numbers are representative values for each
+environment.}
+\label{tab:turb_holdback}
+\begin{tabular}{lcccc}
+\toprule
+Environment & $\mathcal{M}_{\rm turb}$ & $\Delta\ell_{\rm turb}$ &
+$\Delta\ell_{\rm hb}(z{=}5)$ & Sufficient? \\
+\midrule
+IGM ($z\sim5$)     & 0.1--0.5 & 0.0--0.2 & 3.8 & No \\
+Filaments          & 1--3     & 0.5--1.7 & 3.8 & No \\
+Halo virial region & 1--3     & 0.5--1.7 & 3.8 & No \\
+Cold streams       & 3--10    & 1.7--3.3 & 3.8 & Marginal \\
+ISM (cold, dense)  & 5--10    & 2.3--3.3 & ---$^a$ & N/A \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize $^a$ Polytropic floor already
+prevents cascade in this regime.}
+\end{tabular}
+\end{table}
+
+At $z = 5$ ($a_{\rm exp} = 1/6$), the holdback suppresses
+$\sim$3.8~levels of refinement.  Turbulence can match this only
+for $\mathcal{M}_{\rm turb} \gtrsim 10$, which occurs exclusively
+in the cold, dense ISM --- where the polytropic floor already
+prevents the cascade.  In the diffuse IGM and filaments where the
+holdback is most critical, typical Mach numbers are
+$\mathcal{M}_{\rm turb} \sim 0.1$--$3$, providing at most 1--2
+levels of protection.  Furthermore, the resolved velocity
+dispersion scales as $\sigma_{\rm turb}(\ell) \propto \Delta
+x^{1/3}$ for Kolmogorov turbulence, so turbulent support weakens
+at finer levels, exacerbating the mismatch.
+
+We therefore conclude that \emph{turbulence alone cannot replace
+the holdback}; the two mechanisms address different physical
+regimes and are complementary rather than interchangeable.
+
+\subsection{Holdback as a Workaround for Cooling Errors}
+\label{sec:holdback_cooling}
+
+The analysis above assumes that all Jeans-triggered refinements at
+high redshift are physically motivated.  However, as demonstrated
+in Section~\ref{sec:overshoot}, the standard Newton--Raphson
+cooling solver can overshoot $T_{\rm eq}$, producing transiently
+low temperatures that shrink $\lJ$ by up to an order of magnitude.
+Similarly, a single-redshift cooling table applied at the wrong
+epoch can shift $T_{\rm eq}$ by factors of $\sim$2
+(Section~\ref{sec:multi_z}).  These numerical artefacts generate
+\emph{spurious} Jeans triggers that dominate the refinement budget
+at high~$z$.
+
+With a correct cooling implementation --- the Townsend exact
+integrator eliminating N-R overshooting, and multi-redshift
+table interpolation providing the appropriate UV background at
+each epoch --- most diffuse gas at high redshift remains in
+photoionisation equilibrium at $T \approx 10^4$\,K.  The Jeans
+length in this gas is large ($\lJ \sim 80$\,kpc at $n_{\rm H} =
+0.01\,{\rm cm}^{-3}$), well above the refinement threshold, and
+the Jeans criterion does not trigger.  Only genuinely
+self-shielded, collapsing gas triggers refinement --- which is the
+physically correct behaviour.
+
+\textbf{Numerical test.}
+We test this hypothesis directly by running two cosmological
+simulations from $z = 50$ to $z \approx 9$, restarting from
+identical initial conditions with the Jeans criterion active
+($N_J = 4$ at all levels):
+\begin{enumerate}
+  \item \textbf{Holdback ON + exact cooling}: standard configuration
+    with the Townsend integrator and multi-$z$ tables;
+  \item \textbf{Holdback OFF + exact cooling}: identical, but with
+    \code{q\_refine\_holdback = .false.}
+\end{enumerate}
+Both runs use a $512^3$ base grid ($\ell_{\rm min}=9$,
+$\ell_{\rm max}=17$) with 12~MPI ranks.
+Table~\ref{tab:holdback_test} summarises the results after one
+coarse time-step at $z \approx 9$.
+
+\begin{table}
+\centering
+\caption{Comparison of one coarse time-step at $z \approx 9$ with
+and without the holdback mechanism, both using the exact cooling
+integrator with multi-$z$ table interpolation and $N_J = 4$.}
+\label{tab:holdback_test}
+\begin{tabular}{lcc}
+\toprule
+Quantity & Holdback ON & Holdback OFF \\
+\midrule
+Active levels              & 12--14  & 12--17 \\
+Wall time (s)              & 125     & 418 \\
+Grid memory fraction       & 18.3\%  & 24.9\% \\
+Stars formed               & 245     & 277 \\
+Sinks formed               & 25      & 25 \\
+Fine time-step $\Delta t$  & $3.9 \times 10^{-3}$ & $4.0 \times 10^{-4}$ \\
+Star formation levels      & 12--14  & 12--17 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The key result is that the simulation \emph{without holdback did
+not undergo a refinement cascade}.  Grid memory usage increased by
+only 36\,per\,cent (24.9\% vs.\ 18.3\%), and the total number of
+sinks (the most massive collapsed objects) remained identical at~25.
+The 3.3$\times$ increase in wall time is entirely attributable to
+the CFL constraint at level~17 (the fine time-step is
+$\sim$10$\times$ smaller), not to an explosion in the number of
+cells.  Stars form at level~17 in the holdback-off run ---
+physically appropriate resolution for the densest, self-shielded
+gas.
+
+These results support the interpretation that the cosmological
+holdback mechanism has historically been compensating for cooling
+solver artefacts rather than preventing physically motivated
+refinement.  With an accurate cooling implementation, the holdback
+is no longer necessary for \emph{stability}; its remaining role is
+purely one of \emph{computational cost control}.
+
+
 %======================================================================
 \section{Conclusions}
 \label{sec:conclusions}
@@ -1574,16 +1717,29 @@ criterion in cosmological AMR simulations, implemented in the
     40--80\,per\,cent errors in the Jeans length at low densities, and
     that the N-R temperature overshoot introduces transient refinement
     noise that the exact integrator eliminates entirely.
+
+  \item \textbf{Holdback diagnosis.}  A direct numerical test at
+    $z \approx 9$ demonstrates that with accurate cooling, the
+    cosmological holdback can be disabled without triggering a
+    refinement cascade (Section~\ref{sec:holdback_cooling}).  The
+    holdback has historically compensated for cooling artefacts; with
+    the exact integrator and multi-$z$ tables, its role reduces to
+    computational cost control.  Turbulent pressure support, while
+    physically important, cannot replace the holdback in the diffuse
+    regime where it is most needed
+    (Section~\ref{sec:turb_vs_holdback}).
 \end{enumerate}
 
 Future work will extend the Jeans criterion to include turbulent
 pressure support (equation~\ref{eq:jeans_turb_disc}), using
 subgrid-scale turbulence models to estimate the unresolved velocity
-dispersion on the grid scale.  This turbulence-dependent refinement
-criterion, combined with the improved cooling module and holdback
-bypass presented here, will provide a comprehensive framework for
-accurate Jeans length resolution in next-generation cosmological
-simulations.
+dispersion on the grid scale.  A full star formation rate comparison
+from $z = 50$ to $z = 1$ between the standard cooling with holdback
+and the exact cooling without holdback is in progress.  This
+turbulence-dependent refinement criterion, combined with the
+improved cooling module and holdback bypass presented here, will
+provide a comprehensive framework for accurate Jeans length
+resolution in next-generation cosmological simulations.
 
 
 \section*{Acknowledgements}
