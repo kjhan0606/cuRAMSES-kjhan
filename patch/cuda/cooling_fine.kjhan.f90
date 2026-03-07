@@ -13,6 +13,7 @@ subroutine cooling_fine(ilevel)
   use amr_commons
   use hydro_commons
   use cooling_module
+  use eunha_cooling_mod, only: eunha_report, eunha_interp_redshift
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -41,6 +42,11 @@ subroutine cooling_fine(ilevel)
      call sub_cooling_fine(ilevel,igrid,ngrid)
   end do
 
+  ! Report comparison statistics at end of coarse step
+  if(ilevel==levelmin .and. cooling_method=='compare') then
+     call eunha_report(nstep_coarse)
+  endif
+
   if((cooling.and..not.neq_chem).and.ilevel==levelmin.and.cosmo)then
      if(myid==1)write(*,*)'Computing new cooling table'
 #ifdef grackle
@@ -68,6 +74,10 @@ subroutine cooling_fine(ilevel)
      endif
 #else
      call set_table(dble(aexp))
+     ! Update Eunha multi-z table if loaded
+     if(cooling_method/='original') then
+        call eunha_interp_redshift(1.0d0/dble(aexp) - 1.0d0)
+     endif
 #endif
   endif
 
@@ -94,6 +104,8 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
   use amr_commons
   use hydro_commons
   use cooling_module
+  use eunha_cooling_mod, only: eunha_solve, acc_sum_rdiff, acc_max_rdiff, &
+       acc_sum_dT_orig, acc_sum_dT_exact, acc_ncell, acc_nsign
 #ifdef ATON
   use radiation_commons, ONLY: Erad
 #endif
@@ -119,6 +131,8 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
   integer,dimension(1:nvector)::ind_cell,ind_leaf
   real(kind=8),dimension(1:nvector)::nH,T2,T2_new,delta_T2,ekk,err,emag
   real(kind=8),dimension(1:nvector)::T2min,Zsolar,boost
+  real(kind=8),dimension(1:nvector)::delta_T2_eunha
+  real(dp)::rdiff,old_max
 
 #ifdef grackle
   real(kind=8) gr_density(nvector), gr_energy(nvector), &
@@ -334,9 +348,42 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
      end do
      delta_T2(1:nleaf) = T2_new(1:nleaf) - T2(1:nleaf)
 #else
-     ! Compute net cooling at constant nH
-     if(cooling.and..not.neq_chem)then
-        call solve_cooling(nH,T2,Zsolar,boost,dtcool,delta_T2,nleaf)
+     ! Eunha exact / compare / original cooling dispatch
+     if(cooling_method=='exact' .or. cooling_method=='compare') then
+        call eunha_solve(nH,T2,Zsolar,dtcool,delta_T2_eunha,nleaf)
+     endif
+
+     if(cooling_method=='original' .or. cooling_method=='compare') then
+        if(cooling.and..not.neq_chem) &
+             call solve_cooling(nH,T2,Zsolar,boost,dtcool,delta_T2,nleaf)
+     endif
+
+     if(cooling_method=='exact') then
+        delta_T2(1:nleaf) = delta_T2_eunha(1:nleaf)
+     endif
+
+     if(cooling_method=='compare') then
+        do i=1,nleaf
+           rdiff = abs(delta_T2(i)-delta_T2_eunha(i)) / max(abs(T2(i)),1d0)
+           !$omp atomic
+           acc_sum_rdiff = acc_sum_rdiff + rdiff
+           ! atomic max via CAS-style loop
+           old_max = acc_max_rdiff
+           do while(rdiff > old_max)
+              acc_max_rdiff = rdiff
+              old_max = acc_max_rdiff
+           end do
+           !$omp atomic
+           acc_sum_dT_orig = acc_sum_dT_orig + delta_T2(i)
+           !$omp atomic
+           acc_sum_dT_exact = acc_sum_dT_exact + delta_T2_eunha(i)
+           !$omp atomic
+           acc_ncell = acc_ncell + 1
+           if(delta_T2(i) * delta_T2_eunha(i) < 0.0d0) then
+              !$omp atomic
+              acc_nsign = acc_nsign + 1
+           endif
+        end do
      endif
 #endif
 

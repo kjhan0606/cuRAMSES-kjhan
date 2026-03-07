@@ -3,6 +3,7 @@
 subroutine read_hydro_params(nml_ok)
   use amr_commons
   use hydro_commons
+  use eunha_cooling_mod, only: eunha_load_multi_z
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -64,7 +65,8 @@ subroutine read_hydro_params(nml_ok)
        & ,sigmav_max,star_ratio_floor,mloadAGN,T2maxAGN,f_bondi,random_jet         &
        & ,drag,boost_drag,selfgrav,spin_bh,bhspinmerge,vrel_merge,rmerge,omega_b   &
        & ,bondi,mad_jet,eps_sn1,eps_sn2,tol                             &
-       & ,sf_virial,sf_trelax,sf_model,sf_birth_properties
+       & ,sf_virial,sf_trelax,sf_model,sf_birth_properties &
+       & ,cooling_method,grackle_table
 #ifdef grackle
   namelist/grackle_params/grackle_comoving_coordinates,grackle_with_radiative_cooling,grackle_primordial_chemistry &
        & ,grackle_metal_cooling,grackle_UVbackground,grackle_h2_on_dust,grackle_cmb_temperature_floor &
@@ -97,6 +99,18 @@ subroutine read_hydro_params(nml_ok)
   rewind(1)
   read(1,NML=grackle_params)
 #endif
+  ! Validate and initialize Eunha cooling
+  if(cooling_method=='exact' .or. cooling_method=='compare') then
+     if(len_trim(grackle_table)==0) then
+        if(myid==1) write(*,*) 'ERROR: grackle_table required for cooling_method=',trim(cooling_method)
+        call clean_stop
+     endif
+     if(myid==1) write(*,'(A,A,A,A)') ' Cooling method: ', trim(cooling_method), &
+          '  table: ', trim(grackle_table)
+     call eunha_load_multi_z(trim(grackle_table))
+  else
+     if(myid==1 .and. cooling) write(*,'(A)') ' Cooling method: original (RAMSES solve_cooling)'
+  endif
 #ifdef ATON
   if(aton)call read_radiation_params(1)
 #endif

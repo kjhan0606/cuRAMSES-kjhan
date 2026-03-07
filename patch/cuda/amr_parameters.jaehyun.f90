@@ -287,6 +287,13 @@ module amr_parameters
   logical ::selfgrav=.true.
   logical ::mad_jet=.false.
 
+  ! Cooling method selection (runtime namelist)
+  ! 'original': RAMSES solve_cooling (default)
+  ! 'exact'   : Eunha exact_integrate (Grackle + Townsend)
+  ! 'compare' : run both, use original for physics, report diagnostics
+  character(LEN=16)::cooling_method='original'
+  character(LEN=256)::grackle_table='grackle_multi_z.bin'
+
   ! SIDM (Self-Interacting Dark Matter) parameters
   logical ::sidm=.false.            ! Enable SIDM Monte Carlo scattering
   real(dp)::sidm_cross_section=1.0d0 ! sigma/m [cm^2/g] (sigma_0 for velocity-dependent)
