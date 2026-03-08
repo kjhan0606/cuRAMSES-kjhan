@@ -382,8 +382,9 @@ if __name__ == '__main__':
     Nn, Nt = len(nH_grid), len(T_grid)
 
     # Grackle net rate [erg/cm^3/s] on (nH, T) — already in the table
-    grackle_rate = tab['net_rate'][:, Z_idx, :]  # shape (Nn, Nt)
-    grackle_mu = tab['mmw'][:, Z_idx, :]         # shape (Nn, Nt)
+    # Negate: Grackle convention (negative=cooling) -> RAMSES (positive=cooling)
+    grackle_rate = -tab['net_rate'][:, Z_idx, :]  # shape (Nn, Nt)
+    grackle_mu = tab['mmw'][:, Z_idx, :]          # shape (Nn, Nt)
 
     # Compute RAMSES rate on the same grid
     print(f'Computing RAMSES cooling rates on {Nn}x{Nt} grid...')
@@ -491,7 +492,8 @@ if __name__ == '__main__':
     Z_sol = tab['metallicity'][Z_idx_sol]
     print(f'\nAlso computing for Z = {Z_sol:.2f} Z_solar (index {Z_idx_sol})...')
 
-    grackle_rate_sol = tab['net_rate'][:, Z_idx_sol, :]
+    # Negate: Grackle convention (negative=cooling) -> RAMSES (positive=cooling)
+    grackle_rate_sol = -tab['net_rate'][:, Z_idx_sol, :]
     grackle_mu_sol = tab['mmw'][:, Z_idx_sol, :]
 
     ramses_rate_sol = np.zeros((Nn, Nt))

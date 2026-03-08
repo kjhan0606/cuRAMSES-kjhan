@@ -154,6 +154,7 @@ subroutine eunha_load_table(filename)
 
   ! Convert net_rate: erg/cm^3/s -> erg/g/s
   ! rho = nH * m_H / X_H  (with metallicity-dependent X_H)
+  ! Negate sign: Grackle convention (negative=cooling) -> RAMSES (positive=cooling)
   do i = 1, nd
      nH_val = tab_density(i)
      do j = 1, nm
@@ -164,7 +165,7 @@ subroutine eunha_load_table(filename)
         mf_X = X_H * f_scale
         rho = nH_val * m_H / mf_X
         do k = 1, nt
-           tab_net_rate(k, j, i) = raw_rate(k, j, i) / rho
+           tab_net_rate(k, j, i) = -raw_rate(k, j, i) / rho
         end do
      end do
   end do
@@ -944,6 +945,7 @@ subroutine eunha_load_multi_z(filename)
      tab_mmw_z(:,:,:,iz) = raw_mmw(:,:,:)
 
      ! Convert net_rate: erg/cm^3/s -> erg/g/s
+     ! Negate sign: Grackle convention (negative=cooling) -> RAMSES (positive=cooling)
      do i = 1, nd
         nH_val = tab_density(i)
         do j = 1, nm
@@ -954,7 +956,7 @@ subroutine eunha_load_multi_z(filename)
            mf_X = X_H * f_scale
            rho = nH_val * m_H / mf_X
            do k = 1, nt
-              tab_net_rate_z(k, j, i, iz) = raw_rate(k, j, i) / rho
+              tab_net_rate_z(k, j, i, iz) = -raw_rate(k, j, i) / rho
            end do
         end do
      end do
