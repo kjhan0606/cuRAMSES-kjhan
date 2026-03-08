@@ -475,6 +475,61 @@ from:
     \citep{Ploeckinger2015}, scaled linearly with metallicity~$Z$.
 \end{itemize}
 
+\subsubsection{Adaptive Sub-stepping (Subcycling)}
+\label{sec:subcycling}
+
+It is sometimes stated that the \ramses\ cooling solver uses subcycling
+to prevent overcooling.  This is correct: rather than applying
+equation~(\ref{eq:NR_update}) once per hydrodynamic time-step~$\Delta t$,
+the solver integrates forward in time through a sequence of adaptive
+sub-steps.  The algorithm maintains a pseudo-time variable
+$t_{\rm sub}$, initialised to zero, and repeats the linearised implicit
+update until $t_{\rm sub}$ reaches the target
+$t_{\rm max} = (2X_{\rm H}/3k_{\rm B})\,n_{\rm H}\,\Delta t$.
+Each sub-step advances $t_{\rm sub}$ by
+$\delta t_{\rm sub} = 1/w_{\rm cool}$, where $w_{\rm cool}$ is the
+adaptive rate defined in equation~(\ref{eq:NR_update}).  Cells that
+reach $t_{\rm max}$ are deactivated; the loop terminates when all cells
+are done or after 500 iterations.  A final linear interpolation between
+the last two sub-steps ensures that the solution lands exactly at
+$t_{\rm max}$:
+\begin{equation}
+  T_2^{\rm final} = T_2^{(n)}\,
+  \frac{t_{\rm max} - t^{(n-1)}}{t^{(n)} - t^{(n-1)}}
+  + T_2^{(n-1)}\,
+  \frac{t^{(n)} - t_{\rm max}}{t^{(n)} - t^{(n-1)}}.
+  \label{eq:subcycle_interp}
+\end{equation}
+
+The key parameter controlling sub-step size is
+$\Delta_{\rm var} = 4$, which limits the relative temperature change per
+sub-step to roughly a factor of~4.  When the cooling rate is large, the
+solver takes many small sub-steps and tracks the temperature evolution
+accurately.  In practice, however, three issues remain:
+
+\begin{enumerate}
+  \item \textbf{First-order accuracy.}  Each sub-step is a linearised
+    implicit Euler update --- first-order in~$\delta t_{\rm sub}$.
+    Higher-order schemes (e.g.\ Runge--Kutta) would reduce the number of
+    sub-steps needed for the same accuracy, but the \ramses\ solver does
+    not employ them.
+  \item \textbf{Permissive step control.}  $\Delta_{\rm var} = 4$ allows
+    the temperature to change by up to a factor of~4 in a single
+    sub-step.  Near the cooling--heating equilibrium, where the
+    temperature needs to settle to $T_{\rm eq}$ with per cent-level
+    accuracy (since the Jeans length scales as $T^{1/2}$), this is too
+    coarse.
+  \item \textbf{Final interpolation error.}  The linear interpolation
+    (equation~\ref{eq:subcycle_interp}) assumes that $T_2$ varies
+    linearly between the last two sub-steps.  If the net cooling rate
+    changes sign in this interval (i.e.\ the cell crosses $T_{\rm eq}$
+    between sub-steps $n{-}1$ and~$n$), the interpolation can land on
+    the wrong side of the equilibrium.
+\end{enumerate}
+
+Thus, while subcycling mitigates the most extreme overcooling events, it
+does not eliminate the systematic biases discussed below.
+
 \subsubsection{Overshooting Near Thermal Equilibrium}
 \label{sec:overshoot}
 
