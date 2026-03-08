@@ -106,7 +106,10 @@ def main():
         f.write(struct.pack('i', nz))
         f.write(struct.pack('iii', L_ref, M_ref, N_ref))
         f.write(z_values.astype(np.float64).tobytes())
-        f.write(struct.pack('7d', *hdr_ref))
+        # hdr_ref = (z_val, log_dmin, log_dmax, log_zmin, log_zmax, log_tmin, log_tmax)
+        # Fortran multi-z reader expects: log_dmin, log_dmax, log_zmin, log_zmax, log_tmin, log_tmax, unused
+        # Skip z_val (index 0) — z values are stored separately in z_values array
+        f.write(struct.pack('7d', *hdr_ref[1:], 0.0))
         f.write(log_T_ref.astype(np.float64).tobytes())
         for iz in range(nz):
             f.write(all_rates[iz].astype(np.float64).tobytes())

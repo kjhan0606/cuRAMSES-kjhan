@@ -352,7 +352,7 @@ subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
   real(dp),dimension(1:3)::skip_loc
   real(dp),dimension(1:twotondim,1:3)::xc
   real(dp),dimension(1:nvector,1:ndim)::xx
-  real(dp):: demoninator !(ONS)
+
   integer :: nlevel_collapse =3
 
   iflag = 0
@@ -465,7 +465,7 @@ subroutine userflag_fine(ilevel)
   real(dp),dimension(1:3)::skip_loc
   real(dp),dimension(1:twotondim,1:3)::xc
   real(dp),dimension(1:nvector,1:ndim)::xx
-  real(dp):: demoninator !(ONS)
+
   integer :: nlevel_collapse =3
   
   logical::prevent_refine
@@ -495,28 +495,15 @@ subroutine userflag_fine(ilevel)
   ! This translates into :
   ! - a constant physical resolution at low redshift (ilevel<=nlevelmax_part+nlevel_collapse)
   ! - a constant comobile resolution at high redshift (ilevel>nlevelmax_part+nlevel_collapse)
-  if(cosmo.and.cooling)then
-     ! Finest cell size
-     if(q_refine_holdback)then
-         dx_min=(0.5D0**nlevelmax)*scale
-         ! Test is designed so that nlevelmax is activated at aexp~0.8
-         if(ilevel.gt.nlevelmax_part+nlevel_collapse)then
-             if(dx_loc<(4d0**(1d0/ndim))*(dx_min/aexp)) prevent_refine=.true.
-         endif
-         
-     else    
-         if(ilevel.gt.nlevelmax_part+nlevel_collapse)then
-             demoninator = 1+exp(-ref_fall_rate*(aexp-(4**(1./ndim)*0.5**(nlevelmax-ilevel))))
-             m_refine(ilevel) = int(m_basic_refine(ilevel) + (m_refine_effective-m_basic_refine(ilevel))*(1-1/demoninator)) ! ONS
-         else
-            m_refine(ilevel) = m_basic_refine(ilevel)
-         endif
-         if(myid==1)print*, "ONS : m_refine: ilevel/m_refine",ilevel,m_refine(ilevel)
+  if(cosmo.and.cooling.and.q_refine_holdback)then
+     ! Binary holdback: prevent refinement at high levels at early times
+     dx_min=(0.5D0**nlevelmax)*scale
+     if(ilevel.gt.nlevelmax_part+nlevel_collapse)then
+         if(dx_loc<(4d0**(1d0/ndim))*(dx_min/aexp)) prevent_refine=.true.
      endif
-      
   endif
 
-  if(prevent_refine .and. q_refine_holdback) return
+  if(prevent_refine) return
 
   ! Set position of cell centers relative to grid center
   do ind=1,twotondim

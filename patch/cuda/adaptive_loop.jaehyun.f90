@@ -20,6 +20,10 @@ subroutine adaptive_loop
 !jhshin1
   real(kind=8),save::tstart=0.0
 !jhshin2
+  ! SFR tracking
+  real(dp)::scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s
+  real(dp)::mstar_tot_glob,scale_m_sfr,V_box_sfr,sfr_inst
+  real(dp),save::mstar_glob_old=0.0d0, t_sfr_old=-1.0d30
 
 #ifndef WITHOUTMPI
   tt1=MPI_WTIME()
@@ -192,6 +196,10 @@ subroutine adaptive_loop
         call MPI_ALLREDUCE(real_mem,real_mem_max,1,MPI_REAL,MPI_MAX,MPI_COMM_WORLD,info)
         call MPI_ALLREDUCE(real_mem,real_mem_min,1,MPI_REAL,MPI_MIN,MPI_COMM_WORLD,info)
         real_mem_tot=real_mem_max
+        ! Global star mass for SFR diagnostic
+        ! mstar_tot is already global (identical on all ranks from star_formation ALLREDUCE)
+        ! No need for MPI_ALLREDUCE here — just use it directly
+        mstar_tot_glob=mstar_tot
         if(myid==1)then
            if (tot_pt==0) muspt=0. ! dont count first timestep
            n_step = int(numbtot(1,levelmin),kind=8)*twotondim
@@ -207,6 +215,26 @@ subroutine adaptive_loop
            call writemem(real_mem_tot)
            call writemem_minmax(real_mem_min,real_mem_max)
            write(*,*)'Total running time:', NINT((tt2-tstart)*100.0)*0.01,'s'
+           ! SFR diagnostic
+           if(nstar_tot>0)then
+              call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)
+              scale_m_sfr=scale_d_s*scale_l_s**3
+              V_box_sfr=(boxlen_ini*3.08d24/(h0/100d0)/3.0857d24)**3
+              sfr_inst=0.0d0
+              if(t_sfr_old>-1.0d29 .and. t>t_sfr_old)then
+                 sfr_inst=(mstar_tot_glob-mstar_glob_old)*scale_m_sfr/1.98892d33 &
+                         /((t-t_sfr_old)*scale_t_s/3.15576d7)
+              endif
+              write(*,'(" SFR: N*=",I10," M*=",1PE10.3," Msun",' // &
+                 '" SFR=",1PE10.3," Msun/yr",' // &
+                 '" SFRD=",1PE10.3," Msun/yr/Mpc3  z=",0PF7.2)') &
+                 nstar_tot, &
+                 mstar_tot_glob*scale_m_sfr/1.98892d33, &
+                 sfr_inst, sfr_inst/V_box_sfr, &
+                 1.0d0/aexp-1.0d0
+              mstar_glob_old=mstar_tot_glob
+              t_sfr_old=t
+           endif
         endif
         if(walltime_hrs.gt.0d0) then
            wallsec = walltime_hrs*3600.     ! Convert from hours to seconds
