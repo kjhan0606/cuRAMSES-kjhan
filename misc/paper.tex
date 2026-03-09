@@ -31,8 +31,8 @@
 \newcommand{\Olog}[1]{\mathcal{O}(#1)}
 \newcommand{\code}[1]{\texttt{#1}}
 
-\title[cuRAMSES: Scalable AMR Optimizations for Cosmological Simulations]
-{cuRAMSES: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
+\title[cuRAMSES~I: Scalable AMR Optimizations for Cosmological Simulations]
+{cuRAMSES~I: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
 
 \author[J.~Kim]{
 Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
@@ -208,8 +208,7 @@ Section~\ref{sec:conclusions}.
 
 Throughout this paper, we use the notation of \citet{Teyssier2002}, where
 $\nlevelmax$ is the maximum AMR level, $\ngridmax$ is the maximum
-number of grids per rank, \code{twotondim} $= 2^{N_{\rm dim}} = 8$
-is the number of cells per oct in three dimensions, and
+number of grids per rank, and
 $\ncpu$ is the total number of MPI ranks.
 
 
@@ -262,7 +261,7 @@ three successive levels of splitting, with the corresponding
 
 \begin{figure}
 \centering
-\includegraphics[width=\columnwidth]{../misc/ksection_progressive.png}
+\includegraphics[width=\columnwidth]{./ksection_progressive.png}
 \caption{Progressive recursive \ksec\ decomposition for $\ncpu = 12 =
 3 \times 2 \times 2$. (a)~The undivided simulation domain. (b)~First
 split into $k = 3$ slabs along the longest axis. (c)~Each slab bisected
@@ -322,7 +321,7 @@ the following steps are performed.
 \item An \code{MPI\_ALLREDUCE} aggregates the local histograms across
   all $\ncpu$ ranks to obtain the global cumulative load at each wall
   position. The binary search converges when the relative load imbalance
-  $|\hat{L}_j - L_j^{\rm target}| / L_j^{\rm target}$ falls below a
+ falls below a
   tolerance $\epsilon_{\rm tol}$ (typically 1\,per\,cent), or when the
   wall position can no longer be resolved at the histogram resolution.
 
@@ -339,20 +338,20 @@ The default \ramses\ load balancer weights all cells equally.
 \curamses\ supports an optional memory-weighted cost function
 \begin{equation}
 C_{\rm cell} = 2^{-N_{\rm dim}}\bigl(w_{\rm grid} +
-n_{\rm part}({\rm igrid}) \cdot w_{\rm part} +
-n_{\rm sink}({\rm igrid}) \cdot w_{\rm sink}\bigr),
+n_{\rm part}({\code{igrid}}) \cdot w_{\rm part} +
+n_{\rm sink}({\code{igrid}}) \cdot w_{\rm sink}\bigr),
 \label{eq:cost_function}
 \end{equation}
 where $w_{\rm grid}$ is the memory cost per grid slot (default 270
 bytes, accounting for hydro, gravity, and AMR bookkeeping arrays),
 $w_{\rm part}$ is the memory cost per particle slot (default 12 bytes
 for position, velocity, mass, and linked-list pointers),
-$n_{\rm part}({\rm igrid})$ is the number of dark matter and star
+$n_{\rm part}({\code{igrid}})$ is the number of dark matter and star
 particles (both sharing the same memory layout) attached to grid
 \code{igrid}, and $w_{\rm sink}$ is a computational weight per sink
 particle (default 500) that accounts for the expensive feedback and
 accretion operations associated with each sink. The sink count
-$n_{\rm sink}({\rm igrid})$ is obtained by descending the AMR tree
+$n_{\rm sink}({\code{igrid}})$ is obtained by descending the AMR tree
 from each sink position to its leaf cell.
 The division by $\twotondim$ distributes the grid
 cost evenly among its eight cells.
@@ -362,11 +361,8 @@ particles per cell) receive fewer cells, preventing memory exhaustion
 on particle-heavy ranks.
 Our tests with $200\,\mathrm{M}$ particles on 12 ranks show that
 memory-weighted balancing reduces the peak-to-mean memory ratio from
-2.5 to 1.3 without affecting physics results (identical
-$e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$ to machine precision).
-
-Profiling shows that MPI communication dominates the load-balance cost
-(${\sim}50$\,per\,cent), motivating the \code{nremap = 5} default.
+2.5 to 1.3 without affecting physics results (identical numbers of created grids, hydro quantities of cells, $n_\star$, $n_\texttt{sink}$, 
+$e_{\rm cons}$, $e_{\rm pot}$, and $e_{\rm kin}$ to machine precision after advancing ten coarse time steps).
 
 
 \section{AUTO-TUNING MPI COMMUNICATIONS}
@@ -465,7 +461,7 @@ startup latency dominates.
 
 \begin{figure}
 \centering
-\includegraphics[width=\columnwidth]{../misc/hierarchical_exchange.pdf}
+\includegraphics[width=\columnwidth]{./hierarchical_exchange.pdf}
 \caption{Hierarchical exchange communication pattern for $\ncpu = 12
 \,(= 3 \times 2 \times 2)$. Coloured rectangles represent MPI ranks
 numbered 1--12, using the same colour scheme as
@@ -603,10 +599,10 @@ $B = 42$ extends these to 43 and 41, respectively.
 The integer coordinates of a grid at level $l$ are computed from its
 floating-point centre position $\mathbf{x}_g$ as
 \begin{equation}
-i_d = \mathrm{INT}(x_{g,d} \cdot 2^{l-1}), \quad d \in \{x, y, z\},
+i_d = \texttt{Floor}(x_{g,d} \cdot 2^{l-1}), \quad d \in \{x, y, z\},
 \label{eq:grid_to_int}
 \end{equation}
-where coordinates are in units of the coarse grid spacing.
+where \texttt{Floor} is the integer floor function and coordinates are in units of the coarse grid spacing.
 The integer coordinates use zero-based (C-style) indexing,
 starting from $i_d = 0$, even though Fortran arrays are
 conventionally one-based.
@@ -922,7 +918,7 @@ We provide three FoF backends with automatic selection.
 
 \paragraph{Sequential brute-force.}
 The original $\Olog{N^2}$ algorithm, preserved as a correctness
-reference.
+reference. But note that the order of sink array changes by swapping a pair of sinks during the FoF link.
 
 \paragraph{Serial oct-tree.}
 An oct-tree is built over the sink positions.  For each sink particle,
@@ -2622,3 +2618,4 @@ Parameter & Namelist block & Type & Default & Description \\
 \label{lastpage}
 
 \end{document}
+
