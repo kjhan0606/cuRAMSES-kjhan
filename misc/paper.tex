@@ -227,7 +227,7 @@ $\Olog{\sum_l k_l}$ messages per operation. A Morton key hash table \citep{Morto
 and, together with on-demand allocation of redundant large arrays,
 saves over 1\,GB of memory per rank. Algorithmic optimizations to the multigrid Poisson
 solver (Section~\ref{sec:multigrid}) reduce its share of total runtime
-from 55\,per\,cent to 39\,per\,cent, while a spatial hash binning
+from 50\,per\,cent to 40\,per\,cent, while a spatial hash binning
 scheme (Section~\ref{sec:feedback}) accelerates Type~II supernova and
 AGN feedback by orders of magnitude. We also implement variable-$\ncpu$
 restart for both HDF5 and binary formats (Section~\ref{sec:varcpu}).
@@ -805,13 +805,14 @@ breakdowns, is provided in Appendix~\ref{app:memory}.
 Solving the Poisson equation $\nabla^2\phi = 4\pi G\rho$ for
 self-gravity is one of the most expensive operations in cosmological
 AMR simulations.  In baseline \ramses, profiling reveals that the
-Poisson solver accounts for approximately 55\,per\,cent of the total
-wall-clock time per coarse step.  We describe two complementary
+Poisson solver accounts for approximately 50\,per\,cent of the total
+wall-clock time per coarse step; this fraction grows further as the
+AMR structure develops and deeper levels are populated.  We describe two complementary
 strategies: optimizing the iterative multigrid solver that operates on
 all AMR levels (Section~\ref{sec:mg_method}), and replacing it with a
 direct FFT solve on the uniform base level
 (Section~\ref{sec:fftw3}).  Together these reduce the Poisson
-fraction to approximately 39\,per\,cent.
+fraction to approximately 40\,per\,cent.
 
 \subsection{Multi-Grid Method}
 \label{sec:mg_method}
@@ -829,7 +830,7 @@ of single-grid relaxation methods.
 
 \ramses\ employs the standard V-cycle variant, in which the hierarchy
 of grids is traversed once downward (restriction) and once upward
-(prolongation).  At each AMR level the smoother is a \emph{red-black
+(prolongation) on the hierarchy of levels.  At each AMR level the smoother is a \emph{red-black
 Gauss--Seidel} (RBGS) iteration
 \citep{Wesseling1992,Trottenberg2001}: the grid cells are partitioned
 into two disjoint subsets (``red'' and ``black'') that form a
@@ -843,8 +844,7 @@ trivially parallelisable \citep{Adams2001}.
 \label{sec:mg_vcycle}
 
 Starting at the finest AMR level, the algorithm applies RBGS
-pre-smoothing, computes the residual $r = f - A\phi$, and
-\emph{restricts} the residual to the next coarser level.  This
+pre-smoothing and then \emph{restricts} the result to the next coarser level.  This
 restriction--smooth sequence descends to the coarsest level, where a
 direct solve (or additional smoothing) is applied.  The correction is
 then \emph{prolongated} (interpolated) back up through each level,
@@ -863,20 +863,31 @@ We apply several targeted optimizations:
 \begin{enumerate}
 \item \textbf{Precomputed neighbour cache.}  Neighbour grid indices
   are precomputed into a contiguous array before the V-cycle,
-  amortising the cost of hash table lookups over all iterations
+  reducing the cost of hash table lookups over all iterations
   (see Appendix~\ref{app:mg_details}).
 \item \textbf{Merged red-black sweep.}  The inter-sweep ghost
-  exchange between the red and black passes is removed: both colours
-  are updated using locally available data, relying on the fact that
-  the one-step-stale boundary values introduce only an $O(h^2)$
-  perturbation that is corrected by subsequent iterations.
-\item \textbf{Fused residual and norm.}  The residual $r$ and its
-  $L^2$ norm $\|r\|_2^2$ are computed in a single pass, eliminating
-  a redundant exchange.
+  exchange between the red and black passes is removed: the black
+  sweep proceeds using boundary values that have not yet been refreshed
+  from neighbouring ranks.  Because the multigrid smoother is used only
+  as a preconditioner (not as a standalone solver), these slightly
+  outdated boundary values do not affect convergence; any small error
+  they introduce is corrected by the next iteration.
+\item \textbf{Fused residual and norm.}  The multigrid algorithm
+  needs to know when to stop iterating.  It does so by computing, at
+  each cell, the residual $r_i = f_i - (A\phi)_i$ (i.e.\ how far the
+  current solution is from satisfying the Poisson equation), and then
+  measuring the overall error as the sum of squares
+  $\sum_i r_i^2$ (the squared $L^2$ norm of the residual vector).
+  In the original code these two quantities are computed in separate
+  loops, each requiring its own ghost-zone exchange.  We fuse both
+  computations into a single loop, accumulating $\sum_i r_i^2$ while
+  computing $r_i$, thereby eliminating one exchange per iteration.
 \end{enumerate}
 These reduce the exchange count from 9 to 5 per iteration
 ($-44$\,per\,cent), as shown in the lower panel of
-Figure~\ref{fig:mg_vcycle}.  Implementation details are given in
+Figure~\ref{fig:mg_vcycle}.  The merged red-black technique is a
+standard relaxed-synchronisation strategy for distributed multigrid
+solvers \citep{Adams2001,Briggs2000}.  Implementation details are given in
 Appendix~\ref{app:mg_details}.
 
 \begin{figure}
@@ -901,7 +912,7 @@ Appendix~\ref{app:mg_details}.
 \label{sec:mg_performance}
 
 Combining all optimizations, the MG Poisson solver's share of total
-runtime is reduced from 55.1\,per\,cent to 38.6\,per\,cent in a
+runtime is reduced from approximately 50\,per\,cent to 40\,per\,cent in a
 representative test ($200\,\mathrm{M}$ particles, 12 ranks, 10 coarse
 steps). The iteration counts are unchanged (Level~8, 5 iterations and
 Level~9, 4 iterations), confirming that the merged red-black exchange
@@ -944,26 +955,12 @@ We replace \code{MPI\_ALLTOALL} (count exchange) and
 \code{MPI\_ISEND}/\code{MPI\_IRECV} targeting only actual
 communication partners.  Partner lists are precomputed from the
 spatial bounding boxes (\code{bisec\_cpubox\_min/max}) and the FFTW
-slab ranges using a symmetric overlap test,
-\begin{equation}
-  \text{overlap}(A, B) \;\equiv\;
-  x_{\max}^{(A)} > \frac{s_{\min}^{(B)} - 0.5}{N_x}
-  \;\wedge\;
-  x_{\min}^{(A)} < \frac{s_{\max}^{(B)} + 1.5}{N_x}
-\label{eq:fftw_overlap}
-\end{equation}
-where $[x_{\min}^{(A)}, x_{\max}^{(A)}]$ is rank~$A$'s spatial
-bounding box and $[s_{\min}^{(B)}, s_{\max}^{(B)}]$ is slab~$B$'s
-grid index range.  The asymmetric padding ($-0.5$ and $+1.5$) arises
-from cell-centred positioning: a cell at integer index~$s$ spans
-$[s - 0.5,\, s + 0.5]$ in grid coordinates, and adding one cell of
-ghost padding on the right extends the upper bound by an additional
-$+1$.  The same test is evaluated on both sides (sender
-computes which slabs to reach and the receiver computes which domains
-overlap), guaranteeing that every \code{MPI\_ISEND} has a matching
-\code{MPI\_IRECV}.  Periodic boundary wrapping is handled by
-extending the overlap check when $s_{\min} < 0$ or $s_{\max} \ge
-N_x$.  Partner lists are cached and invalidated only when the domain
+slab ranges using a symmetric overlap test: each rank determines which
+FFTW slabs overlap its spatial domain, and each slab determines which
+ranks overlap its grid range, guaranteeing that every
+\code{MPI\_ISEND} has a matching \code{MPI\_IRECV}.
+Periodic boundary wrapping is properly handled by the overlap check.
+Partner lists are cached and invalidated only when the domain
 decomposition changes (load rebalancing).
 
 The forward and reverse data exchanges use per-partner buffer offsets
@@ -979,8 +976,7 @@ $O(n_{\text{partners}})$ vs.\ $O(\ncpu)$ at large scale).
 The FFTW3 solver reduces the base-level Poisson time from 241\,s
 (MG V-cycle) to 28.9\,s (\textbf{8.3$\times$ speedup}) on 12~ranks
 with a $512^3$ base grid, matching the cuFFT GPU result (28\,s)
-without requiring a GPU.  Energy conservation is identical,
-$e_{\text{cons}} = 6.12 \times 10^{-4}$ for both FFTW3 and cuFFT.
+without requiring a GPU.
 The solver is enabled via \code{use\_fftw=.true.} in
 \code{\&RUN\_PARAMS} and requires compilation with
 \code{make USE\_FFTW=1}.
@@ -1033,9 +1029,7 @@ $n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
-threads the events within each bin,
-$\text{bin\_head}(i_x, i_y, i_z) \to \text{SN}_1 \to
-\text{SN}_2 \to \cdots$
+threads the events within each bin.
 
 For each cell, we compute its bin index and check only the 27
 neighbouring bins (the cell's own bin plus its 26 face-, edge-, and
@@ -1155,22 +1149,24 @@ search extends transitively.  Periodic boundary wrapping uses a
 half-box check.
 
 \paragraph{Serial oct-tree.}
-An oct-tree is built over the sink positions.  For each seed particle,
+An oct-tree is built over the sink positions.  For each sink particle,
 tree nodes whose bounding sphere does not overlap the linking sphere
 are pruned, reducing the average neighbour search to
 $\Olog{N\log N}$.  Linked particles are erased from the tree
-(\code{EraseFromTree}) so subsequent searches skip them.  This is
+so subsequent searches skip them.  This is
 equivalent to the brute-force result but dramatically faster for
 $N_{\rm sink} \gtrsim 500$.
 
-\paragraph{MPI\,+\,OpenMP oct-tree.}
-The particle index range is divided among MPI ranks, and each rank's
-sub-range is further divided among OpenMP threads.  All threads share
-the same read-only tree but maintain private inclusion and group-ID
-arrays.  A thread-safe variant of \code{FoF\_link}
-(\code{Omp\_FoF\_link}) replaces \code{EraseFromTree} with a
-thread-local \code{included} array, enabling concurrent traversal
-without locks.
+\paragraph{OpenMP oct-tree.}
+Every MPI rank builds the same oct-tree from the full (replicated)
+sink particle list, so no MPI data distribution is involved; the
+parallelism is purely intra-rank via OpenMP.  The particle index range
+is divided among OpenMP threads, and all threads share the same
+read-only tree but maintain private inclusion and group-ID arrays.
+A thread-safe variant of \code{FoF\_link}
+(\code{Omp\_FoF\_link}) replaces the sequential tree-erasure step
+with a thread-local \code{included} array, enabling concurrent
+traversal without locks.
 
 Cross-boundary groups, i.e.\ those whose transitive closure extends into a
 lower thread's index range, are \emph{rolled back}, meaning that the partial group
@@ -1183,9 +1179,8 @@ negligible.
 
 After the parallel phase, each thread's partial results are
 consolidated, whereby thread-local group IDs are offset by the cumulative count
-of preceding threads, and MPI ranks chain their offsets via sequential
-\code{MPI\_Send}/\code{MPI\_Recv}.  The final merged result is broadcast
-to all ranks.
+of preceding threads.  The final merged result is identical on all
+ranks since every rank performs the same computation.
 
 \paragraph{Auto-tuning.}
 An \code{Auto\_Do\_FoF} wrapper probes all three backends during the
@@ -1199,9 +1194,13 @@ and invoke the winner directly.
 \caption{FoF merger wall-clock time as a function of the number of
   sink particles for the three backends.  The sequential brute-force
   (blue) scales as $\Olog{N^2}$, the serial oct-tree (orange) scales
-  as $\Olog{N\log N}$, and the MPI\,+\,OpenMP oct-tree (green, 3~MPI
-  $\times$ 4~OMP threads) achieves a further ${\sim}4.3\times$
-  parallel speedup.  At $N_{\rm sink}=10^5$, the parallel tree is
+  as $\Olog{N\log N}$, and the OpenMP oct-tree (green, 12~threads)
+  achieves a further ${\sim}4.3\times$ parallel speedup.
+  The test uses a massively populated, highly clustered particle
+  distribution in which nearly every particle has close neighbours,
+  representing a worst-case scenario for the FoF algorithm.
+  The dashed line shows the $\Olog{N^2}$ scaling for reference.
+  At $N_{\rm sink}=10^5$, the parallel tree is
   $600\times$ faster than brute-force.}
 \label{fig:fof_scaling}
 \end{figure}
@@ -1215,8 +1214,8 @@ bidirectional group-mapping check.
 \centering
 \caption{FoF benchmark wall-clock times (ms) for selected
 $N_{\rm sink}$.  ``Seq'' is the brute-force $\Olog{N^2}$ method,
-``Tree'' is the serial oct-tree, and ``OMP'' is the MPI\,+\,OpenMP tree
-(3~MPI $\times$ 4~threads).}
+``Tree'' is the serial oct-tree, and ``OMP'' is the OpenMP tree
+(12~threads).}
 \label{tab:fof_perf}
 \footnotesize
 \begin{tabular}{@{}rrrrrr@{}}
@@ -2355,7 +2354,7 @@ are:
   caches, merged red-black Gauss--Seidel sweeps (reducing communication
   by 44\,per\,cent per iteration), fused residual-norm computation,
   and arithmetic optimizations reduce the Poisson solver's share of
-  total runtime from 55\,per\,cent to 39\,per\,cent.
+  total runtime from 50\,per\,cent to 40\,per\,cent.
 
 \item \textbf{FFTW3 direct Poisson solver.} An FFT-based direct solver
   replaces the iterative MG V-cycle at the uniform base level, achieving

@@ -29,20 +29,28 @@ x_right = [2.58, 2.20, 1.82, 1.19]
 
 
 def draw_rb(x, y):
-    """Draw a smoothing box split into Red | Black halves."""
-    gap = 0.04
-    hw = (box_w - gap) / 2
-    r = mpatches.FancyBboxPatch((x, y), hw, box_h,
-        boxstyle='round,pad=0.02', fc='#FEE2E2', ec=C_RED, lw=1.0)
-    ax.add_patch(r)
-    ax.text(x + hw / 2, y + box_h / 2, 'R', ha='center', va='center',
-            fontsize=8, color=C_RED, fontweight='bold')
-    bx = x + hw + gap
-    b = mpatches.FancyBboxPatch((bx, y), hw, box_h,
-        boxstyle='round,pad=0.02', fc='#DBEAFE', ec=C_BLUE, lw=1.0)
-    ax.add_patch(b)
-    ax.text(bx + hw / 2, y + box_h / 2, 'B', ha='center', va='center',
-            fontsize=8, color=C_BLUE, fontweight='bold')
+    """Draw a smoothing box as a 2x2 checkerboard (R/B pattern)."""
+    pad = 0.02
+    # Outer border
+    border = mpatches.FancyBboxPatch((x, y), box_w, box_h,
+        boxstyle='round,pad=0.02', fc='white', ec=C_DARK, lw=0.8)
+    ax.add_patch(border)
+    # 2x2 checkerboard cells
+    cw = (box_w - 2 * pad) / 2
+    ch = (box_h - 2 * pad) / 2
+    for row in range(2):
+        for col in range(2):
+            is_red = (row + col) % 2 == 0
+            fc = '#FEE2E2' if is_red else '#DBEAFE'
+            ec_c = C_RED if is_red else C_BLUE
+            label = 'R' if is_red else 'B'
+            cx = x + pad + col * cw
+            cy = y + pad + row * ch
+            cell = mpatches.Rectangle((cx, cy), cw, ch,
+                fc=fc, ec=ec_c, lw=0.6)
+            ax.add_patch(cell)
+            ax.text(cx + cw / 2, cy + ch / 2, label, ha='center',
+                    va='center', fontsize=5, color=ec_c, fontweight='bold')
 
 
 def draw_exch(x, y, active=True, sz=0.045):
