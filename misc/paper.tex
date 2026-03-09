@@ -32,7 +32,7 @@
 \newcommand{\code}[1]{\texttt{#1}}
 
 \title[cuRAMSES: Scalable AMR Optimizations for Cosmological Simulations]
-{cuRAMSES: Scalable Hybrid CPU/GPU AMR for Cosmological Simulations}
+{cuRAMSES: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
 
 \author[J.~Kim]{
 Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
@@ -1345,63 +1345,6 @@ per level has cost proportional to the number of grids exchanged
 rather than the total number of ranks.  Verification tests confirm
 $e_{\rm cons} = 0$ for both upward ($4 \to 12$) and downward
 ($12 \to 4$) rank-count changes.
-Figure~\ref{fig:varcpu_flow} summarizes the three-stage pipeline.
-
-\begin{figure*}
-\centering
-\includegraphics[width=\textwidth]{fig_varcpu_flow.pdf}
-\caption{Three-stage distributed I/O pipeline for binary
-  variable-$\ncpu$ restart.
-  Stage~1 (blue): the header is probed to detect a rank-count mismatch,
-  and the $\ncpu^{\rm file}$ files are assigned to $\ncpu$ ranks by
-  round-robin mapping.
-  Stage~2 (green): AMR grid positions are read, ownership is determined
-  via \code{cmp\_ksection\_cpumap}, and grids are exchanged via
-  \code{MPI\_ALLTOALLV}; the exchange metadata is stored for reuse.
-  Stage~3 (purple): hydro and gravity files are read and scattered using
-  the stored metadata, including a primitive-to-conservative conversion
-  on the receiving side.}
-\label{fig:varcpu_flow}
-\end{figure*}
-
-\subsection{Stream-Access IC Reading and Sink Refinement Fix}
-\label{sec:stream_ic}
-
-The initial condition (IC) files in GRAFIC2 format are Fortran
-sequential-access binary files. In the original \ramses, each rank
-reads the entire file sequentially, skipping planes until reaching its
-assigned region. For large ICs, this sequential skipping becomes a
-significant I/O bottleneck.
-
-We replace sequential access with Fortran 2003 stream access
-(\code{ACCESS='STREAM'}), which allows direct byte-offset positioning.
-The byte offset for plane $i$ in a file with header size $H = 52$
-bytes (GRAFIC2 44-byte header plus record markers) and plane size
-$P = 4\,n_1 n_2 + 8$ bytes (data plus two 4-byte record
-markers) is $\text{offset} = H + (i - 1)\,P + 5$,
-where the additive constant~5 accounts for the 4-byte Fortran
-unformatted record-length marker preceding the data payload plus
-the 1-based byte indexing of stream access.
-This is applied to all IC file types, including density perturbation
-(\code{deltab}), velocity components (\code{velcx/y/z}), particle
-positions (\code{poscx/y/z}), and temperature.
-
-We also identified and fixed a bug in the sink particle refinement
-criterion. The original implementation in \code{cic\_amr} added
-the refinement mass threshold \code{m\_refine} to the gravitational
-potential array \code{phi}. However, the Poisson solver subsequently
-overwrites \code{phi}, erasing the refinement flag.
-
-The fix moves the sink-particle refinement check to
-\code{sub\_userflag\_fine} in \code{flag\_utils}, where it is
-evaluated after the Poisson solve. For each grid, the particle linked
-list is traversed once to build a bitmask indicating which child cells
-contain sink particles (identified by $\code{idp} < 0$ and
-$\code{tp} = 0$). The cell assignment is determined by comparing
-the particle position to the grid centre to identify the octant. After
-calling \code{poisson\_refine}, cells flagged in the bitmask are
-forced to refine regardless of the Poisson criterion.
-
 
 % ===================================================================
 % 8. GPU-ACCELERATED SOLVERS
@@ -1463,16 +1406,6 @@ contributions to a private scatter buffer.  After the parallel region,
 a serial merge applies all buffered entries.  The merge cost is
 negligible ($< 0.01$\,s in all tests), and the result is exact with no
 approximation or race condition.
-
-\subsection{Fortran--CUDA Interface}
-\label{sec:hybrid_interface}
-
-The Fortran--CUDA interface uses a two-layer design consisting of a C binding layer
-(\code{bind(C)} with \code{type(c\_ptr)} arguments) and a Fortran
-wrapper layer that converts assumed-size arrays to C pointers via
-\code{c\_loc}.  The assumed-size pattern avoids Fortran array
-descriptors, which can produce incorrect addresses with certain
-compilers (notably Intel ifx).
 
 \subsection{GPU-Resident Mesh Data}
 \label{sec:hybrid_gather}
