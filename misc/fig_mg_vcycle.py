@@ -78,7 +78,7 @@ for i in range(n_levels):
         r = mpatches.FancyBboxPatch((x_left[i], y_pos[i]), box_w, box_h,
             boxstyle='round,pad=0.04', fc='#EDE9FE', ec=C_SOLVE, lw=1.5)
         ax.add_patch(r)
-        ax.text(x_left[i] + box_w / 2, y_pos[i] + box_h / 2, 'Solve',
+        ax.text(x_left[i] + box_w / 2, y_pos[i] + box_h / 2, 'FFT',
                 ha='center', va='center', fontsize=8, color=C_SOLVE,
                 fontweight='bold')
 

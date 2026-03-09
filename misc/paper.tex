@@ -676,18 +676,25 @@ at each AMR level.
 \label{sec:mg_vcycle}
 
 Starting at the finest AMR level, the algorithm applies RBGS
-pre-smoothing and then \emph{restricts} the result to the next coarser level.  This
+pre-smoothing and then \emph{restricts} the residual to the next
+coarser level.  Restriction requires no ghost exchange because each
+coarse cell is the average of its eight fine children, all of which
+reside on the same rank by the oct-tree construction.  This
 restriction--smooth sequence descends to the coarsest level, where a
 direct solve (or additional smoothing) is applied.  The correction is
 then \emph{prolongated} (interpolated) back up through each level,
 with post-smoothing at each step to damp high-frequency errors
-introduced by the interpolation.  Figure~\ref{fig:mg_vcycle}
-illustrates the V-cycle structure and the exchange positions.
+introduced by the interpolation.  Unlike restriction, prolongation
+\emph{does} require a ghost exchange: the trilinear interpolation
+stencil reads neighbouring coarse cells that may belong to a different
+rank.  Figure~\ref{fig:mg_vcycle} illustrates the V-cycle structure
+and the exchange positions.
 
 In a distributed-memory implementation each smoothing step requires
 ghost-zone exchanges between MPI ranks to update boundary values.
 In the original code, every red sweep, black sweep, residual
-computation, and norm reduction each triggers a separate exchange,
+computation, and norm reduction each triggers a separate communication
+(ghost exchange or \code{MPI\_ALLREDUCE}),
 totalling 9~communications per smoothing cycle per level (4 for
 pre-smoothing, 4 for post-smoothing, plus 1 for prolongation).
 
@@ -702,11 +709,14 @@ We apply several targeted optimizations:
   sweep proceeds using boundary values that have not yet been refreshed
   from neighbouring ranks.  Because the multigrid smoother is used only
   as a preconditioner (not as a standalone solver), these slightly
-  outdated boundary values do not affect convergence; any small error
+  outdated boundary values do not affect convergence since any small error
   they introduce is corrected by the next iteration.
 \item \textbf{Fused residual and norm.}  The residual
-  $r_i = f_i - (A\phi)_i$ and its squared norm $\sum_i r_i^2$ are
-  computed in a single loop, eliminating one exchange per iteration.
+  $r_i = f_i - (\nabla^2\phi)_i$, where $f_i = 4\pi G\rho_i\,(\Delta x)^2$
+  is the discretised source term and $(\nabla^2\phi)_i$ is the discrete
+  Laplacian of the current potential, and its squared norm
+  $\sum_i r_i^2$ are computed in a single loop, eliminating one
+  exchange per iteration.
 \end{enumerate}
 These reduce the exchange count from 9 to 5 per iteration
 ($-44$\,per\,cent), as shown in the lower panel of
