@@ -197,12 +197,14 @@ to fully utilise the available hardware.
 In this paper we describe \curamses, a comprehensive set of
 modifications to \ramses\ that addresses each of these challenges. We
 introduce a recursive \ksec\ domain decomposition
-(Section~\ref{sec:ksection}), a Morton key hash table
-(Section~\ref{sec:morton}), multigrid solver optimizations
-(Section~\ref{sec:multigrid}), spatial hash binning for feedback
-(Section~\ref{sec:feedback}), variable-$\ncpu$ restart
-(Section~\ref{sec:varcpu}), and GPU-accelerated solvers
-(Section~\ref{sec:hybrid}).  Performance benchmarks are presented in
+(Section~\ref{sec:ksection}), adaptive MPI exchange backends
+(Section~\ref{sec:ksec_exchange}), a Morton key hash table
+(Section~\ref{sec:morton}), multigrid and FFTW3 Poisson solver
+optimizations (Section~\ref{sec:multigrid}), spatial hash binning for
+feedback (Section~\ref{sec:feedback}), variable-$\ncpu$ restart
+(Section~\ref{sec:varcpu}), GPU-accelerated solvers
+(Section~\ref{sec:hybrid}), and AMR refinement criteria
+(Section~\ref{sec:amr_refine}).  Performance benchmarks are presented in
 Section~\ref{sec:performance}, and we conclude in
 Section~\ref{sec:conclusions}.
 
@@ -359,10 +361,14 @@ cost evenly among its eight cells.
 This cost function ensures that ranks hosting dense haloes (many
 particles per cell) receive fewer cells, preventing memory exhaustion
 on particle-heavy ranks.
-Our tests with $200\,\mathrm{M}$ particles on 12 ranks show that
+Our Cosmo256 test (Section~\ref{sec:perf_config}; $200\,\mathrm{M}$ particles, 12 ranks) shows that
 memory-weighted balancing reduces the peak-to-mean memory ratio from
-2.5 to 1.3 without affecting physics results (identical numbers of created grids, hydro quantities of cells, $n_\star$, $n_\texttt{sink}$, 
-$e_{\rm cons}$, $e_{\rm pot}$, and $e_{\rm kin}$ to machine precision after advancing ten coarse time steps).
+2.5 to 1.3, and keeps the per-rank memory imbalance
+$M_{\max}/M_{\min} \le 1.05$ across 2--64 ranks
+(Section~\ref{sec:perf_membal}), without affecting physics results
+(identical $n_\star$, $n_\texttt{sink}$,
+$e_{\rm cons}$, $e_{\rm pot}$, and $e_{\rm kin}$ to machine precision
+after advancing ten coarse time steps).
 
 
 \section{AUTO-TUNING MPI COMMUNICATIONS}
@@ -712,14 +718,13 @@ We apply several targeted optimizations:
   outdated boundary values do not affect convergence since any small error
   they introduce is corrected by the next iteration.
 \item \textbf{Fused residual and norm.}  The residual
-  $r_i = f_i - (\nabla^2\phi)_i$, where $f_i = 4\pi G\rho_i\,(\Delta x)^2$
-  is the discretised source term and $(\nabla^2\phi)_i$ is the discrete
-  Laplacian of the current potential, and its squared norm
-  $\sum_i r_i^2$ are computed in a single loop, eliminating one
-  exchange per iteration.
+  $r_i = f_i - (\nabla^2_h\phi)_i$, where $f_i = 4\pi G\rho_i$
+  is the source term and $\nabla^2_h$ is the discrete Laplacian,
+  and its squared norm $\sum_i r_i^2$ are computed in a single loop,
+  eliminating one exchange per iteration.
 \end{enumerate}
-These reduce the exchange count from 9 to 5 per iteration
-($-44$\,per\,cent), as shown in the lower panel of
+These reduce the exchange count from 9 to 5 per iteration,
+as shown in the lower panel of
 Figure~\ref{fig:mg_vcycle}.  The merged red-black technique is a
 standard relaxed-synchronisation strategy for distributed multigrid
 solvers \citep{Adams2001,Briggs2000}.  Implementation details are given in
@@ -738,8 +743,7 @@ Appendix~\ref{app:mg_details}.
   residual, norm); the optimized code merges the red-black sweep and
   fuses the residual and norm computation, reducing the count to~2.
   With two smoothing steps (pre + post) plus one prolongation
-  exchange, the total decreases from~9 to~5 per level per iteration
-  ($-44$\,per\,cent).}
+  exchange, the total decreases from~9 to~5 per level per iteration.}
 \label{fig:mg_vcycle}
 \end{figure}
 
@@ -748,7 +752,7 @@ Appendix~\ref{app:mg_details}.
 
 Combining all optimizations, the MG Poisson solver's share of total
 runtime is reduced from approximately 50\,per\,cent to 40\,per\,cent in a
-representative test ($200\,\mathrm{M}$ particles, 12 ranks, 10 coarse
+Cosmo256 test ($200\,\mathrm{M}$ particles, 12 ranks, 10 coarse
 steps). The iteration counts are unchanged (Level~8, 5 iterations and
 Level~9, 4 iterations), confirming that the merged red-black exchange
 does not degrade convergence.
@@ -762,6 +766,11 @@ on fully uniform AMR levels with a single direct FFT solve.  At the
 base level (\code{levelmin}), all $N = N_x \times N_y \times N_z$
 cells exist and the grid is periodic, making the Poisson equation
 $\nabla^2\phi = 4\pi G\rho$ solvable exactly via spectral methods.
+A further advantage of the Fourier-space representation is that
+modified gravity models (e.g.\ massive neutrinos, coupled dark energy
+perturbations) can be incorporated by multiplying the Green's function
+with a scale- and time-dependent transfer function, without altering
+the real-space solver infrastructure.
 
 The solver uses \textsc{fftw3} \citep{Frigo2005} and operates in two
 regimes depending on the grid size.
@@ -835,7 +844,7 @@ dominating the feedback time step.
 We partition the simulation domain into a uniform grid of
 $n_{\rm bin}^3$ bins, where
 $n_{\rm bin} = \max\!\bigl(1,\, \min\!\bigl(128,\,
-\texttt{FLOOR}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
+\texttt{Floor}(L_{\rm box} \,/\, r_{\rm max})\bigr)\!\bigr)$
 and $r_{\rm max}$ is the maximum SN blast radius (the larger of
 \code{rcell} $\times$ \code{dx\_min} and \code{rbubble}). Each SN
 event is assigned to a bin based on its position, and a linked list
@@ -921,7 +930,8 @@ with $\Olog{N_{\rm sink}^2}$ brute-force pair enumeration, in which for each
 connected component (group) it swaps particles into a contiguous block
 and iterates until no new links are found.  Although $N_{\rm sink}$ is
 typically small (${\lesssim}10^3$), production simulations of galaxy
-clusters can reach $N_{\rm sink} \sim 10^5$, at which point the
+clusters can reach $N_{\rm sink} \sim 10^5$
+\citep[e.g.\ Horizon Run~5;][]{Lee2021}, at which point the
 $\Olog{N^2}$ scaling becomes prohibitive.
 
 We provide three FoF backends with automatic selection.
@@ -979,32 +989,11 @@ and invoke the winner directly.
 \label{fig:fof_scaling}
 \end{figure}
 
-Table~\ref{tab:fof_perf} summarises the benchmark results.  All three
-methods produce identical group partitions for every test case
-($N_{\rm sink}$ from 1 to $10^5$), verified by an $\Olog{N}$
-bidirectional group-mapping check.
-
-\begin{table}
-\centering
-\caption{FoF benchmark wall-clock times (ms) for selected
-$N_{\rm sink}$.  ``Seq'' is the brute-force $\Olog{N^2}$ method,
-``Tree'' is the serial oct-tree, and ``OMP'' is the OpenMP tree
-(12~threads).}
-\label{tab:fof_perf}
-\footnotesize
-\begin{tabular}{@{}rrrrrr@{}}
-\toprule
-$N_{\rm sink}$ & Seq (ms) & Tree (ms) & OMP (ms) & Tree/$\times$ & OMP/$\times$ \\
-\midrule
-    500 &     0.54 &   0.37 &  0.21 &   1.5 &    2.6 \\
-  1\,000 &     2.19 &   0.82 &  0.37 &   2.7 &    5.9 \\
-  5\,000 &    54.96 &   5.42 &  2.07 &  10.1 &   26.6 \\
- 10\,000 &   220.26 &  11.92 &  3.24 &  18.5 &   68.0 \\
- 50\,000 &  5762.31 &  75.10 & 25.65 &  76.7 &  224.6 \\
-100\,000 & 22584.65 & 163.41 & 37.92 & 138.2 &  595.5 \\
-\bottomrule
-\end{tabular}
-\end{table}
+All three methods produce identical group partitions for every test
+case ($N_{\rm sink}$ from 1 to $10^5$), verified by an $\Olog{N}$
+bidirectional group-mapping check.  At $N_{\rm sink} = 10^5$ the
+OpenMP oct-tree is ${\sim}600\times$ faster than brute-force
+(Figure~\ref{fig:fof_scaling}).
 
 
 % ===================================================================
@@ -1076,8 +1065,6 @@ MPI rank (\code{amr\_XXXXX.outYYYYY},
 $\ncpu^{\rm file}$, which may differ from the current $\ncpu$.
 
 The restart proceeds in three stages.
-
-The restart proceeds in three stages.
 (1)~Files are distributed among ranks by round-robin assignment.
 (2)~Each rank reads its assigned AMR files, determines the
 owner of each grid via \code{cmp\_ksection\_cpumap}, and an
@@ -1086,6 +1073,40 @@ owner of each grid via \code{cmp\_ksection\_cpumap}, and an
 metadata.  Particle files are filtered by position into the local
 \ksec\ domain.  Verification confirms $e_{\rm cons} = 0$ for both
 upward ($4 \to 12$) and downward ($12 \to 4$) rank-count changes.
+
+\subsection{Format Compatibility}
+\label{sec:varcpu_compat}
+
+Table~\ref{tab:restart_compat} summarises the supported
+input--output combinations for variable-$\ncpu$ restart.
+The \ksec\ decomposition can restore from any input format and
+rank count because the spatial tree is rebuilt from scratch.
+Conversely, restoring to Hilbert ordering requires the input
+to have been written with Hilbert ordering, and the binary
+format further restricts restarts to the original $\ncpu$.
+
+\begin{table}
+\centering
+\caption{Restart format compatibility.  ``Any $\ncpu$'' means the
+output can be read with an arbitrary number of MPI ranks.
+``Same'' requires $\ncpu = \ncpu^{\rm file}$.}
+\label{tab:restart_compat}
+\small
+\begin{tabular}{llccc}
+\toprule
+Input format & Input DD & Restore DD & Variable $\ncpu$ & Supported \\
+\midrule
+Binary  & Hilbert   & Hilbert   & Same only        & Yes \\
+Binary  & Hilbert   & \ksec     & Any              & Yes \\
+Binary  & \ksec     & \ksec     & Any              & Yes \\
+Binary  & \ksec     & Hilbert   & ---              & No  \\
+HDF5    & Hilbert   & Hilbert   & Any              & Yes \\
+HDF5    & Hilbert   & \ksec     & Any              & Yes \\
+HDF5    & \ksec     & \ksec     & Any              & Yes \\
+HDF5    & \ksec     & Hilbert   & ---              & No  \\
+\bottomrule
+\end{tabular}
+\end{table}
 
 % ===================================================================
 % 8. GPU-ACCELERATED SOLVERS
@@ -1189,7 +1210,7 @@ transfer at each V-cycle.
 Table~\ref{tab:gpu_perf} summarises the GPU performance on an NVIDIA
 H100~NVL system (93.1\,GB HBM3 per device, PCIe Gen5) using 2~MPI
 ranks $\times$ 4~OMP threads, running 2 coarse steps of the
-testbed simulation (Section~\ref{sec:perf_config}).
+HR5-512 test (Section~\ref{sec:perf_config}).
 
 \begin{table}
 \centering
@@ -1241,7 +1262,10 @@ optimizations (Section~\ref{sec:multigrid}) remain more effective.
 \subsection{Test Configuration}
 \label{sec:perf_config}
 
-We use two test configurations.  The \emph{simple test} has
+We use two test configurations, referred to throughout as
+\textbf{Cosmo256} and \textbf{HR5-512}.
+
+The \textbf{Cosmo256} test has
 $200\,\mathrm{M}$ dark matter particles in a periodic box of side
 256\,$h^{-1}$\,Mpc, initialised at $z = 29.5$ with \textsc{music}
 \citep{Hahn2011}. The base AMR grid is $256^3$ (\code{levelmin}=8)
@@ -1249,7 +1273,7 @@ with adaptive refinement up to \code{levelmax}=10. The simulation is
 restarted from an HDF5 output at coarse step~5 and evolved to
 step~10 (5 coarse steps).
 
-The \emph{testbed simulation}, used for strong scaling
+The \textbf{HR5-512} test, used for strong scaling
 (Section~\ref{sec:perf_timing}), is drawn from an ongoing
 Horizon-5 production run.  It contains $135.7\,\mathrm{M}$ dark
 matter particles and $3.2 \times 10^4$ sink particles in the same
@@ -1297,8 +1321,8 @@ sparse P2P exchange patterns, is characterised independently through
 dedicated microbenchmarks on a 16-node cluster in
 Section~\ref{sec:bench_ghost}.
 
-We measure strong scaling by restarting a production-grade cosmological
-simulation from an HDF5 output.  The test problem comprises
+We measure strong scaling by restarting the HR5-512 simulation
+from an HDF5 output.  The test problem comprises
 $54\,\mathrm{M}$ AMR grids (levels~9--14) and $135.7\,\mathrm{M}$ particles
 including $3.2 \times 10^4$ sink particles, with full physics enabled
 (radiative cooling, star formation, SNII/AGN feedback).
@@ -1376,7 +1400,7 @@ $33.9\times$ at 64 ranks ($53\%$ parallel efficiency).}
 \label{sec:perf_omp}
 
 To evaluate intra-rank parallelism we fix $\ncpu = 4$ and vary
-\code{OMP\_NUM\_THREADS} from 1 to 30, using the same test problem as
+\code{OMP\_NUM\_THREADS} from 1 to 30, using the same HR5-512 problem as
 Section~\ref{sec:perf_timing}.  The total core count ranges from 4 to
 120, and the physical core limit of the dual-socket node is 64.
 
@@ -2304,8 +2328,8 @@ with any remaining references.
 
 \begin{table*}
 \centering
-\caption{Strong scaling results for the \curamses\ code on a dual-socket
-AMD EPYC 7543 node (64 cores, 1\,TB RAM).  The test problem has
+\caption{Strong scaling results for the HR5-512 test on a dual-socket
+AMD EPYC 7543 node (64 cores, 1\,TB RAM).  The test has
 $54\,\mathrm{M}$ grids and $135.7\,\mathrm{M}$ particles with full
 physics (cooling, star formation, sink particles, AGN feedback).
 Elapsed is the total wall-clock time; timer values are per-rank averages.
@@ -2332,9 +2356,8 @@ $\ncpu$ & Elapsed & $S$ & MG & Godunov & Sinks & Poisson & Particles & Feedback 
 
 \begin{table*}
 \centering
-\caption{OpenMP thread scaling with $\ncpu = 4$ MPI ranks.
-The test problem has $54\,\mathrm{M}$ grids and $135.7\,\mathrm{M}$
-particles with full physics.
+\caption{OpenMP thread scaling for the HR5-512 test with $\ncpu = 4$ MPI ranks
+($54\,\mathrm{M}$ grids, $135.7\,\mathrm{M}$ particles, full physics).
 $N_{\rm omp}$ is the number of OpenMP threads per rank;
 total cores is $\ncpu \times N_{\rm omp}$.
 Speedup $S$ is relative to the single-thread elapsed time.
