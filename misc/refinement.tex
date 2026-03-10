@@ -646,6 +646,133 @@ the systematic error (wrong UV background) and the numerical error
 determination available within the operator-split cooling framework.
 
 
+\subsection{Solver Validation}
+\label{sec:cool_validation}
+
+We validate the Townsend exact integrator against an adaptive
+fourth-order Runge--Kutta (RK4) reference solution (tolerance
+$10^{-8}$) and the standard \ramses\ Newton--Raphson (N-R) subcycling
+solver.  Five test conditions at $z = 5$ are drawn from the multi-$z$
+Grackle table, spanning four decades in density and three decades in
+temperature (Table~\ref{tab:cool_tests}).
+
+\begin{table}
+\centering
+\caption{Test conditions for the cooling solver validation at $z=5$.
+  $t_{\rm cool}$ is the initial cooling time and $T_{\rm eq}$ is the
+  equilibrium temperature from the RK4 reference.}
+\label{tab:cool_tests}
+\begin{tabular}{lccccr}
+\toprule
+Name & $n_{\rm H}$ [cm$^{-3}$] & $T_0$ [K] & $Z/Z_\odot$ &
+  $t_{\rm cool}$ & $T_{\rm eq}$ [K] \\
+\midrule
+IGM        & $10^{-4}$ & $10^{6}$      & $10^{-3}$ & 1.6\,Gyr  & 15\,300 \\
+Filament   & $10^{-2}$ & $10^{5}$      & $10^{-2}$ & 4.3\,Myr  & 14\,500 \\
+ISM        & $1$       & $3\times10^4$ & $1$        & 126\,yr   &  4\,020 \\
+Dense hot  & $10^{2}$  & $10^{7}$      & $1$        & 43\,kyr   &    171  \\
+Strong     & $1$       & $10^{7}$      & $1$        & 4.3\,Myr  &  4\,020 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Time-step independence}
+
+Fig.~\ref{fig:cool_dtindep} shows the final temperature $T_{\rm final}$
+after a single cooling step as a function of $\Delta t / t_{\rm cool}$.
+The RK4 reference (black) and the Townsend integrator (blue) produce
+identical results across the full range
+$0.01 \le \Delta t / t_{\rm cool} \le 10^3$, demonstrating that the
+exact scheme is genuinely independent of the time-step size.  The N-R
+solver with $\Delta_{\rm var} = 4$ (red), $20$ (green), and $100$
+(magenta) converges to the same answer only when the time-step is
+short ($\Delta t \lesssim t_{\rm cool}$).
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_dtindep.pdf}
+\caption{Final temperature after a single cooling step versus
+  $\Delta t / t_{\rm cool}$ for the five test conditions.  The
+  Townsend exact integrator (blue circles) overlaps the RK4 reference
+  (black line) at all time-steps.  The orange dashed line marks the
+  equilibrium temperature $T_{\rm eq}$.  The N-R solver (red, green,
+  magenta) converges only for small~$\Delta t$.}
+\label{fig:cool_dtindep}
+\end{figure*}
+
+\subsubsection{Accuracy of the N-R solver}
+
+Fig.~\ref{fig:cool_error} shows the relative error
+$|T_{\rm NR} - T_{\rm RK4}| / T_{\rm RK4}$ of the N-R solver as a
+function of the adaptive step parameter $\Delta_{\rm var}$, for a
+fixed time-step $\Delta t = 10\,t_{\rm cool}$.  The ISM condition
+(green) requires $\Delta_{\rm var} \approx 60$ to reach 1\,per\,cent
+accuracy, far exceeding the default value $\Delta_{\rm var} = 4$
+(vertical dashed line).  This reflects the steep cooling function
+near the hydrogen ionisation transition at
+$T \sim 10^4$--$3\times10^4\,$K, where the N-R step control
+$|\Delta T / T| \le 1/\Delta_{\rm var}$ is insufficiently fine to
+track the rapid equilibrium approach.  The Townsend integrator achieves
+$< 10^{-5}$ relative error for all conditions (not shown on this
+scale).
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_error.pdf}
+\caption{Relative error of the N-R solver versus $\Delta_{\rm var}$
+  at $\Delta t = 10\,t_{\rm cool}$.  \textit{Left:} full range;
+  \textit{right:} practical range.  The grey dashed lines mark
+  1\,per\,cent and 0.1\,per\,cent thresholds.  The ISM condition
+  (green) requires $\Delta_{\rm var} \approx 60$ for 1\,per\,cent
+  accuracy.}
+\label{fig:cool_error}
+\end{figure*}
+
+Fig.~\ref{fig:cool_nsub} shows the number of N-R subcycles as a
+function of $\Delta_{\rm var}$.  The subcycle count scales as
+$N_{\rm sub} \sim \Delta_{\rm var} \cdot \Delta t / t_{\rm cool}$
+(grey dotted lines), confirming that larger $\Delta_{\rm var}$
+demands proportionally more subcycles.  The Fortran default limit of
+$\code{iter\_max} = 500$ (red dashed line) is exceeded for the
+strongest cooling conditions at $\Delta_{\rm var} \gtrsim 50$.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_cooling_nsub.pdf}
+\caption{Number of N-R subcycles versus $\Delta_{\rm var}$ at
+  $\Delta t = 10\,t_{\rm cool}$.  Grey dotted lines show the
+  theoretical scaling $\Delta_{\rm var} \cdot \Delta t / t_{\rm cool}$.
+  The red dashed line marks the Fortran iteration limit
+  $\code{iter\_max} = 500$.}
+\label{fig:cool_nsub}
+\end{figure}
+
+\subsubsection{Cooling trajectories}
+
+Fig.~\ref{fig:cool_traj} compares the temperature evolution $T(t)$
+for the Strong ($n_{\rm H} = 1$, $T_0 = 10^7\,$K) and ISM
+($n_{\rm H} = 1$, $T_0 = 3\times10^4\,$K) conditions over
+$5\,t_{\rm cool}$.  The RK4 reference is plotted with fine resolution
+(500~steps); the Townsend and N-R solvers use coarse steps
+($\Delta t = t_{\rm cool}$) to reveal the differences.  In the Strong
+case (left), all solvers reach $T_{\rm eq} \approx 4020\,$K within one
+cooling time.  In the ISM case (right), the N-R solver with
+$\Delta_{\rm var} = 4$ (red dashed) systematically overshoots the
+reference trajectory, while the Townsend integrator (blue) tracks the
+RK4 curve closely even with a single step per $t_{\rm cool}$.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_cooling_trajectory.pdf}
+\caption{Temperature trajectories $T(t/t_{\rm cool})$ for the
+  Strong (left) and ISM (right) conditions.  The RK4 reference (black
+  solid, 500 steps) is compared against the Townsend integrator (blue
+  circles, $\Delta t = t_{\rm cool}$) and the N-R solver with
+  $\Delta_{\rm var} = 4$ (red squares) and $20$ (green triangles).
+  The orange dashed line marks $T_{\rm eq}$.}
+\label{fig:cool_traj}
+\end{figure*}
+
 
 %======================================================================
 \section{Cooling Rates and the Jeans Length}
