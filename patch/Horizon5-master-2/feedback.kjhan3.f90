@@ -1561,6 +1561,7 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   real(dp),dimension(1:nSN)::mSN,m_gas,vol_gas,ekBlast,ZSN,NbSN,mloadSN,ZloadSN
   real(dp),dimension(1:nSN,1:3)::xSN,vSN,dq,u2Blast,vloadSN
   real(dp),dimension(1:nSN,1:nelt)::celoadSN,ceSN
+  real(dp),dimension(1:nSN)::mload_arr
 #ifndef WITHOUTMPI
 ! real(dp),dimension(1:nSN_tot)::vol_gas_all,ekBlast_all
 ! real(dp),dimension(1:nSN_tot,1:3)::dq_all,u2Blast_all,vloadSN_all
@@ -1633,7 +1634,7 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
 
   ! Initialize the averaged variables
   vol_gas=0.0;dq=0.0;u2Blast=0.0;ekBlast=0.0;ind_blast=-1
-  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0
+  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0;mload_arr=0.0
 
 
   ! Loop over levels
@@ -1715,37 +1716,28 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
                           u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
                        endif
                        if(dr_cell.le.dx_loc/2.0)then
-                          !$omp critical(ind_blast_lock)
                           ind_blast(iSN)=ind_cell(i)
                           ekBlast(iSN)=vol_loc
-                          d=uold(ind_blast(iSN),1)
-                          u=uold(ind_blast(iSN),2)/d
-                          v=uold(ind_blast(iSN),3)/d
-                          w=uold(ind_blast(iSN),4)/d
-                          ekk=0.5d0*d*(u*u+v*v+w*w)
-                          eint=uold(ind_blast(iSN),5)-ekk
+                          d=uold(ind_cell(i),1)
+                          u=uold(ind_cell(i),2)/d
+                          v=uold(ind_cell(i),3)/d
+                          w=uold(ind_cell(i),4)/d
+                          ! Mass loading (read-only from uold)
                           mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)
+                          mload_arr(iSN)=mload
                           mloadSN(iSN)=mSN(iSN)+mload
                           if(metal)then
-                             Zload=uold(ind_blast(iSN),imetal)/d
+                             Zload=uold(ind_cell(i),imetal)/d
                              ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)
-                             uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
                           endif
                           do ielt=1,nelt
-                             ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+                             ceload=uold(ind_cell(i),ichem+ielt-1)/d
                              celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)
-                             uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
                           enddo
-                          d=uold(ind_blast(iSN),1)-mload/vol_loc
-                          uold(ind_blast(iSN),1)=d
-                          uold(ind_blast(iSN),2)=d*u
-                          uold(ind_blast(iSN),3)=d*v
-                          uold(ind_blast(iSN),4)=d*w
-                          uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
                           vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
                           vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
                           vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
-                          !$omp end critical(ind_blast_lock)
+                          ! NOTE: uold update deferred to after parallel region
                        endif
                        iSN=sn_next(iSN)
                     end do
@@ -1764,6 +1756,39 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   ! End loop over levels
 
   deallocate(bin_head,sn_next)
+
+  ! ---------------------------------------------------------------
+  ! Deferred uold update: apply central-cell mass extraction
+  ! sequentially to avoid OMP race when two SNe share a cell.
+  ! Replaces the former !$omp critical(ind_blast_lock) with a
+  ! lock-free approach: read-only in parallel, write here.
+  ! ---------------------------------------------------------------
+  do iSN=1,nSN
+     if(ind_blast(iSN).gt.0)then
+        mload=mload_arr(iSN)
+        vol_loc=ekBlast(iSN)
+        d=uold(ind_blast(iSN),1)
+        u=uold(ind_blast(iSN),2)/d
+        v=uold(ind_blast(iSN),3)/d
+        w=uold(ind_blast(iSN),4)/d
+        ekk=0.5d0*d*(u*u+v*v+w*w)
+        eint=uold(ind_blast(iSN),5)-ekk
+        if(metal)then
+           Zload=uold(ind_blast(iSN),imetal)/d
+           uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
+        endif
+        do ielt=1,nelt
+           ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+           uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
+        enddo
+        d=d-mload/vol_loc
+        uold(ind_blast(iSN),1)=d
+        uold(ind_blast(iSN),2)=d*u
+        uold(ind_blast(iSN),3)=d*v
+        uold(ind_blast(iSN),4)=d*w
+        uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+     endif
+  enddo
 
 #ifndef WITHOUTMPI
   vol_gas_mpi=0d0; dq_mpi=0d0; u2Blast_mpi=0d0
@@ -2272,6 +2297,7 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
   real(dp),dimension(1:nSN)::mSN,vol_gas,ZSN,mloadSN,ZloadSN,ekBlast_vol
   real(dp),dimension(1:nSN,1:3)::xSN,vSN,dq,u2Blast,vloadSN
   real(dp),dimension(1:nSN,1:nelt)::celoadSN,ceSN
+  real(dp),dimension(1:nSN)::mload_arr
   logical ,dimension(1:nvector)::ok
   integer mythread, nthreads
   common /average_SN_ksec_common/ mythread
@@ -2316,7 +2342,7 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
 
   ! Initialize the averaged variables
   vol_gas=0.0;dq=0.0;u2Blast=0.0;ind_blast=-1;ekBlast_vol=0.0
-  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0
+  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0;mload_arr=0.0
 
   ! Loop over levels
   do ilevel=levelmin,nlevelmax
@@ -2338,7 +2364,7 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(igrid,ngrid,i,ind_grid,ind,iskip,ind_cell,ok,x,y,z, &
 !$omp       ibx,iby,ibz,jbx,jby,jbz,iSN,dxx,dyy,dzz,dr_SN,dr_cell, &
-!$omp       d,u,v,w,ekk,eint,mload,Zload,ceload,ielt) schedule(dynamic,16)
+!$omp       d,u,v,w,mload,Zload,ceload,ielt) schedule(dynamic,16)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
@@ -2397,37 +2423,28 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
                           u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
                        endif
                        if(dr_cell.le.dx_loc/2.0)then
-                          !$omp critical(ind_blast_ksec_lock)
                           ind_blast(iSN)=ind_cell(i)
                           ekBlast_vol(iSN)=vol_loc
-                          d=uold(ind_blast(iSN),1)
-                          u=uold(ind_blast(iSN),2)/d
-                          v=uold(ind_blast(iSN),3)/d
-                          w=uold(ind_blast(iSN),4)/d
-                          ekk=0.5d0*d*(u*u+v*v+w*w)
-                          eint=uold(ind_blast(iSN),5)-ekk
+                          d=uold(ind_cell(i),1)
+                          u=uold(ind_cell(i),2)/d
+                          v=uold(ind_cell(i),3)/d
+                          w=uold(ind_cell(i),4)/d
+                          ! Mass loading (read-only from uold)
                           mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)
+                          mload_arr(iSN)=mload
                           mloadSN(iSN)=mSN(iSN)+mload
                           if(metal)then
-                             Zload=uold(ind_blast(iSN),imetal)/d
+                             Zload=uold(ind_cell(i),imetal)/d
                              ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)
-                             uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
                           endif
                           do ielt=1,nelt
-                             ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+                             ceload=uold(ind_cell(i),ichem+ielt-1)/d
                              celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)
-                             uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
                           enddo
-                          d=uold(ind_blast(iSN),1)-mload/vol_loc
-                          uold(ind_blast(iSN),1)=d
-                          uold(ind_blast(iSN),2)=d*u
-                          uold(ind_blast(iSN),3)=d*v
-                          uold(ind_blast(iSN),4)=d*w
-                          uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
                           vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
                           vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
                           vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
-                          !$omp end critical(ind_blast_ksec_lock)
+                          ! NOTE: uold update deferred to after parallel region
                        endif
                        iSN=sn_next(iSN)
                     end do
@@ -2446,6 +2463,36 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
   ! End loop over levels
 
   deallocate(bin_head,sn_next)
+
+  ! ---------------------------------------------------------------
+  ! Deferred uold update (k-section version)
+  ! ---------------------------------------------------------------
+  do iSN=1,nSN
+     if(ind_blast(iSN).gt.0)then
+        mload=mload_arr(iSN)
+        vol_loc=ekBlast_vol(iSN)
+        d=uold(ind_blast(iSN),1)
+        u=uold(ind_blast(iSN),2)/d
+        v=uold(ind_blast(iSN),3)/d
+        w=uold(ind_blast(iSN),4)/d
+        ekk=0.5d0*d*(u*u+v*v+w*w)
+        eint=uold(ind_blast(iSN),5)-ekk
+        if(metal)then
+           Zload=uold(ind_blast(iSN),imetal)/d
+           uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
+        endif
+        do ielt=1,nelt
+           ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+           uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
+        enddo
+        d=d-mload/vol_loc
+        uold(ind_blast(iSN),1)=d
+        uold(ind_blast(iSN),2)=d*u
+        uold(ind_blast(iSN),3)=d*v
+        uold(ind_blast(iSN),4)=d*w
+        uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+     endif
+  enddo
 
   if(verbose .and. myid .eq. 1)write(*,*)'Exiting average_SN_ksec'
 

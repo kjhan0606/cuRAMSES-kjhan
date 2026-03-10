@@ -1183,6 +1183,7 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
   real(dp),dimension(1:nSN)::mSN,m_gas,vol_gas,ekBlast,ZSN,NbSN,mloadSN,ZloadSN
   real(dp),dimension(1:nSN,1:3)::xSN,vSN,dq,u2Blast,vloadSN
   real(dp),dimension(1:nSN,1:nelt)::celoadSN,ceSN
+  real(dp),dimension(1:nSN)::mload_arr
 #ifndef WITHOUTMPI
 ! real(dp),dimension(1:nSN_tot)::vol_gas_all,ekBlast_all
 ! real(dp),dimension(1:nSN_tot,1:3)::dq_all,u2Blast_all,vloadSN_all
@@ -1239,7 +1240,7 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
 
   ! Initialize the averaged variables
   vol_gas=0.0;dq=0.0;u2Blast=0.0;ekBlast=0.0;ind_blast=-1
-  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0
+  mloadSN=0.0;ZloadSN=0.0;celoadSN=0.0;vloadSN=0.0;mload_arr=0.0
 
 
   ! Loop over levels
@@ -1312,41 +1313,31 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
                        u2Blast(iSN,2)=u2Blast(iSN,2)+v*v*vol_loc
                        u2Blast(iSN,3)=u2Blast(iSN,3)+w*w*vol_loc
                     endif
-                    if(dr_cell.le.dx_loc/2.0)then !same as above?
+                    if(dr_cell.le.dx_loc/2.0)then
                        ind_blast(iSN)=ind_cell(i)
                        ekBlast  (iSN)=vol_loc
-                       d=uold(ind_blast(iSN),1)                                                                     
-                       u=uold(ind_blast(iSN),2)/d                                                                   
-                       v=uold(ind_blast(iSN),3)/d                                                                   
-                       w=uold(ind_blast(iSN),4)/d                                                                   
-                       ekk=0.5d0*d*(u*u+v*v+w*w)                                                                    
-                       eint=uold(ind_blast(iSN),5)-ekk                                                              
-                       ! Mass loading factor of the Sedov explosion                                                 
-                       ! Ensure that no more that 25% of the gas content is removed                                 
-                       mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)                                                     
-                       mloadSN(iSN)=mSN(iSN)+mload                                                                  
-                       ! Update gas mass and metal content in the cell                                              
-                       if(metal)then                                                                                
-                          Zload=uold(ind_blast(iSN),imetal)/d                                                       
-                          ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)                           
-                          uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
-                       endif                                                                                        
-                       do ielt=1,nelt                                                                               
-                          ceload=uold(ind_blast(iSN),ichem+ielt-1)/d                                                 
-                          celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)              
-                          uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
-                       enddo                                                                                        
-                       d=uold(ind_blast(iSN),1)-mload/vol_loc                                                       
-                                                                                                                    
-                       uold(ind_blast(iSN),1)=d                                                                     
-                       uold(ind_blast(iSN),2)=d*u                                                                   
-                       uold(ind_blast(iSN),3)=d*v                                                                   
-                       uold(ind_blast(iSN),4)=d*w                                                                   
-                       uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)                                            
-
+                       d=uold(ind_cell(i),1)
+                       u=uold(ind_cell(i),2)/d
+                       v=uold(ind_cell(i),3)/d
+                       w=uold(ind_cell(i),4)/d
+                       ! Mass loading factor of the Sedov explosion
+                       ! Ensure that no more that 25% of the gas content is removed
+                       mload=min(f_w*mSN(iSN),0.25d0*d*vol_loc)
+                       mload_arr(iSN)=mload
+                       mloadSN(iSN)=mSN(iSN)+mload
+                       ! Compute loaded metallicity and chemistry (read-only from uold)
+                       if(metal)then
+                          Zload=uold(ind_cell(i),imetal)/d
+                          ZloadSN(iSN)=( mload*Zload + ZSN(iSN)*mSN(iSN) ) / mloadSN(iSN)
+                       endif
+                       do ielt=1,nelt
+                          ceload=uold(ind_cell(i),ichem+ielt-1)/d
+                          celoadSN(iSN,ielt)=( mload*ceload + ceSN(iSN,ielt)*mSN(iSN) ) / mloadSN(iSN)
+                       enddo
                        vloadSN(iSN,1)=(mSN(iSN)*vSN(iSN,1)+mload*u)/mloadSN(iSN)
                        vloadSN(iSN,2)=(mSN(iSN)*vSN(iSN,2)+mload*v)/mloadSN(iSN)
                        vloadSN(iSN,3)=(mSN(iSN)*vSN(iSN,3)+mload*w)/mloadSN(iSN)
+                       ! NOTE: uold update deferred to after parallel region (thread-safe)
                     endif
        			end do ! End loop over nSN
               endif
@@ -1359,6 +1350,40 @@ subroutine average_SN(xSN,vSN,NbSN,vol_gas,dq,ekBlast,ind_blast,nSN,nSN_tot,iSN_
 !$omp end parallel
   end do
   ! End loop over levels
+
+  ! ---------------------------------------------------------------
+  ! Deferred uold update: apply central-cell mass extraction
+  ! sequentially to avoid OMP race when two SNe share a cell.
+  ! Each SN's mload was computed in the parallel region above;
+  ! here we re-read uold (which may reflect prior SN's update)
+  ! and apply the extraction in order.
+  ! ---------------------------------------------------------------
+  do iSN=1,nSN
+     if(ind_blast(iSN).gt.0)then
+        mload=mload_arr(iSN)
+        vol_loc=ekBlast(iSN)
+        d=uold(ind_blast(iSN),1)
+        u=uold(ind_blast(iSN),2)/d
+        v=uold(ind_blast(iSN),3)/d
+        w=uold(ind_blast(iSN),4)/d
+        ekk=0.5d0*d*(u*u+v*v+w*w)
+        eint=uold(ind_blast(iSN),5)-ekk
+        if(metal)then
+           Zload=uold(ind_blast(iSN),imetal)/d
+           uold(ind_blast(iSN),imetal)=uold(ind_blast(iSN),imetal)-Zload*mload/vol_loc
+        endif
+        do ielt=1,nelt
+           ceload=uold(ind_blast(iSN),ichem+ielt-1)/d
+           uold(ind_blast(iSN),ichem+ielt-1)=uold(ind_blast(iSN),ichem+ielt-1)-ceload*mload/vol_loc
+        enddo
+        d=d-mload/vol_loc
+        uold(ind_blast(iSN),1)=d
+        uold(ind_blast(iSN),2)=d*u
+        uold(ind_blast(iSN),3)=d*v
+        uold(ind_blast(iSN),4)=d*w
+        uold(ind_blast(iSN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+     endif
+  enddo
 
 #ifndef WITHOUTMPI
   vol_gas_mpi=0d0; dq_mpi=0d0; u2Blast_mpi=0d0

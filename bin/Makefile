@@ -81,6 +81,11 @@ else
 endif
 
 #############################################################################
+# Eunha cooling module (always linked; runtime selection via cooling_method)
+#############################################################################
+EUNHA_MODOBJ = eunha_cooling_mod.o
+
+#############################################################################
 # FFTW3 CPU direct Poisson solver (build with: make USE_FFTW=1)
 #############################################################################
 ifdef USE_FFTW
@@ -113,7 +118,7 @@ MODOBJ	= amr_parameters.jaehyun.o amr_commons.kjhan.o random.o pm_parameters.o p
 	 poisson_commons.o hydro_parameters.o hydro_commons.o cooling_module.o bisection.o ksection.o sparse_mat.o \
 	 morton_keys.o morton_hash.o neutrino_commons.o dark_energy_commons.o power_spectrum.o \
 	 clfind_commons.o gadgetreadfile.o write_makefile.o write_gitinfo.o \
-	 $(HDF5_MODOBJ) $(CUDA_MODOBJ)
+	 $(EUNHA_MODOBJ) $(HDF5_MODOBJ) $(CUDA_MODOBJ)
 
 # SIDM object (depends on amr_commons, pm_commons, random)
 SIDM_OBJ = sidm_scatter.o
@@ -178,6 +183,7 @@ sink_cuda_interface.o: cuda_commons.o
 cuda_commons.o: amr_commons.kjhan.o
 endif
 power_spectrum.o: amr_parameters.jaehyun.o amr_commons.kjhan.o poisson_commons.o
+eunha_cooling_mod.o: amr_parameters.jaehyun.o amr_commons.kjhan.o
 FORCE:
 #############################################################################
 clean :

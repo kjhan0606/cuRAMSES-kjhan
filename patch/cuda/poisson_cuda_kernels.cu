@@ -109,8 +109,10 @@ static cufftHandle g_fft_plan_z2d = 0;
 static cufftDoubleReal*    d_fft_real    = nullptr;
 static cufftDoubleComplex* d_fft_complex = nullptr;
 static double*             d_fft_green   = nullptr;
+static double*             d_fft_correction = nullptr;  // neutrino/DE correction factors
 static int*                d_fft_map     = nullptr;
 static int g_fft_Nx = 0, g_fft_Ny = 0, g_fft_Nz = 0;
+static bool g_fft_has_correction = false;
 
 // ==========================================================================
 // cuFFTMp distributed Poisson solver state
@@ -579,6 +581,8 @@ void cuda_mg_finalize(void)
     if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
     if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
     if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+    if (d_fft_correction) { cudaFree(d_fft_correction); d_fft_correction = nullptr; }
+    g_fft_has_correction = false;
     if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
     g_fft_Nx = 0; g_fft_Ny = 0; g_fft_Nz = 0;
 
@@ -988,6 +992,24 @@ __global__ void fft_green_kernel(
 }
 
 // ==========================================================================
+// Kernel: multiply complex spectrum by Green's function × correction factor
+// d_complex[i] *= d_green[i] * d_corr[i]
+// Used for neutrino/DE perturbation corrections in FFT Poisson solver
+// ==========================================================================
+__global__ void fft_green_corrected_kernel(
+    cufftDoubleComplex* __restrict__ d_cplx,
+    const double* __restrict__ d_green,
+    const double* __restrict__ d_corr,
+    int N)
+{
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= N) return;
+    double g = d_green[idx] * d_corr[idx];
+    d_cplx[idx].x *= g;
+    d_cplx[idx].y *= g;
+}
+
+// ==========================================================================
 // Kernel: scatter solved phi from 3D real array back to RAMSES cells
 // d_phi[fft_map[idx_3d] - 1] = d_fft_real[idx_3d]
 // ==========================================================================
@@ -1071,6 +1093,8 @@ void cuda_fft_poisson_setup(const int* fft_map, int Nx, int Ny, int Nz, double d
         if (d_fft_real)    { cudaFree(d_fft_real);    d_fft_real    = nullptr; }
         if (d_fft_complex) { cudaFree(d_fft_complex); d_fft_complex = nullptr; }
         if (d_fft_green)   { cudaFree(d_fft_green);   d_fft_green   = nullptr; }
+        if (d_fft_correction) { cudaFree(d_fft_correction); d_fft_correction = nullptr; }
+        g_fft_has_correction = false;
         if (d_fft_map)     { cudaFree(d_fft_map);     d_fft_map     = nullptr; }
 
         // Check GPU memory
@@ -1140,6 +1164,29 @@ void cuda_fft_poisson_setup(const int* fft_map, int Nx, int Ny, int Nz, double d
 }
 
 // ==========================================================================
+// C API: cuda_fft_set_correction
+// Upload neutrino/DE correction factors for FFT Green's function.
+// h_correction[i] = nu_factor(k_i) * de_factor(k_i) per complex mode.
+// Set N_complex=0 to clear (use uncorrected Green's function).
+// ==========================================================================
+void cuda_fft_set_correction(const double* h_correction, int N_complex)
+{
+    if (N_complex <= 0 || !h_correction) {
+        g_fft_has_correction = false;
+        return;
+    }
+    // Allocate if needed
+    if (!d_fft_correction) {
+        cudaMalloc(&d_fft_correction,
+                   (size_t)N_complex * sizeof(double));
+    }
+    cudaMemcpy(d_fft_correction, h_correction,
+               (size_t)N_complex * sizeof(double),
+               cudaMemcpyHostToDevice);
+    g_fft_has_correction = true;
+}
+
+// ==========================================================================
 // C API: cuda_fft_poisson_solve
 // Assumes d_mg_f2 has RHS already uploaded (via cuda_mg_upload),
 // and d_fft_map is set via cuda_fft_poisson_setup.
@@ -1164,11 +1211,16 @@ void cuda_fft_poisson_solve(const double* h_rhs_3d, int N_real_in)
         return;
     }
 
-    // Apply Green's function
+    // Apply Green's function (with optional neutrino/DE correction)
     int block = 256;
     int grid = ((int)N_complex + block - 1) / block;
-    fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
-        d_fft_complex, d_fft_green, (int)N_complex);
+    if (g_fft_has_correction && d_fft_correction) {
+        fft_green_corrected_kernel<<<grid, block, 0, g_mg_stream>>>(
+            d_fft_complex, d_fft_green, d_fft_correction, (int)N_complex);
+    } else {
+        fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
+            d_fft_complex, d_fft_green, (int)N_complex);
+    }
 
     // Inverse FFT: C2R
     r = cufftExecZ2D(g_fft_plan_z2d, d_fft_complex, d_fft_real);
@@ -1209,11 +1261,16 @@ void cuda_fft_poisson_solve_host(const double* h_rhs_3d, double* h_phi_3d, int N
         return;
     }
 
-    // Apply Green's function
+    // Apply Green's function (with optional neutrino/DE correction)
     int block = 256;
     int grid = ((int)N_complex + block - 1) / block;
-    fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
-        d_fft_complex, d_fft_green, (int)N_complex);
+    if (g_fft_has_correction && d_fft_correction) {
+        fft_green_corrected_kernel<<<grid, block, 0, g_mg_stream>>>(
+            d_fft_complex, d_fft_green, d_fft_correction, (int)N_complex);
+    } else {
+        fft_green_kernel<<<grid, block, 0, g_mg_stream>>>(
+            d_fft_complex, d_fft_green, (int)N_complex);
+    }
 
     // Inverse FFT: C2R
     r = cufftExecZ2D(g_fft_plan_z2d, d_fft_complex, d_fft_real);

@@ -2419,6 +2419,9 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    use poisson_commons
    use poisson_parameters
    use poisson_cuda_interface
+   use neutrino_commons, only: nu_table_loaded, get_nu_ratio
+   use dark_energy_commons, only: de_table_loaded, get_de_ratio, &
+        f_de_val, compute_de_kspace_params
    use iso_c_binding
 
    implicit none
@@ -2437,6 +2440,15 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    integer,  allocatable, save :: fft_map(:)
    real(dp), allocatable, save :: rhs_3d(:), rhs_local(:)
    integer(i8b), save :: saved_N_total = 0
+
+   ! Neutrino/DE correction
+   real(dp) :: fourpi_fft, scale_fft
+   integer  :: nx_loc_fft
+   real(dp) :: omega_cb_loc, nu_factor, R_nu_val, k_phys, twopi_fft
+   real(dp) :: de_factor, R_DE_val, omega_de_a
+   real(dp) :: de_kappa2, de_alpha, k_tilde_sq
+   integer  :: kx_i, ky_i, kz_i
+   integer(i8b) :: N_complex_fft, idx_c
 
    ! Loop variables
    integer :: igrid, ngrid_loc, ind, iskip
@@ -2723,6 +2735,19 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    fft_map   = 0
    rhs_local = 0.0d0
 
+   ! Compute fourpi for FFT RHS (NO DE boost — corrections go in Green's function)
+   nx_loc_fft = icoarse_max - icoarse_min + 1
+   scale_fft  = boxlen / dble(nx_loc_fft)
+   if(cosmo) then
+      if(use_neutrino .and. omega_nu > 0.0d0) then
+         fourpi_fft = 1.5D0 * (omega_m - omega_nu) * aexp * scale_fft
+      else
+         fourpi_fft = 1.5D0 * omega_m * aexp * scale_fft
+      end if
+   else
+      fourpi_fft = 4.D0 * ACOS(-1.0D0) * scale_fft
+   end if
+
    ngrid_loc = active(ilevel)%ngrid
    do igrid = 1, ngrid_loc
       igrid_amr = active(ilevel)%igrid(igrid)
@@ -2751,7 +2776,8 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
          icell_amr = iskip + igrid_amr
 
          fft_map(idx_3d) = icell_amr
-         rhs_local(idx_3d) = f(icell_amr, 2)
+         ! Use un-boosted fourpi (corrections in Green's function)
+         rhs_local(idx_3d) = fourpi_fft * (rho(icell_amr) - rho_tot)
       end do
    end do
 
@@ -2770,6 +2796,71 @@ subroutine fft_poisson_solve_uniform(ilevel, icount)
    ! ------------------------------------------------------------------
    call cuda_fft_poisson_setup_c(fft_map, &
         int(fft_Nx, c_int), int(fft_Ny, c_int), int(fft_Nz, c_int), dx2_fft)
+
+   ! ------------------------------------------------------------------
+   ! Step 3b: Compute and upload neutrino/DE correction factors to GPU
+   ! ------------------------------------------------------------------
+   if((use_neutrino .and. omega_nu > 0.0d0) .or. de_perturb) then
+      twopi_fft = 2.0d0 * ACOS(-1.0D0)
+      N_complex_fft = int(fft_Nx,i8b) * int(fft_Ny,i8b) * int(fft_Nz/2+1,i8b)
+      if(use_neutrino .and. omega_nu > 0.0d0) omega_cb_loc = omega_m - omega_nu
+      if(.not. allocated(rhs_local)) allocate(rhs_local(0:N_complex_fft-1))
+      ! Reuse rhs_local as scratch (it's already allocated >= N_complex)
+
+      ! Precompute DE params
+      if(de_perturb .and. .not. de_table_loaded .and. cs2_de > 0.0d0) then
+         call compute_de_kspace_params(aexp, de_kappa2, de_alpha)
+      end if
+      if(de_perturb .and. de_table_loaded) then
+         omega_de_a = omega_l * f_de_val(aexp) * aexp**3
+         if(use_neutrino .and. omega_nu > 0.0d0) then
+            omega_cb_loc = omega_m - omega_nu
+         else
+            omega_cb_loc = omega_m
+         end if
+      end if
+
+      do idx_c = 0, N_complex_fft - 1
+         kx_i = int(idx_c / (int(fft_Ny,i8b)*int(fft_Nz/2+1,i8b)))
+         ky_i = int(mod(idx_c / int(fft_Nz/2+1,i8b), int(fft_Ny,i8b)))
+         kz_i = int(mod(idx_c, int(fft_Nz/2+1,i8b)))
+         if(kx_i > fft_Nx/2) kx_i = kx_i - fft_Nx
+         if(ky_i > fft_Ny/2) ky_i = ky_i - fft_Ny
+
+         nu_factor = 1.0d0
+         de_factor = 1.0d0
+
+         ! Neutrino correction
+         if(use_neutrino .and. omega_nu > 0.0d0) then
+            k_phys = twopi_fft * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+            if(k_phys > 0.0d0) then
+               R_nu_val = get_nu_ratio(k_phys, aexp)
+               nu_factor = 1.0d0 + (omega_nu / omega_cb_loc) * R_nu_val
+            end if
+         end if
+
+         ! DE perturbation correction
+         if(de_perturb) then
+            if(de_table_loaded) then
+               k_phys = twopi_fft * sqrt(dble(kx_i**2 + ky_i**2 + kz_i**2)) / boxlen_ini
+               if(k_phys > 0.0d0) then
+                  R_DE_val = get_de_ratio(k_phys, aexp)
+                  de_factor = 1.0d0 + (omega_de_a / omega_cb_loc) * R_DE_val
+               end if
+            else if(cs2_de > 0.0d0) then
+               k_tilde_sq = twopi_fft * twopi_fft * dble(kx_i**2 + ky_i**2 + kz_i**2)
+               de_factor = (k_tilde_sq + de_kappa2) / (k_tilde_sq + de_kappa2 + de_alpha)
+            end if
+         end if
+
+         rhs_local(idx_c) = nu_factor * de_factor
+      end do
+
+      call cuda_fft_set_correction_c(rhs_local, int(N_complex_fft, c_int))
+   else
+      ! Clear correction (use standard Green's function)
+      call cuda_fft_set_correction_c(rhs_local, int(0, c_int))
+   end if
 
    ! ------------------------------------------------------------------
    ! Step 4: cuFFT solve and scatter phi to CPU
@@ -2867,6 +2958,10 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    real(dp) :: de_kappa2, de_alpha, k_tilde_sq, de_factor
    real(dp) :: R_DE_val, omega_de_a
 
+   ! FFT RHS fourpi (without DE boost)
+   real(dp) :: fourpi_fft, scale_fft
+   integer  :: nx_loc_fft
+
    ! MPI ALLTOALLV variables for large-grid path
    integer, allocatable :: sendcounts(:), sdispls(:)
    integer, allocatable :: recvcounts(:), rdispls(:)
@@ -2884,6 +2979,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    real(dp) :: recv_pos_lo, recv_pos_hi
    real(dp) :: my_xmin, my_xmax
    logical :: overlap
+   logical :: local_changed, global_changed
 
    ! ================================================================
    ! Step 0: Grid dimensions
@@ -3061,6 +3157,19 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
    end if  ! plan creation
 
 
+   ! Compute FFT RHS fourpi (NO DE boost — corrections go in Green's function)
+   nx_loc_fft = icoarse_max - icoarse_min + 1
+   scale_fft  = boxlen / dble(nx_loc_fft)
+   if(cosmo) then
+      if(use_neutrino .and. omega_nu > 0.0d0) then
+         fourpi_fft = 1.5D0 * (omega_m - omega_nu) * aexp * scale_fft
+      else
+         fourpi_fft = 1.5D0 * omega_m * aexp * scale_fft
+      end if
+   else
+      fourpi_fft = 4.D0 * ACOS(-1.0D0) * scale_fft
+   end if
+
    if(use_distributed) then
       ! ============================================================
       ! LARGE GRID PATH: Sparse P2P + FFTW3 MPI slab decomposition
@@ -3082,10 +3191,15 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
          my_xmin = 0.5d0; my_xmax = 0.5d0
       end if
 
-      if(.not. fftw_partners_computed .or. &
+      ! Check if ANY rank's bounding box changed (must be collective
+      ! because MPI_ALLGATHER inside requires all ranks to participate)
+      local_changed = (.not. fftw_partners_computed .or. &
          cached_box_xmin /= my_xmin .or. &
          cached_box_xmax /= my_xmax .or. &
-         cached_fftw_block /= fftw_block) then
+         cached_fftw_block /= fftw_block)
+      call MPI_ALLREDUCE(local_changed, global_changed, 1, MPI_LOGICAL, &
+           MPI_LOR, MPI_COMM_WORLD, info)
+      if(global_changed) then
 
          ! Gather all ranks' bounding boxes
          if(.not. allocated(fftw_cpubox_min)) allocate(fftw_cpubox_min(ncpu))
@@ -3228,6 +3342,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
       n_recv_total = rdispls(ncpu-1) + recvcounts(ncpu-1)
 
       ! --- Step 3: Pack send buffer: (slab_idx, rhs_value) pairs ---
+      ! RHS uses un-boosted fourpi (corrections applied in Green's function)
       allocate(sendbuf(0:2*n_send_total-1))
       allocate(recvbuf(0:2*n_recv_total-1))
       allocate(send_idx(0:ncpu-1))
@@ -3258,7 +3373,7 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
             icell_amr = iskip + igrid_amr
 
             sendbuf(2*send_idx(dest_rank))     = dble(idx_3d)
-            sendbuf(2*send_idx(dest_rank) + 1) = f(icell_amr, 2)
+            sendbuf(2*send_idx(dest_rank) + 1) = fourpi_fft * (rho(icell_amr) - rho_tot)
             send_idx(dest_rank) = send_idx(dest_rank) + 1
          end do
       end do
@@ -3475,7 +3590,8 @@ subroutine fftw_poisson_solve_uniform(ilevel, icount)
             icell_amr = iskip + igrid_amr
 
             fft_map(idx_3d) = icell_amr
-            rhs_local(idx_3d) = f(icell_amr, 2)
+            ! Use un-boosted fourpi (corrections in Green's function)
+            rhs_local(idx_3d) = fourpi_fft * (rho(icell_amr) - rho_tot)
          end do
       end do
 

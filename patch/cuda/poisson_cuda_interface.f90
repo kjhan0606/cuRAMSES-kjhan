@@ -179,6 +179,14 @@ module poisson_cuda_interface
        integer(c_int), value :: N_real
      end subroutine
 
+     ! cuFFT Poisson: upload neutrino/DE correction factors
+     subroutine cuda_fft_set_correction_c(h_correction, N_complex) &
+          bind(C, name='cuda_fft_set_correction')
+       import :: c_double, c_int
+       real(c_double) :: h_correction(*)
+       integer(c_int), value :: N_complex
+     end subroutine
+
      ! cuFFT Poisson: free plans and arrays
      subroutine cuda_fft_poisson_free_c() &
           bind(C, name='cuda_fft_poisson_free')
