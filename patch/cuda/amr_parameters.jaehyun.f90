@@ -119,7 +119,7 @@ module amr_parameters
   real(dp)::bisec_tol=0.05d0  ! Tolerance for bisection load balancing
   logical::use_cpubox_decomp=.false. ! True for bisection or ksection
   logical::memory_balance=.false.    ! Memory-based load balancing
-  integer::mem_weight_grid=270       ! Memory per grid in dp-equivalents
+  integer::mem_weight_grid=0          ! 0 = auto from nvar; >0 = user override
   integer::mem_weight_part=12        ! Memory per particle in dp-equivalents
   integer::mem_weight_sink=500      ! Computational weight per sink particle
 

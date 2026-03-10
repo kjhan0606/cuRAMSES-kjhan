@@ -244,6 +244,15 @@ subroutine read_params
 #endif
 
   !-------------------------------------------------
+  ! Auto-compute mem_weight_grid from nvar if sentinel (0)
+  !-------------------------------------------------
+  if(memory_balance .and. mem_weight_grid <= 0) then
+     mem_weight_grid = twotondim * (2*nvar*8 + 52) + 48
+     if(myid==1) write(*,'(A,I6,A,I3,A)') &
+          ' Memory balance: mem_weight_grid=',mem_weight_grid,' (nvar=',nvar,')'
+  end if
+
+  !-------------------------------------------------
   ! Exchange method auto-tune
   !-------------------------------------------------
   if(ordering=='ksection' .and. myid==1) then
