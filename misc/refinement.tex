@@ -222,7 +222,7 @@ Jeans criterion in cosmological AMR simulations, implemented in
     equilibrium cooling tables with the \citet{Townsend2009} exact
     integration scheme and multi-redshift interpolation, eliminating
     the N-R overshooting that contaminates the Jeans length near
-    thermal equilibrium (Section~\ref{sec:cooling}).
+    thermal equilibrium (Section~\ref{sec:exact_cooling}).
   \item A \emph{Jeans-independent holdback bypass} that allows the
     Jeans criterion to operate ahead of the cosmological holdback,
     with a configurable level limit to prevent uncontrolled refinement
@@ -238,7 +238,9 @@ pressure support into the Jeans criterion
 The paper is organised as follows.
 Section~\ref{sec:amr_refine} reviews AMR refinement in \ramses,
 including the holdback mechanism.
-Section~\ref{sec:cooling} analyses the cooling module and its impact
+Section~\ref{sec:exact_cooling} describes the exact cooling integrator
+and multi-redshift tables.
+Section~\ref{sec:cooling} analyses the cooling rates and their impact
 on the Jeans length.
 Section~\ref{sec:starburst} identifies the starburst problem caused
 by the holdback.
@@ -410,26 +412,252 @@ the Godunov solver from encountering abrupt level transitions.
 
 
 %======================================================================
-\section{Radiative Cooling and the Jeans Length}
+\section{Exact Cooling Integration}
+\label{sec:exact_cooling}
+%======================================================================
+
+The cooling module determines the equilibrium temperature $T_{\rm eq}$
+of the gas, which controls the Jeans length
+$\lJ \propto \sqrt{T/\rho}$ and hence the refinement decisions.
+Errors in the numerical integration scheme propagate directly into
+errors in $\lJ$ and may trigger (or suppress) refinement at the wrong
+density and temperature.  We implement an exact integration method
+based on the \citet{Townsend2009} $Y$-function, coupled with
+multi-redshift table interpolation to track the evolving UV background
+across cosmic time.
+
+
+\subsection{The Townsend Exact Integration Scheme}
+\label{sec:townsend}
+
+To eliminate the numerical overshooting inherent in implicit
+cooling solvers (see Section~\ref{sec:overshoot}), we implement the exact integration
+method of \citet{Townsend2009}, which transforms the cooling ODE into
+an analytically invertible form using the $Y$-function.
+
+\subsubsection{Y-Function Formulation}
+
+For a piecewise power-law cooling function
+$\Lambda(T) \propto T^{\alpha_j}$ in each temperature bin
+$[T_j, T_{j+1}]$, the integrated cooling variable is
+\begin{equation}
+  Y(T) = \int_{T_{\rm ref}}^{T} \frac{dT'}{T'\,\hat{\Lambda}(T')}
+  = \sum_{k} \Delta Y_k,
+  \label{eq:Y_func}
+\end{equation}
+where $\hat{\Lambda} = \Lambda/\Lambda_{\rm ref}$ is the normalised
+cooling rate.  Each segment contributes
+\begin{equation}
+  \Delta Y_j = \begin{cases}
+    \dfrac{T_j^{-\alpha_j} - T_{j+1}^{-\alpha_j}}
+          {\alpha_j\,\hat{\Lambda}_j\,T_j^{-\alpha_j}}
+    & (\alpha_j \ne 0), \\[6pt]
+    \dfrac{\ln(T_j/T_{j+1})}{\hat{\Lambda}_j}
+    & (\alpha_j = 0).
+  \end{cases}
+  \label{eq:deltaY}
+\end{equation}
+
+The exact temperature after a time-step $\Delta t$ is obtained by
+inverting the relation
+\begin{equation}
+  Y(T^{n+1}) = Y(T^n) + \Lambda_{\rm ref}\,\frac{n_{\rm H}}{E_0}\,\Delta t,
+  \label{eq:Y_advance}
+\end{equation}
+where $E_0 = (3/2)\,n_{\rm tot}\,k_{\rm B}$ is the thermal energy per
+unit temperature.  The inversion is performed by binary search on the
+cumulative $Y$-table and local analytic inversion within the identified
+segment.
+
+\subsubsection{Advantages Over Newton--Raphson}
+
+The $Y$-function scheme has several fundamental advantages:
+
+\begin{enumerate}
+  \item \textbf{No overshooting.}  The method integrates the cooling
+    equation \emph{exactly} for piecewise power-law rates.  The
+    temperature evolves monotonically towards the equilibrium; it cannot
+    oscillate across $T_{\rm eq}$.
+  \item \textbf{No sub-stepping.}  A single evaluation of
+    equation~(\ref{eq:Y_advance}) advances the solution by the full
+    hydrodynamic time-step, regardless of $t_{\rm cool}/\Delta t$.  The
+    N-R solver requires up to 500 sub-steps when $\Delta t \gg t_{\rm cool}$.
+  \item \textbf{Correct equilibrium.}  When $\Delta t \to \infty$,
+    $Y \to Y_{\rm eq}$ and the cell relaxes exactly to $T_{\rm eq}$.
+    The N-R solver only reaches $T_{\rm eq}$ asymptotically through
+    iteration, and may settle on the wrong side if the sub-step
+    structure interacts with the sign change.
+  \item \textbf{Deterministic.}  The result depends only on
+    $(T^n, n_{\rm H}, Z, \Delta t)$ and the cooling table, with no
+    sensitivity to iteration count, convergence tolerance, or adaptive
+    step heuristics.
+\end{enumerate}
+
+The cost is a table lookup and a $\log/\exp$ evaluation per cell
+($\sim$few $\mu$s), comparable to a single N-R sub-step.  Since the N-R
+solver typically requires 5--50 sub-steps, the exact scheme is faster
+for strongly cooling gas.
+
+\subsubsection{Implementation: Eunha Cooling Module}
+
+The exact integrator is implemented as a Fortran module
+(\code{eunha\_cooling\_mod.f90}) that reads a 3D Grackle equilibrium
+cooling table $\Lambda_{\rm net}(n_{\rm H}, Z, T)$ and pre-computes
+the cumulative $Y$-table.  The module provides three runtime modes
+selected by the namelist parameter \code{cooling\_method}:
+\begin{itemize}
+  \item \code{`original'} --- standard \ramses\ N-R solver (default,
+    no overhead);
+  \item \code{`exact'} --- Townsend exact integration replaces the N-R
+    solver;
+  \item \code{`compare'} --- both solvers run; the N-R result is used
+    for physics while per-step diagnostics report the difference
+    $\Delta T_2^{\rm orig} - \Delta T_2^{\rm exact}$.
+\end{itemize}
+
+The Grackle table adds a third axis (metallicity $Z$) with 40 bins
+spanning $10^{-6}$--$10\,Z_\odot$, compared to the 2D RAMSES table
+with linear $Z$ scaling.  The mean molecular weight $\mu(n_{\rm H}, Z, T)$
+is also tabulated from Grackle's non-LTE equilibrium, replacing the
+RAMSES CIE calculation.  The $T_2 \leftrightarrow T$ conversion uses an
+iterative scheme: $\mu \to T = T_2\,\mu \to \mu'(n_{\rm H}, Z, T) \to
+T' = T_2\,\mu'$, converging to $<0.1$\,per\,cent in 3 iterations.
+
+
+\subsection{Redshift-Dependent Cooling: Multi-z Tables}
+\label{sec:multi_z}
+
+The cooling rate depends on redshift through the UV background
+intensity $J_\nu(z)$, which evolves as the ionising photon production
+rate rises during cosmic reionisation ($z \gtrsim 6$), peaks near
+$z \sim 2$--$3$, and declines towards $z = 0$ as the star formation
+rate density decreases \citep{HM2012, FG2020}.
+The equilibrium temperature
+$T_{\rm eq}(n_{\rm H}, z)$ therefore evolves with redshift even at
+fixed density.
+
+\subsubsection{How the standard solver tracks redshift}
+
+The standard \ramses\ cooling module calls \code{set\_table(aexp)} at
+each coarse time-step, rebuilding the 2D cooling table
+$\Lambda(n_{\rm H}, T_2)$ using the Courty UV background model
+evaluated at the current expansion factor~$a$.  This analytic UV model
+is a polynomial fit to Cloudy~07, so the table rebuild is
+inexpensive and correctly tracks the redshift evolution of the
+background --- within the limitations of the Courty model itself
+(Section~\ref{sec:2d_table}).
+
+\subsubsection{The single-z limitation of the Grackle table}
+
+The Grackle-based Eunha module (\code{eunha\_cooling\_mod.f90})
+initially loaded a single pre-computed 3D table at a fixed redshift
+(e.g.\ $z = 5.1$ for the HR5 restart).  While the cooling rates are
+more accurate than the RAMSES 2D table at that redshift, the table
+becomes increasingly wrong as the simulation evolves away from the
+tabulated~$z$.  In particular:
+
+\begin{itemize}
+  \item At $z < z_{\rm table}$, the UV background is stronger (more
+    photo-heating), so the true $T_{\rm eq}$ is higher than the
+    tabulated value.  The exact integrator would drive cells to an
+    \emph{artificially low} equilibrium temperature, underestimating
+    $\lJ$ and potentially triggering spurious refinement.
+  \item At $z > z_{\rm table}$, the UV background is weaker, and the
+    exact integrator would settle on a $T_{\rm eq}$ that is too high,
+    overestimating $\lJ$ and suppressing refinement.
+  \item The most rapid UV evolution occurs during hydrogen reionisation
+    ($z \sim 6$--$8$) and He~{\sc ii} reionisation ($z \sim 3$--$4$),
+    where $T_{\rm eq}$ can change by factors of 2--3 over $\Delta z
+    \sim 1$.
+\end{itemize}
+
+\subsubsection{Multi-z table and runtime interpolation}
+
+We address this by pre-computing Grackle equilibrium tables at multiple
+redshifts and interpolating at runtime.  The offline generator
+(\code{generate\_multi\_z\_table.py}) calls the Grackle library at
+each redshift snapshot to produce a single multi-z binary file
+containing $N_z$ copies of the 3D table $(n_{\rm H}, Z, T)$.
+
+The default sampling uses 10~redshift snapshots:
+\begin{equation}
+  z \in \{0.0,\; 0.5,\; 1.0,\; 1.5,\; 2.0,\; 3.0,\; 4.0,\; 5.0,\;
+  7.0,\; 10.0\},
+  \label{eq:z_grid}
+\end{equation}
+with denser spacing at low~$z$ ($\Delta z = 0.5$ for $z \le 2$) where
+the UV background evolves most rapidly relative to the Hubble time, and
+coarser spacing at high~$z$ ($\Delta z \ge 1$).
+
+At each coarse time-step, \code{eunha\_interp\_redshift($z$)} performs
+the following:
+\begin{enumerate}
+  \item Finds the bracketing snapshots $z_i \le z < z_{i+1}$ and
+    computes the linear interpolation weight
+    $w = (z - z_i)/(z_{i+1} - z_i)$.
+  \item Interpolates the net cooling rate and mean molecular weight:
+    \begin{align}
+      \Lambda_{\rm net}(n_{\rm H}, Z, T; z)
+        &= (1{-}w)\,\Lambda^{(i)} + w\,\Lambda^{(i+1)}, \\
+      \mu(n_{\rm H}, Z, T; z)
+        &= (1{-}w)\,\mu^{(i)} + w\,\mu^{(i+1)}.
+    \end{align}
+  \item Rebuilds the cumulative $Y$-table for all
+    $N_{\rm dens} \times N_{\rm metal} = 60 \times 40 = 2400$ cells
+    (OpenMP parallelised).
+  \item Caches the current redshift; the rebuild is skipped if
+    $|\Delta z| < 0.01$.
+\end{enumerate}
+
+The total file size for 10 snapshots on the standard
+$60 \times 40 \times 256$ grid is
+$10 \times 2 \times 614400 \times 8 \approx 94\,$MB, which is
+distributed with the source code.  Backward compatibility with
+single-z files is maintained through automatic format detection
+(the first \code{int32} in a multi-z file encodes $N_z$, which is
+distinguishable from the grid dimension $L = 60$).
+
+\subsubsection{Impact on cooling overshoot}
+\label{sec:multi_z_overshoot}
+
+The multi-z table eliminates a systematic error that compounds with the
+numerical overshoot discussed in Section~\ref{sec:overshoot}.  Consider
+a simulation at $z = 2$ using a table computed at $z = 5$:
+
+\begin{enumerate}
+  \item The UV background at $z = 2$ is $\sim 3$--$5\times$ stronger
+    than at $z = 5$ \citep{HM2012}, so
+    $T_{\rm eq}^{z=2} > T_{\rm eq}^{z=5}$.
+  \item A cell cooling towards equilibrium at $z = 2$ would be driven
+    to the \emph{wrong} (lower) $T_{\rm eq}^{z=5}$ by the stale table.
+  \item Even with the exact integrator (no numerical overshoot), the
+    cell reaches an incorrect equilibrium, yielding a systematically
+    too-small Jeans length.
+  \item The N-R solver compounds this: it may overshoot below the
+    already-too-low $T_{\rm eq}^{z=5}$, further reducing $\lJ$.
+\end{enumerate}
+
+With the multi-z table, the Eunha module tracks the correct
+$T_{\rm eq}(z)$ at every coarse step, matching the \ramses\ solver's
+\code{set\_table(aexp)} behaviour but with the improved Grackle rates
+and the exact integration scheme.  The combination eliminates both
+the systematic error (wrong UV background) and the numerical error
+(N-R overshoot), providing the most accurate equilibrium temperature
+determination available within the operator-split cooling framework.
+
+
+
+%======================================================================
+\section{Cooling Rates and the Jeans Length}
 \label{sec:cooling}
 %======================================================================
 
-The cooling module is a critical component of the simulation.  It
-determines the equilibrium temperature of the gas, which in turn
-controls the Jeans length $\lJ \propto \sqrt{T/\rho}$ and hence the
-refinement decisions through the Jeans criterion~$\mathcal{J}$.  Errors
-in the cooling calculation --- whether from the cooling rate tables, the
-UV background model, or the numerical integration scheme --- propagate
-directly into errors in $\lJ$ and may trigger (or suppress) refinement
-at the wrong density and temperature.
-
-In this section we first analyse the limitations of the standard
-\ramses\ cooling solver, then compare its underlying cooling rates
-against the Grackle equilibrium chemistry library
-\citep{Smith2017}, describe an alternative exact integration scheme
-based on the \citet{Townsend2009} $Y$-function method, and finally
-present a multi-redshift table that tracks the evolving UV background
-across cosmic time.
+Having described the exact integration scheme, we now analyse the
+cooling rates themselves.  The underlying cooling tables and UV
+background model differ between the standard \ramses\ solver and the
+Grackle equilibrium chemistry library \citep{Smith2017}.  These
+differences propagate into the equilibrium temperature and hence affect
+the Jeans length evaluation and refinement decisions.
 
 
 \subsection{The Standard \ramses\ Cooling Solver}
@@ -455,7 +683,7 @@ sub-step, the temperature is updated as
 \end{equation}
 where $\Lambda' \equiv d\Lambda_{\rm net}/dT_2$ and the adaptive step
 control parameter is
-$w_{\rm cool} = \max\bigl(|\Lambda|/(T_2\,\Delta_{\rm var}),\;
+$w_{\rm cool} = \max\bigl(|\Lambda|\,\Delta_{\rm var}/T_2,\;
 w_{\rm max},\;{-\Lambda'\,\Delta_{\rm var}}\bigr)$
 with $\Delta_{\rm var} = 4$.
 
@@ -732,225 +960,6 @@ contours (bottom-left) and the stronger $\Delta\mu$ pattern
 \end{figure*}
 
 
-\subsection{The Townsend Exact Integration Scheme}
-\label{sec:townsend}
-
-To address the overshooting problem of the N-R solver
-(Section~\ref{sec:overshoot}), we implement the exact integration
-method of \citet{Townsend2009}, which transforms the cooling ODE into
-an analytically invertible form using the $Y$-function.
-
-\subsubsection{Y-Function Formulation}
-
-For a piecewise power-law cooling function
-$\Lambda(T) \propto T^{\alpha_j}$ in each temperature bin
-$[T_j, T_{j+1}]$, the integrated cooling variable is
-\begin{equation}
-  Y(T) = \int_{T_{\rm ref}}^{T} \frac{dT'}{T'\,\hat{\Lambda}(T')}
-  = \sum_{k} \Delta Y_k,
-  \label{eq:Y_func}
-\end{equation}
-where $\hat{\Lambda} = \Lambda/\Lambda_{\rm ref}$ is the normalised
-cooling rate.  Each segment contributes
-\begin{equation}
-  \Delta Y_j = \begin{cases}
-    \dfrac{T_j^{-\alpha_j} - T_{j+1}^{-\alpha_j}}
-          {\alpha_j\,\hat{\Lambda}_j\,T_j^{-\alpha_j}}
-    & (\alpha_j \ne 0), \\[6pt]
-    \dfrac{\ln(T_j/T_{j+1})}{\hat{\Lambda}_j}
-    & (\alpha_j = 0).
-  \end{cases}
-  \label{eq:deltaY}
-\end{equation}
-
-The exact temperature after a time-step $\Delta t$ is obtained by
-inverting the relation
-\begin{equation}
-  Y(T^{n+1}) = Y(T^n) + \Lambda_{\rm ref}\,\frac{n_{\rm H}}{E_0}\,\Delta t,
-  \label{eq:Y_advance}
-\end{equation}
-where $E_0 = (3/2)\,n_{\rm tot}\,k_{\rm B}$ is the thermal energy per
-unit temperature.  The inversion is performed by binary search on the
-cumulative $Y$-table and local analytic inversion within the identified
-segment.
-
-\subsubsection{Advantages Over Newton--Raphson}
-
-The $Y$-function scheme has several fundamental advantages:
-
-\begin{enumerate}
-  \item \textbf{No overshooting.}  The method integrates the cooling
-    equation \emph{exactly} for piecewise power-law rates.  The
-    temperature evolves monotonically towards the equilibrium; it cannot
-    oscillate across $T_{\rm eq}$.
-  \item \textbf{No sub-stepping.}  A single evaluation of
-    equation~(\ref{eq:Y_advance}) advances the solution by the full
-    hydrodynamic time-step, regardless of $t_{\rm cool}/\Delta t$.  The
-    N-R solver requires up to 500 sub-steps when $\Delta t \gg t_{\rm cool}$.
-  \item \textbf{Correct equilibrium.}  When $\Delta t \to \infty$,
-    $Y \to Y_{\rm eq}$ and the cell relaxes exactly to $T_{\rm eq}$.
-    The N-R solver only reaches $T_{\rm eq}$ asymptotically through
-    iteration, and may settle on the wrong side if the sub-step
-    structure interacts with the sign change.
-  \item \textbf{Deterministic.}  The result depends only on
-    $(T^n, n_{\rm H}, Z, \Delta t)$ and the cooling table, with no
-    sensitivity to iteration count, convergence tolerance, or adaptive
-    step heuristics.
-\end{enumerate}
-
-The cost is a table lookup and a $\log/\exp$ evaluation per cell
-($\sim$few $\mu$s), comparable to a single N-R sub-step.  Since the N-R
-solver typically requires 5--50 sub-steps, the exact scheme is faster
-for strongly cooling gas.
-
-\subsubsection{Implementation: Eunha Cooling Module}
-
-The exact integrator is implemented as a Fortran module
-(\code{eunha\_cooling\_mod.f90}) that reads a 3D Grackle equilibrium
-cooling table $\Lambda_{\rm net}(n_{\rm H}, Z, T)$ and pre-computes
-the cumulative $Y$-table.  The module provides three runtime modes
-selected by the namelist parameter \code{cooling\_method}:
-\begin{itemize}
-  \item \code{`original'} --- standard \ramses\ N-R solver (default,
-    no overhead);
-  \item \code{`exact'} --- Townsend exact integration replaces the N-R
-    solver;
-  \item \code{`compare'} --- both solvers run; the N-R result is used
-    for physics while per-step diagnostics report the difference
-    $\Delta T_2^{\rm orig} - \Delta T_2^{\rm exact}$.
-\end{itemize}
-
-The Grackle table adds a third axis (metallicity $Z$) with 40 bins
-spanning $10^{-6}$--$10\,Z_\odot$, compared to the 2D RAMSES table
-with linear $Z$ scaling.  The mean molecular weight $\mu(n_{\rm H}, Z, T)$
-is also tabulated from Grackle's non-LTE equilibrium, replacing the
-RAMSES CIE calculation.  The $T_2 \leftrightarrow T$ conversion uses an
-iterative scheme: $\mu \to T = T_2\,\mu \to \mu'(n_{\rm H}, Z, T) \to
-T' = T_2\,\mu'$, converging to $<0.1$\,per\,cent in 3 iterations.
-
-
-\subsection{Redshift-Dependent Cooling: Multi-z Tables}
-\label{sec:multi_z}
-
-The cooling rate depends on redshift through the UV background
-intensity $J_\nu(z)$, which evolves as the ionising photon production
-rate rises during cosmic reionisation ($z \gtrsim 6$), peaks near
-$z \sim 2$--$3$, and declines towards $z = 0$ as the star formation
-rate density decreases \citep{HM2012, FG2020}.
-The equilibrium temperature
-$T_{\rm eq}(n_{\rm H}, z)$ therefore evolves with redshift even at
-fixed density.
-
-\subsubsection{How the standard solver tracks redshift}
-
-The standard \ramses\ cooling module calls \code{set\_table(aexp)} at
-each coarse time-step, rebuilding the 2D cooling table
-$\Lambda(n_{\rm H}, T_2)$ using the Courty UV background model
-evaluated at the current expansion factor~$a$.  This analytic UV model
-is a polynomial fit to Cloudy~07, so the table rebuild is
-inexpensive and correctly tracks the redshift evolution of the
-background --- within the limitations of the Courty model itself
-(Section~\ref{sec:2d_table}).
-
-\subsubsection{The single-z limitation of the Grackle table}
-
-The Grackle-based Eunha module (\code{eunha\_cooling\_mod.f90})
-initially loaded a single pre-computed 3D table at a fixed redshift
-(e.g.\ $z = 5.1$ for the HR5 restart).  While the cooling rates are
-more accurate than the RAMSES 2D table at that redshift, the table
-becomes increasingly wrong as the simulation evolves away from the
-tabulated~$z$.  In particular:
-
-\begin{itemize}
-  \item At $z < z_{\rm table}$, the UV background is stronger (more
-    photo-heating), so the true $T_{\rm eq}$ is higher than the
-    tabulated value.  The exact integrator would drive cells to an
-    \emph{artificially low} equilibrium temperature, underestimating
-    $\lJ$ and potentially triggering spurious refinement.
-  \item At $z > z_{\rm table}$, the UV background is weaker, and the
-    exact integrator would settle on a $T_{\rm eq}$ that is too high,
-    overestimating $\lJ$ and suppressing refinement.
-  \item The most rapid UV evolution occurs during hydrogen reionisation
-    ($z \sim 6$--$8$) and He~{\sc ii} reionisation ($z \sim 3$--$4$),
-    where $T_{\rm eq}$ can change by factors of 2--3 over $\Delta z
-    \sim 1$.
-\end{itemize}
-
-\subsubsection{Multi-z table and runtime interpolation}
-
-We address this by pre-computing Grackle equilibrium tables at multiple
-redshifts and interpolating at runtime.  The offline generator
-(\code{generate\_multi\_z\_table.py}) calls the Grackle library at
-each redshift snapshot to produce a single multi-z binary file
-containing $N_z$ copies of the 3D table $(n_{\rm H}, Z, T)$.
-
-The default sampling uses 10~redshift snapshots:
-\begin{equation}
-  z \in \{0.0,\; 0.5,\; 1.0,\; 1.5,\; 2.0,\; 3.0,\; 4.0,\; 5.0,\;
-  7.0,\; 10.0\},
-  \label{eq:z_grid}
-\end{equation}
-with denser spacing at low~$z$ ($\Delta z = 0.5$ for $z \le 2$) where
-the UV background evolves most rapidly relative to the Hubble time, and
-coarser spacing at high~$z$ ($\Delta z \ge 1$).
-
-At each coarse time-step, \code{eunha\_interp\_redshift($z$)} performs
-the following:
-\begin{enumerate}
-  \item Finds the bracketing snapshots $z_i \le z < z_{i+1}$ and
-    computes the linear interpolation weight
-    $w = (z - z_i)/(z_{i+1} - z_i)$.
-  \item Interpolates the net cooling rate and mean molecular weight:
-    \begin{align}
-      \Lambda_{\rm net}(n_{\rm H}, Z, T; z)
-        &= (1{-}w)\,\Lambda^{(i)} + w\,\Lambda^{(i+1)}, \\
-      \mu(n_{\rm H}, Z, T; z)
-        &= (1{-}w)\,\mu^{(i)} + w\,\mu^{(i+1)}.
-    \end{align}
-  \item Rebuilds the cumulative $Y$-table for all
-    $N_{\rm dens} \times N_{\rm metal} = 60 \times 40 = 2400$ cells
-    (OpenMP parallelised).
-  \item Caches the current redshift; the rebuild is skipped if
-    $|\Delta z| < 0.01$.
-\end{enumerate}
-
-The total file size for 10 snapshots on the standard
-$60 \times 40 \times 256$ grid is
-$10 \times 2 \times 614400 \times 8 \approx 94\,$MB, which is
-distributed with the source code.  Backward compatibility with
-single-z files is maintained through automatic format detection
-(the first \code{int32} in a multi-z file encodes $N_z$, which is
-distinguishable from the grid dimension $L = 60$).
-
-\subsubsection{Impact on cooling overshoot}
-\label{sec:multi_z_overshoot}
-
-The multi-z table eliminates a systematic error that compounds with the
-numerical overshoot discussed in Section~\ref{sec:overshoot}.  Consider
-a simulation at $z = 2$ using a table computed at $z = 5$:
-
-\begin{enumerate}
-  \item The UV background at $z = 2$ is $\sim 3$--$5\times$ stronger
-    than at $z = 5$ \citep{HM2012}, so
-    $T_{\rm eq}^{z=2} > T_{\rm eq}^{z=5}$.
-  \item A cell cooling towards equilibrium at $z = 2$ would be driven
-    to the \emph{wrong} (lower) $T_{\rm eq}^{z=5}$ by the stale table.
-  \item Even with the exact integrator (no numerical overshoot), the
-    cell reaches an incorrect equilibrium, yielding a systematically
-    too-small Jeans length.
-  \item The N-R solver compounds this: it may overshoot below the
-    already-too-low $T_{\rm eq}^{z=5}$, further reducing $\lJ$.
-\end{enumerate}
-
-With the multi-z table, the Eunha module tracks the correct
-$T_{\rm eq}(z)$ at every coarse step, matching the \ramses\ solver's
-\code{set\_table(aexp)} behaviour but with the improved Grackle rates
-and the exact integration scheme.  The combination eliminates both
-the systematic error (wrong UV background) and the numerical error
-(N-R overshoot), providing the most accurate equilibrium temperature
-determination available within the operator-split cooling framework.
-
-
 \subsection{Implications for the Jeans Criterion}
 \label{sec:cool_jeans}
 
@@ -1034,6 +1043,7 @@ Redshift & Rebuilt per step (\code{set\_table}) &
 
 
 %======================================================================
+
 \section{The Starburst Problem}
 \label{sec:starburst}
 %======================================================================
@@ -1532,7 +1542,7 @@ straightforwardly generalised to use $c_{\rm eff}^2 = c_s^2 +
 In summary, while a pressure floor provides a brute-force guarantee
 that the Jeans criterion is satisfied, it does so at the cost of
 altering the thermodynamic state of the gas.  Our approach ---
-combining accurate cooling (Section~\ref{sec:cooling}) with
+combining accurate cooling (Sections~\ref{sec:exact_cooling}--\ref{sec:cooling}) with
 Jeans-aware refinement (Section~\ref{sec:bypass}) --- achieves the
 same numerical stability without modifying the gas physics.
 
