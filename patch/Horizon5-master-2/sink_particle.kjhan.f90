@@ -5355,11 +5355,14 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   real(dp),dimension(1:nAGN,1:3)::xAGN,vAGN,jAGN
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::vol_gas_mpi,mass_gas_mpi,mAGN_mpi,psy_norm_mpi,ZAGN_mpi
-  real(dp),dimension(1:nsink)::vol_gas_all,mass_gas_all,mAGN_all,psy_norm_all,ZAGN_all
+  real(dp),dimension(:),allocatable::allreduce_sbuf,allreduce_rbuf
 #endif
   logical ,dimension(1:nAGN)::ok_blast_agn
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy
   real(dp)::eint,ekk
+  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: inv_bin_size
+  integer, allocatable :: bin_head(:,:,:), agn_next(:)
 
   if(verbose)write(*,*)'  +Entering average_AGN'
 !$omp parallel shared(nthreads)
@@ -5407,6 +5410,19 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
+  ! Build spatial bins for AGN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+  bin_head=0; agn_next=0
+  do iAGN=1,nAGN
+     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+     agn_next(iAGN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iAGN
+  end do
+
   ! Initialize the averaged variables
   vol_gas=0d0;mass_gas=0d0;vol_blast=0d0;mass_blast=0d0;ind_blast=-1;psy_norm=0d0;ZAGN=0d0
 !######################################################################################################### 
@@ -5440,7 +5456,7 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(iAGN,igrid,ngrid,i,ind, iskip,x,y,z,dxx,dyy,dzz,&
 !$omp                  dr_AGN,dr_cell,jtot,j_x,j_y,j_z,dzjet,drjet,psy,d,u,v,w,&
-!$omp                  ekk,eint) schedule(dynamic)
+!$omp                  ekk,eint,ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
      do igrid=1,ncache,nvector
        ngrid=MIN(nvector,ncache-igrid+1)
        do i=1,ngrid
@@ -5462,7 +5478,16 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-               do iAGN=1,nAGN
+               ! Find cell's spatial bin
+               ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+               iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+               ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+               ! Loop over 27 neighbor bins
+               do jbz=max(1,ibz-1),min(nbin,ibz+1)
+               do jby=max(1,iby-1),min(nbin,iby+1)
+               do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                  iAGN=bin_head(jbx,jby,jbz)
+                  do while(iAGN > 0)
                   dxx=x-xAGN(iAGN,1)
                   dyy=y-xAGN(iAGN,2)
                   dzz=z-xAGN(iAGN,3)
@@ -5510,26 +5535,8 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                             endif
                             if(dr_cell.le.dx_loc/2.0)then
                                ind_blast(iAGN)=ind_cell(i)
-                               d=uold(ind_blast(iAGN),1)
-                               u=uold(ind_blast(iAGN),2)/d
-                               v=uold(ind_blast(iAGN),3)/d
-                               w=uold(ind_blast(iAGN),4)/d
-                               ekk=0.5d0*d*(u*u+v*v+w*w)
-                               eint=uold(ind_blast(iAGN),5)-ekk
-                               vol_blast  (iAGN)=vol_loc
-                               mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN_myid(iAGN)),0.25d0*d*vol_loc)
-                               if(metal)then
-                                  ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
-                                  uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
-                                  & - ZAGN(iAGN)*mAGN(iAGN)/vol_loc
-                               endif
-
-                               d=uold(ind_blast(iAGN),1)-mAGN(iAGN)/vol_loc
-                               uold(ind_blast(iAGN),1)=d
-                               uold(ind_blast(iAGN),2)=d*u
-                               uold(ind_blast(iAGN),3)=d*v
-                               uold(ind_blast(iAGN),4)=d*w
-                               uold(ind_blast(iAGN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+                               vol_blast(iAGN)=vol_loc
+                               ! Deferred: uold jet mass removal after parallel loop
                             endif
                             ! If no spin for the jet then put all thermal
                           else
@@ -5556,7 +5563,11 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                          endif
                       endif
                    endif
-         end do
+                  iAGN=agn_next(iAGN)
+                  end do ! while
+               end do ! jbx
+               end do ! jby
+               end do ! jbz
               endif
       end do
 
@@ -5566,6 +5577,37 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ! End loop over grids
   end do
   ! End loop over levels
+
+  ! Deferred uold update: apply jet mass removal sequentially
+  ! to avoid OMP race when two AGN share a cell.
+  do iAGN=1,nAGN
+     if(EsaveAGN(iAGN).le.0d0 .and. X_radio(iAGN).lt.X_floor &
+        & .and. ok_blast_agn(iAGN) .and. ind_blast(iAGN).gt.0)then
+        jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
+        if(jtot.gt.0d0)then
+           d=uold(ind_blast(iAGN),1)
+           u=uold(ind_blast(iAGN),2)/d
+           v=uold(ind_blast(iAGN),3)/d
+           w=uold(ind_blast(iAGN),4)/d
+           ekk=0.5d0*d*(u*u+v*v+w*w)
+           eint=uold(ind_blast(iAGN),5)-ekk
+           mAGN(iAGN)=min(mloadAGN*dMsmbh(iAGN_myid(iAGN)),0.25d0*d*vol_blast(iAGN))
+           if(metal)then
+              ZAGN(iAGN)=uold(ind_blast(iAGN),imetal)/d
+              uold(ind_blast(iAGN),imetal)=uold(ind_blast(iAGN),imetal) &
+              & - ZAGN(iAGN)*mAGN(iAGN)/vol_blast(iAGN)
+           endif
+           d=d-mAGN(iAGN)/vol_blast(iAGN)
+           uold(ind_blast(iAGN),1)=d
+           uold(ind_blast(iAGN),2)=d*u
+           uold(ind_blast(iAGN),3)=d*v
+           uold(ind_blast(iAGN),4)=d*w
+           uold(ind_blast(iAGN),5)=eint+0.5d0*d*(u*u+v*v+w*w)
+        endif
+     endif
+  enddo
+
+  deallocate(bin_head, agn_next)
 
 !$omp parallel do private(iAGN)
   do iAGN = 1, nAGN
@@ -5595,16 +5637,20 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
      ZAGN_mpi    (isink)=ZAGN    (iAGN)
      psy_norm_mpi(isink)=psy_norm(iAGN)
   enddo
-  call MPI_ALLREDUCE(vol_gas_mpi ,vol_gas_all ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mass_gas_mpi,mass_gas_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(mAGN_mpi    ,mAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(ZAGN_mpi    ,ZAGN_all    ,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(psy_norm_mpi,psy_norm_all,nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-  vol_gas_mpi =vol_gas_all
-  mass_gas_mpi=mass_gas_all
-  mAGN_mpi    =mAGN_all
-  ZAGN_mpi    =ZAGN_all
-  psy_norm_mpi=psy_norm_all
+  ! Pack 5 ALLREDUCE calls into 1
+  allocate(allreduce_sbuf(5*nsink), allreduce_rbuf(5*nsink))
+  allreduce_sbuf(1:nsink)=vol_gas_mpi
+  allreduce_sbuf(nsink+1:2*nsink)=mass_gas_mpi
+  allreduce_sbuf(2*nsink+1:3*nsink)=mAGN_mpi
+  allreduce_sbuf(3*nsink+1:4*nsink)=ZAGN_mpi
+  allreduce_sbuf(4*nsink+1:5*nsink)=psy_norm_mpi
+  call MPI_ALLREDUCE(allreduce_sbuf,allreduce_rbuf,5*nsink,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+  vol_gas_mpi =allreduce_rbuf(1:nsink)
+  mass_gas_mpi=allreduce_rbuf(nsink+1:2*nsink)
+  mAGN_mpi    =allreduce_rbuf(2*nsink+1:3*nsink)
+  ZAGN_mpi    =allreduce_rbuf(3*nsink+1:4*nsink)
+  psy_norm_mpi=allreduce_rbuf(4*nsink+1:5*nsink)
+  deallocate(allreduce_sbuf, allreduce_rbuf)
   ! Put the nsink size arrays into nAGN size arrays
 !$omp parallel do private(iAGN,isink)
   do iAGN=1,nAGN
@@ -5677,6 +5723,9 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy,nCOM,T2_1,T2_2,ekk,eint,vm_,dr_cell,T2,etot
   real(dp)::eint1,ekkold,T2maxAGNz,epsilon_r,ZZ1,ZZ2,onethird,r_lso,eff_mad
   integer::idim,isink
+  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: inv_bin_size
+  integer, allocatable :: bin_head(:,:,:), agn_next(:)
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::EsaveAGN_mpi,EsaveAGN_all
 #endif
@@ -5724,6 +5773,19 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   rmax=MAX(1d0*dx_min*scale_l/aexp,rAGN*3.08d21)
   rmax=rmax/scale_l
   rmax2=rmax*rmax
+
+  ! Build spatial bins for AGN
+  nbin=max(1,min(128,int(boxlen/rmax)))
+  inv_bin_size=dble(nbin)/boxlen
+  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
+  bin_head=0; agn_next=0
+  do iAGN=1,nAGN
+     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+     agn_next(iAGN)=bin_head(ibx,iby,ibz)
+     bin_head(ibx,iby,ibz)=iAGN
+  end do
 
 !!$omp parallel do private(iAGN)
   do iAGN=1,nAGN
@@ -5790,7 +5852,8 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      ncache=active(ilevel)%ngrid
 !$omp parallel do private(igrid,ngrid,i,ind,iskip,x,y,z,iAGN,dxx,dyy,dzz,&
 !$omp               dr_AGN,ekk,d,idim,etot,eint,T2_1,T2_2,jtot,j_x,j_y,j_z,&
-!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas) schedule(dynamic)
+!$omp               dzjet,drjet,psy,u,v,w,ekkold,d_gas,&
+!$omp               ibx,iby,ibz,jbx,jby,jbz) schedule(dynamic)
      do igrid=1,ncache,nvector
         ngrid=MIN(nvector,ncache-igrid+1)
         do i=1,ngrid
@@ -5816,17 +5879,27 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
 
-                 do iAGN=1,nAGN
+                 ! Find cell's spatial bin
+                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
+                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
+                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Loop over 27 neighbor bins
+                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
+                 do jby=max(1,iby-1),min(nbin,iby+1)
+                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                    iAGN=bin_head(jbx,jby,jbz)
+                    do while(iAGN > 0)
+
+                    dxx=x-xAGN(iAGN,1)
+                    dyy=y-xAGN(iAGN,2)
+                    dzz=z-xAGN(iAGN,3)
+                    dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
 
                     ! ------------------------------------------
                     ! case 0: Some energy has not been released
                     ! in previous time step -> do thermal input
                     ! ------------------------------------------
                     if(ok_save(iAGN))then
-                       dxx=x-xAGN(iAGN,1)
-                       dyy=y-xAGN(iAGN,2)
-                       dzz=z-xAGN(iAGN,3)
-                       dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
                        if(dr_AGN.le.rmax2)then
                           ekk=0d0
                           d=uold(ind_cell(i),1)
@@ -5861,10 +5934,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                        ! ------------------------------------------
                        if(X_radio(iAGN).lt.X_floor)then
 
-                          dxx=x-xAGN(iAGN,1)
-                          dyy=y-xAGN(iAGN,2)
-                          dzz=z-xAGN(iAGN,3)
-                          dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
                           jtot=sqrt(jAGN(iAGN,1)**2+jAGN(iAGN,2)**2+jAGN(iAGN,3)**2)
                           if(jtot.gt.0d0)then
                              j_x=jAGN(iAGN,1)/jtot
@@ -5872,7 +5941,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                              j_z=jAGN(iAGN,3)/jtot
                              dzjet= dxx*j_x + dyy*j_y + dzz*j_z
                              drjet=sqrt(dr_AGN-dzjet*dzjet)
-     
+
                              ! Check if the cell lies within the AGN jet cylindre
                              if (drjet .le. rmax .and. abs(dzjet) .le. rmax)then
                                 psy=exp(-drjet**2/2d0/rmax**2d0) / psy_norm(iAGN)
@@ -5899,7 +5968,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                                 eint=etot - ekk
                                 ! Compute temperature T2=T/mu in Kelvin before energy input
                                 T2_1=(gamma-1d0)*eint/uold(ind_cell(i),1)*scale_T2
-     
+
                                 d_gas=mAGN(iAGN)/vol_gas(iAGN)
                                 ! Compute the density and the metal density of the cell
                                 uold(ind_cell(i),1)=uold(ind_cell(i),1) + d_gas * psy
@@ -5911,7 +5980,7 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                                 u= u + vAGN(iAGN,1)
                                 v= v + vAGN(iAGN,2)
                                 w= w + vAGN(iAGN,3)
-     
+
                                 ! Add each momentum component of the jet to the gas
                                 uold(ind_cell(i),2)=uold(ind_cell(i),2)+d_gas*u * psy
                                 uold(ind_cell(i),3)=uold(ind_cell(i),3)+d_gas*v * psy
@@ -5958,10 +6027,6 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                        ! Thermal case
                        ! ------------------------------------------
                        else
-                          dxx=x-xAGN(iAGN,1)
-                          dyy=y-xAGN(iAGN,2)
-                          dzz=z-xAGN(iAGN,3)
-                          dr_AGN=dxx*dxx+dyy*dyy+dzz*dzz
                           if(dr_AGN.le.rmax2)then
                              ekk=0d0
                              d=uold(ind_cell(i),1)
@@ -5990,7 +6055,11 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                     endif
                     !End of ok_blast_agn
 
-                 end do
+                    iAGN=agn_next(iAGN)
+                    end do ! while
+                 end do ! jbx
+                 end do ! jby
+                 end do ! jbz
               endif
            end do
         end do
@@ -5999,6 +6068,8 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
      ! End loop over grids
   end do
   ! End loop over levels
+
+  deallocate(bin_head, agn_next)
 
   do iAGN=1, nAGN
      EsaveAGN(iAGN) = sum(PEsaveAGN(iAGN,0:nthreads-1))
