@@ -38,12 +38,25 @@ subroutine read_params
        & ,de_perturb &
        & ,use_mond &
        & ,use_fR &
-       & ,use_nDGP
+       & ,use_nDGP &
+       & ,use_symmetron &
+       & ,use_dilaton &
+       & ,use_galileon &
+       & ,use_coupled_de &
+       & ,use_ede
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
   namelist/fR_params/fR0,fR_n,n_iter_fR,fR_eps
   namelist/nDGP_params/omega_rc,nDGP_branch,n_iter_nDGP,nDGP_eps
+  namelist/symmetron_params/a_ssb,beta_symmetron,L_symmetron, &
+       & n_iter_symmetron,symmetron_eps
+  namelist/dilaton_params/beta_dilaton,L_dilaton,a0_dilaton, &
+       & n_iter_dilaton,dilaton_eps
+  namelist/galileon_params/c2_galileon,c3_galileon, &
+       & n_iter_galileon,galileon_eps
+  namelist/coupled_de_params/beta_cde
+  namelist/ede_params/omega_ede,z_ede,w_ede
   namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
@@ -218,6 +231,36 @@ subroutine read_params
      rewind(1)
      read(1,NML=nDGP_params,END=73)
 73   continue
+  end if
+  ! Symmetron parameters
+  if(use_symmetron) then
+     rewind(1)
+     read(1,NML=symmetron_params,END=72)
+72   continue
+  end if
+  ! Dilaton parameters
+  if(use_dilaton) then
+     rewind(1)
+     read(1,NML=dilaton_params,END=71)
+71   continue
+  end if
+  ! Galileon parameters
+  if(use_galileon) then
+     rewind(1)
+     read(1,NML=galileon_params,END=70)
+70   continue
+  end if
+  ! Coupled DE parameters
+  if(use_coupled_de) then
+     rewind(1)
+     read(1,NML=coupled_de_params,END=69)
+69   continue
+  end if
+  ! Early DE parameters
+  if(use_ede) then
+     rewind(1)
+     read(1,NML=ede_params,END=68)
+68   continue
   end if
 
   !-------------------------------------------------
@@ -493,6 +536,135 @@ subroutine read_params
         write(*,'(A)') ' nDGP gravity enabled'
         write(*,'(A,ES10.3,A,I2)') '   omega_rc=', omega_rc, '  branch=', nDGP_branch
         write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_nDGP, '  eps=', nDGP_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Scalar field mutual exclusion check
+  ! fR, nDGP, MOND, symmetron, dilaton, galileon: at most 1
+  !-------------------------------------------------
+  i = 0
+  if(use_fR)        i = i + 1
+  if(use_nDGP)      i = i + 1
+  if(use_mond)      i = i + 1
+  if(use_symmetron)  i = i + 1
+  if(use_dilaton)    i = i + 1
+  if(use_galileon)   i = i + 1
+  if(i > 1) then
+     if(myid==1) write(*,*) 'ERROR: Only one scalar field gravity model allowed at a time'
+     if(myid==1) write(*,*) '  (fR, nDGP, MOND, symmetron, dilaton, galileon)'
+     call clean_stop
+  end if
+
+  !-------------------------------------------------
+  ! Symmetron gravity
+  !-------------------------------------------------
+  if(use_symmetron) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Symmetron requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_symmetron=T requires poisson=T'
+        call clean_stop
+     end if
+     if(a_ssb <= 0d0 .or. a_ssb >= 1d0) then
+        if(myid==1) write(*,*) 'ERROR: a_ssb must be in (0,1)'
+        call clean_stop
+     end if
+     if(L_symmetron <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: L_symmetron must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Symmetron gravity enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F8.3,A)') &
+             '   a_ssb=', a_ssb, '  beta=', beta_symmetron, '  L=', L_symmetron, ' Mpc/h'
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_symmetron, '  eps=', symmetron_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Dilaton gravity
+  !-------------------------------------------------
+  if(use_dilaton) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Dilaton requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_dilaton=T requires poisson=T'
+        call clean_stop
+     end if
+     if(L_dilaton <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: L_dilaton must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Dilaton gravity enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F8.3,A)') &
+             '   a0=', a0_dilaton, '  beta=', beta_dilaton, '  L=', L_dilaton, ' Mpc/h'
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_dilaton, '  eps=', dilaton_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Galileon (cubic) gravity
+  !-------------------------------------------------
+  if(use_galileon) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: Galileon requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_galileon=T requires poisson=T'
+        call clean_stop
+     end if
+     if(abs(c3_galileon) < 1d-30) then
+        if(myid==1) write(*,*) 'ERROR: c3_galileon must be non-zero'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Cubic Galileon gravity enabled'
+        write(*,'(A,ES10.3,A,ES10.3)') '   c2=', c2_galileon, '  c3=', c3_galileon
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_galileon, '  eps=', galileon_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Coupled Dark Energy
+  !-------------------------------------------------
+  if(use_coupled_de) then
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_coupled_de=T requires poisson=T'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A,F8.4)') ' Coupled Dark Energy enabled: beta_cde=', beta_cde
+        write(*,'(A,F10.6)') '   G_eff/G = ', 1d0 + 2d0*beta_cde**2
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Early Dark Energy (Doran-Robbers)
+  !-------------------------------------------------
+  if(use_ede) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: EDE requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(omega_ede < 0d0 .or. omega_ede >= 1d0) then
+        if(myid==1) write(*,*) 'ERROR: omega_ede must be in [0,1)'
+        call clean_stop
+     end if
+     if(z_ede <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: z_ede must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Early Dark Energy (Doran-Robbers) enabled'
+        write(*,'(A,F8.4,A,F10.1,A,F6.3)') &
+             '   omega_ede=', omega_ede, '  z_ede=', z_ede, '  w_ede=', w_ede
      end if
   end if
 

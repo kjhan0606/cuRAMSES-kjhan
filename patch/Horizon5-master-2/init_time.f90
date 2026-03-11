@@ -738,25 +738,43 @@ subroutine friedman(O_mat_0,O_vac_0,O_k_0,alpha,axp_min, &
 end subroutine friedman
 
 function dadtau(axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
-  use amr_parameters, only: dp
+  use amr_parameters, only: dp, use_ede, omega_ede, z_ede, w_ede
   real(kind=8)::dadtau,axp_tau,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in
-  real(kind=8)::f_de
+  real(kind=8)::f_de, ede_term
+  real(kind=8)::a_c_ede, pw_ede, frac_ede
   dadtau = axp_tau*axp_tau*axp_tau *  &
        &   ( O_mat_0 + &
        &     O_vac_0 * axp_tau*axp_tau*axp_tau * f_de(axp_tau,w0_in,wa_in) + &
        &     O_k_0   * axp_tau )
+  ! Early Dark Energy contribution
+  if(use_ede .and. omega_ede > 0d0) then
+     a_c_ede = 1d0 / (1d0 + z_ede)
+     pw_ede = 3d0 * (1d0 + w_ede)
+     frac_ede = (a_c_ede / axp_tau)**pw_ede / (1d0 + (axp_tau / a_c_ede)**pw_ede)
+     ede_term = omega_ede * frac_ede * axp_tau**3
+     dadtau = dadtau + axp_tau**3 * ede_term
+  end if
   dadtau = sqrt(dadtau)
   return
 end function dadtau
 
 function dadt(axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in)
-  use amr_parameters, only: dp
+  use amr_parameters, only: dp, use_ede, omega_ede, z_ede, w_ede
   real(kind=8)::dadt,axp_t,O_mat_0,O_vac_0,O_k_0,w0_in,wa_in
-  real(kind=8)::f_de
+  real(kind=8)::f_de, ede_term
+  real(kind=8)::a_c_ede, pw_ede, frac_ede
   dadt   = (1.0D0/axp_t)* &
        &   ( O_mat_0 + &
        &     O_vac_0 * axp_t*axp_t*axp_t * f_de(axp_t,w0_in,wa_in) + &
        &     O_k_0   * axp_t )
+  ! Early Dark Energy contribution
+  if(use_ede .and. omega_ede > 0d0) then
+     a_c_ede = 1d0 / (1d0 + z_ede)
+     pw_ede = 3d0 * (1d0 + w_ede)
+     frac_ede = (a_c_ede / axp_t)**pw_ede / (1d0 + (axp_t / a_c_ede)**pw_ede)
+     ede_term = omega_ede * frac_ede
+     dadt = dadt + (1d0/axp_t) * ede_term * axp_t**3
+  end if
   dadt = sqrt(dadt)
   return
 end function dadt

@@ -338,6 +338,39 @@ module amr_parameters
   integer ::n_iter_nDGP=20              ! Max Newton-GS iterations
   real(dp)::nDGP_eps=1.0d-6             ! Convergence threshold
 
+  ! Symmetron gravity parameters
+  logical ::use_symmetron=.false.        ! Enable Symmetron scalar field
+  real(dp)::a_ssb=0.5d0                 ! SSB scale factor
+  real(dp)::beta_symmetron=1.0d0        ! Coupling strength
+  real(dp)::L_symmetron=1.0d0           ! Compton wavelength [Mpc/h]
+  integer ::n_iter_symmetron=20          ! Max Newton-GS iterations
+  real(dp)::symmetron_eps=1.0d-6        ! Convergence threshold
+
+  ! Dilaton gravity parameters (Damour-Polyakov)
+  logical ::use_dilaton=.false.          ! Enable environmentally dependent dilaton
+  real(dp)::beta_dilaton=1.0d0          ! Coupling strength
+  real(dp)::L_dilaton=1.0d0             ! Compton wavelength [Mpc/h]
+  real(dp)::a0_dilaton=0.5d0            ! Transition scale factor
+  integer ::n_iter_dilaton=20            ! Max Newton-GS iterations
+  real(dp)::dilaton_eps=1.0d-6          ! Convergence threshold
+
+  ! Galileon (cubic) gravity parameters
+  logical ::use_galileon=.false.         ! Enable cubic Galileon scalar field
+  real(dp)::c2_galileon=-1.0d0          ! Kinetic coefficient
+  real(dp)::c3_galileon=1.0d0           ! Cubic coefficient
+  integer ::n_iter_galileon=20           ! Max Newton-GS iterations
+  real(dp)::galileon_eps=1.0d-6         ! Convergence threshold
+
+  ! Coupled Dark Energy parameters
+  logical ::use_coupled_de=.false.       ! Enable DM-DE coupling
+  real(dp)::beta_cde=0.1d0              ! DM-DE coupling constant
+
+  ! Early Dark Energy (Doran-Robbers) parameters
+  logical ::use_ede=.false.              ! Enable Early Dark Energy
+  real(dp)::omega_ede=0.04d0            ! EDE energy density fraction
+  real(dp)::z_ede=3000.0d0              ! EDE injection redshift
+  real(dp)::w_ede=0.333d0               ! EDE equation of state
+
 !chemo flags and variables
   real(dp)::rcell  =2.0D0     ! Supernovae superbubble radius in cells
   real(dp)::tol    =5.D-6     ! Tolerance factor used in the chemo version

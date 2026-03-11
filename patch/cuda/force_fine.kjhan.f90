@@ -162,6 +162,11 @@ subroutine force_fine(ilevel,icount)
         call apply_mond_force(ilevel)
      end if
 
+     ! Apply Coupled Dark Energy force enhancement
+     if(use_coupled_de) then
+        call apply_coupled_de_force(ilevel)
+     end if
+
      do idim=1,ndim
         call make_virtual_fine_dp(f(1,idim),ilevel)
      end do
@@ -1786,3 +1791,1068 @@ subroutine nDGP_gauss_seidel(ilevel, beta, res_max, src_max)
   end do  ! icolor
 
 end subroutine nDGP_gauss_seidel
+
+!#########################################################
+!#########################################################
+!  SYMMETRON SCALAR FIELD SOLVER
+!#########################################################
+!#########################################################
+
+!=========================================================
+! symmetron_solve_level: top-level Symmetron solver
+!=========================================================
+subroutine symmetron_solve_level(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel, icount
+
+  integer::iter,ncache,info
+  real(dp)::res_max_local,res_max_global
+  real(dp)::src_max_local,src_max_global
+  real(dp)::rel_res
+  logical::converged
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Initialize scalar_gr on first step
+  if(nstep==0) then
+     call symmetron_init_scalar(ilevel)
+  end if
+
+  ! Newton-GS relaxation
+  converged = .false.
+  do iter=1,n_iter_symmetron
+
+     call symmetron_gauss_seidel(ilevel, res_max_local, src_max_local)
+
+     call make_virtual_fine_dp(scalar_gr(1), ilevel)
+
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(res_max_local, res_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(src_max_local, src_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     res_max_global = res_max_local
+     src_max_global = src_max_local
+#endif
+
+     if(src_max_global > 0d0) then
+        rel_res = res_max_global / src_max_global
+     else
+        rel_res = 0d0
+     end if
+
+     if(rel_res < symmetron_eps) then
+        converged = .true.
+        if(myid==1) write(*,'(A,I2,A,I3,A,ES10.3)') &
+             ' Symmetron level ',ilevel,' converged in ',iter,' iters, res=',rel_res
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid==1) then
+     write(*,'(A,I2,A,I3,A,ES10.3)') &
+          ' WARNING: Symmetron level ',ilevel,' NOT converged after ', &
+          n_iter_symmetron,' iters, res=',rel_res
+  end if
+
+  ! Save for warm start
+  call symmetron_save_old(ilevel)
+
+  ! Fifth force: field-dependent F5 = -6*Ωm*β²*(a_ssb/a)*χ*∇χ
+  call compute_fifth_force_symmetron(ilevel)
+
+end subroutine symmetron_solve_level
+
+!=========================================================
+! symmetron_init_scalar: initialize scalar_gr = 0
+!=========================================================
+subroutine symmetron_init_scalar(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr(icell) = 0d0
+           scalar_gr_old(icell) = 0d0
+        end do
+     end do
+  end do
+
+end subroutine symmetron_init_scalar
+
+!=========================================================
+! symmetron_save_old: save scalar_gr → scalar_gr_old
+!=========================================================
+subroutine symmetron_save_old(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr_old(icell) = scalar_gr(icell)
+        end do
+     end do
+  end do
+
+end subroutine symmetron_save_old
+
+!=========================================================
+! symmetron_gauss_seidel: one Newton-GS sweep
+!
+! ∇²χ = (a²/2L²)[(ρ/ρ_ssb) - (a_ssb/a)³]·χ + (a²/2L²)·χ³
+!
+! In code units (H0=1):
+!   L_code = L_symmetron / boxlen_ini (Mpc/h → code)
+!   ρ_ssb = 3*Ωm/(a_ssb³) (mean density at a_ssb)
+!   rho(cell) is overdensity δ = (ρ-ρ̄)/ρ̄
+!   ρ/ρ_ssb = (1+δ)*ρ̄/ρ_ssb = (1+δ)*(a_ssb/a)³
+!
+! So source coefficient:
+!   mass_coeff = (a²/2L²)*[(1+δ)*(a_ssb/a)³ - (a_ssb/a)³]
+!              = (a²/2L²)*(a_ssb/a)³ * δ
+!   cubic_coeff = a²/2L²
+!=========================================================
+subroutine symmetron_gauss_seidel(ilevel, res_max, src_max)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(out)::res_max, src_max
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc,dx2,dx2_inv
+  integer::nx_loc
+  real(dp)::u_c,lapl,residual,jacobian,delta_u
+  real(dp)::L_code,L2_inv,a2_over_2L2
+  real(dp)::rho_ratio,mass_term,cubic_coeff
+  integer::icolor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) then
+     res_max=0d0; src_max=0d0
+     return
+  end if
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx2=dx_loc**2
+  dx2_inv=1d0/dx2
+
+  ! Convert L_symmetron from Mpc/h to code units
+  L_code = L_symmetron / boxlen_ini
+  L2_inv = 1d0 / L_code**2
+  a2_over_2L2 = aexp**2 * L2_inv / 2d0
+  cubic_coeff = a2_over_2L2
+
+  ! Neighbor lookup
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+  res_max = 0d0
+  src_max = 0d0
+
+  do icolor=0,1
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right, &
+!$omp&  u_c,lapl,residual,jacobian,delta_u, &
+!$omp&  rho_ratio,mass_term) &
+!$omp& reduction(max:res_max,src_max) schedule(dynamic)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        do i=1,ngrid
+           igridn_w(i,0)=ind_grid_w(i)
+        end do
+        do idim=1,ndim
+           do i=1,ngrid
+              igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+              igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+           end do
+        end do
+
+        do ind=1,twotondim
+           if(mod(ind-1, 2) /= icolor) cycle
+
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell_w(i)=iskip+ind_grid_w(i)
+           end do
+
+           do i=1,ngrid
+              if(igridn_w(i,1)==0 .or. igridn_w(i,2)==0 .or. &
+                 igridn_w(i,3)==0 .or. igridn_w(i,4)==0 .or. &
+                 igridn_w(i,5)==0 .or. igridn_w(i,6)==0) cycle
+
+              u_c = scalar_gr(ind_cell_w(i))
+
+              ! Compute Laplacian
+              ig_left =ggg(1,1,ind); ig_right=ggg(1,2,ind)
+              ih_left =ncoarse+(hhh(1,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(1,2,ind)-1)*ngridmax
+              lapl = scalar_gr(igridn_w(i,ig_left )+ih_left) &
+                   + scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              ig_left =ggg(2,1,ind); ig_right=ggg(2,2,ind)
+              ih_left =ncoarse+(hhh(2,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(2,2,ind)-1)*ngridmax
+              lapl = lapl + scalar_gr(igridn_w(i,ig_left )+ih_left) &
+                          + scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              ig_left =ggg(3,1,ind); ig_right=ggg(3,2,ind)
+              ih_left =ncoarse+(hhh(3,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(3,2,ind)-1)*ngridmax
+              lapl = lapl + scalar_gr(igridn_w(i,ig_left )+ih_left) &
+                          + scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              lapl = (lapl - 6d0*u_c) * dx2_inv
+
+              ! ρ/ρ_ssb = (1+δ)*(a_ssb/a)³
+              rho_ratio = (1d0 + rho(ind_cell_w(i))) * (a_ssb/aexp)**3
+
+              ! mass_term = a2_over_2L2 * (rho_ratio - 1) (relative to VEV)
+              mass_term = a2_over_2L2 * (rho_ratio - 1d0)
+
+              ! F = lapl - mass_term*χ - cubic_coeff*χ³
+              residual = lapl - mass_term * u_c - cubic_coeff * u_c**3
+
+              ! dF/du = -6/dx² - mass_term - 3*cubic_coeff*χ²
+              jacobian = -6d0*dx2_inv - mass_term - 3d0*cubic_coeff*u_c**2
+
+              if(abs(jacobian) > 1d-30) then
+                 delta_u = -residual / jacobian
+                 scalar_gr(ind_cell_w(i)) = u_c + delta_u
+              end if
+
+              src_max = max(src_max, abs(mass_term*u_c) + abs(cubic_coeff*u_c**3))
+              res_max = max(res_max, abs(residual))
+
+           end do  ! i
+        end do  ! ind
+     end do  ! igrid
+
+  end do  ! icolor
+
+end subroutine symmetron_gauss_seidel
+
+!=========================================================
+! compute_fifth_force_symmetron: field-dependent fifth force
+! F₅_d = -6·Ωm·β²·(a_ssb/a)·χ·∂χ/∂x_d
+! (field-dependent coupling → cannot use generic compute_fifth_force)
+!=========================================================
+subroutine compute_fifth_force_symmetron(ilevel)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc
+  integer::nx_loc
+  real(dp)::grad_u,chi_c,factor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+
+  ! Factor: -6*Ωm*β²*(a_ssb/a)
+  factor = -6d0 * omega_m * beta_symmetron**2 * (a_ssb / aexp)
+
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right,grad_u,chi_c) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     do i=1,ngrid
+        igridn_w(i,0)=ind_grid_w(i)
+     end do
+     do idim=1,ndim
+        do i=1,ngrid
+           igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+           igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+        end do
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell_w(i)=iskip+ind_grid_w(i)
+        end do
+
+        do i=1,ngrid
+           chi_c = scalar_gr(ind_cell_w(i))
+           do idim=1,ndim
+              ig_left =ggg(idim,1,ind)
+              ig_right=ggg(idim,2,ind)
+
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+
+              ih_left =ncoarse+(hhh(idim,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(idim,2,ind)-1)*ngridmax
+
+              ind_nb_left =igridn_w(i,ig_left )+ih_left
+              ind_nb_right=igridn_w(i,ig_right)+ih_right
+
+              grad_u = (scalar_gr(ind_nb_right) - scalar_gr(ind_nb_left)) / (2d0*dx_loc)
+              f(ind_cell_w(i),idim) = f(ind_cell_w(i),idim) + factor * chi_c * grad_u
+           end do
+        end do
+     end do
+  end do
+
+end subroutine compute_fifth_force_symmetron
+
+!#########################################################
+!#########################################################
+!  DILATON SCALAR FIELD SOLVER
+!#########################################################
+!#########################################################
+
+!=========================================================
+! dilaton_solve_level: top-level Dilaton solver
+!=========================================================
+subroutine dilaton_solve_level(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel, icount
+
+  integer::iter,ncache,info
+  real(dp)::res_max_local,res_max_global
+  real(dp)::src_max_local,src_max_global
+  real(dp)::rel_res
+  logical::converged
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  if(nstep==0) then
+     call dilaton_init_scalar(ilevel)
+  end if
+
+  converged = .false.
+  do iter=1,n_iter_dilaton
+
+     call dilaton_gauss_seidel(ilevel, res_max_local, src_max_local)
+
+     call make_virtual_fine_dp(scalar_gr(1), ilevel)
+
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(res_max_local, res_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(src_max_local, src_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     res_max_global = res_max_local
+     src_max_global = src_max_local
+#endif
+
+     if(src_max_global > 0d0) then
+        rel_res = res_max_global / src_max_global
+     else
+        rel_res = 0d0
+     end if
+
+     if(rel_res < dilaton_eps) then
+        converged = .true.
+        if(myid==1) write(*,'(A,I2,A,I3,A,ES10.3)') &
+             ' Dilaton level ',ilevel,' converged in ',iter,' iters, res=',rel_res
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid==1) then
+     write(*,'(A,I2,A,I3,A,ES10.3)') &
+          ' WARNING: Dilaton level ',ilevel,' NOT converged after ', &
+          n_iter_dilaton,' iters, res=',rel_res
+  end if
+
+  call dilaton_save_old(ilevel)
+
+  ! Fifth force: field-dependent F5 = -2β²·φ_D·∇φ_D
+  call compute_fifth_force_dilaton(ilevel)
+
+end subroutine dilaton_solve_level
+
+!=========================================================
+! dilaton_init_scalar / dilaton_save_old
+!=========================================================
+subroutine dilaton_init_scalar(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr(icell) = 0d0
+           scalar_gr_old(icell) = 0d0
+        end do
+     end do
+  end do
+end subroutine dilaton_init_scalar
+
+subroutine dilaton_save_old(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr_old(icell) = scalar_gr(icell)
+        end do
+     end do
+  end do
+end subroutine dilaton_save_old
+
+!=========================================================
+! dilaton_gauss_seidel: one Newton-GS sweep
+!
+! Dilaton equation (Damour-Polyakov):
+! ∇²φ_D = (a²/2L_D²)[(ρ/ρ₀) - (a₀/a)³]·φ_D + (a²/2L_D²)·ξ₂·φ_D³
+!
+! Structurally identical to Symmetron with:
+!   a_ssb → a0_dilaton, L_symmetron → L_dilaton
+!   ξ₂ = 1 (default cubic self-interaction)
+!=========================================================
+subroutine dilaton_gauss_seidel(ilevel, res_max, src_max)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(out)::res_max, src_max
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  real(dp)::dx,scale,dx_loc,dx2,dx2_inv
+  integer::nx_loc
+  real(dp)::u_c,lapl,residual,jacobian,delta_u
+  real(dp)::L_code,a2_over_2L2
+  real(dp)::rho_ratio,mass_term,cubic_coeff
+  integer::icolor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) then
+     res_max=0d0; src_max=0d0
+     return
+  end if
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx2=dx_loc**2
+  dx2_inv=1d0/dx2
+
+  L_code = L_dilaton / boxlen_ini
+  a2_over_2L2 = aexp**2 / (2d0 * L_code**2)
+  cubic_coeff = a2_over_2L2  ! ξ₂ = 1
+
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+  res_max = 0d0
+  src_max = 0d0
+
+  do icolor=0,1
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  u_c,lapl,residual,jacobian,delta_u, &
+!$omp&  rho_ratio,mass_term) &
+!$omp& reduction(max:res_max,src_max) schedule(dynamic)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        do i=1,ngrid
+           igridn_w(i,0)=ind_grid_w(i)
+        end do
+        do idim=1,ndim
+           do i=1,ngrid
+              igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+              igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+           end do
+        end do
+
+        do ind=1,twotondim
+           if(mod(ind-1, 2) /= icolor) cycle
+
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell_w(i)=iskip+ind_grid_w(i)
+           end do
+
+           do i=1,ngrid
+              if(igridn_w(i,1)==0 .or. igridn_w(i,2)==0 .or. &
+                 igridn_w(i,3)==0 .or. igridn_w(i,4)==0 .or. &
+                 igridn_w(i,5)==0 .or. igridn_w(i,6)==0) cycle
+
+              u_c = scalar_gr(ind_cell_w(i))
+
+              ig_left =ggg(1,1,ind); ig_right=ggg(1,2,ind)
+              lapl = scalar_gr(igridn_w(i,ig_left) + ncoarse+(hhh(1,1,ind)-1)*ngridmax) &
+                   + scalar_gr(igridn_w(i,ig_right)+ ncoarse+(hhh(1,2,ind)-1)*ngridmax)
+
+              ig_left =ggg(2,1,ind); ig_right=ggg(2,2,ind)
+              lapl = lapl + scalar_gr(igridn_w(i,ig_left) + ncoarse+(hhh(2,1,ind)-1)*ngridmax) &
+                          + scalar_gr(igridn_w(i,ig_right)+ ncoarse+(hhh(2,2,ind)-1)*ngridmax)
+
+              ig_left =ggg(3,1,ind); ig_right=ggg(3,2,ind)
+              lapl = lapl + scalar_gr(igridn_w(i,ig_left) + ncoarse+(hhh(3,1,ind)-1)*ngridmax) &
+                          + scalar_gr(igridn_w(i,ig_right)+ ncoarse+(hhh(3,2,ind)-1)*ngridmax)
+
+              lapl = (lapl - 6d0*u_c) * dx2_inv
+
+              ! ρ/ρ₀ = (1+δ)*(a₀/a)³
+              rho_ratio = (1d0 + rho(ind_cell_w(i))) * (a0_dilaton/aexp)**3
+              mass_term = a2_over_2L2 * (rho_ratio - 1d0)
+
+              residual = lapl - mass_term * u_c - cubic_coeff * u_c**3
+              jacobian = -6d0*dx2_inv - mass_term - 3d0*cubic_coeff*u_c**2
+
+              if(abs(jacobian) > 1d-30) then
+                 delta_u = -residual / jacobian
+                 scalar_gr(ind_cell_w(i)) = u_c + delta_u
+              end if
+
+              src_max = max(src_max, abs(mass_term*u_c) + abs(cubic_coeff*u_c**3))
+              res_max = max(res_max, abs(residual))
+
+           end do
+        end do
+     end do
+
+  end do
+
+end subroutine dilaton_gauss_seidel
+
+!=========================================================
+! compute_fifth_force_dilaton: F₅ = -2β²·φ_D·∇φ_D
+!=========================================================
+subroutine compute_fifth_force_dilaton(ilevel)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc
+  integer::nx_loc
+  real(dp)::grad_u,phi_c,factor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+
+  ! Factor: -2β²
+  factor = -2d0 * beta_dilaton**2
+
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right,grad_u,phi_c) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     do i=1,ngrid
+        igridn_w(i,0)=ind_grid_w(i)
+     end do
+     do idim=1,ndim
+        do i=1,ngrid
+           igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+           igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+        end do
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell_w(i)=iskip+ind_grid_w(i)
+        end do
+
+        do i=1,ngrid
+           phi_c = scalar_gr(ind_cell_w(i))
+           do idim=1,ndim
+              ig_left =ggg(idim,1,ind)
+              ig_right=ggg(idim,2,ind)
+
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+
+              ih_left =ncoarse+(hhh(idim,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(idim,2,ind)-1)*ngridmax
+
+              ind_nb_left =igridn_w(i,ig_left )+ih_left
+              ind_nb_right=igridn_w(i,ig_right)+ih_right
+
+              grad_u = (scalar_gr(ind_nb_right) - scalar_gr(ind_nb_left)) / (2d0*dx_loc)
+              f(ind_cell_w(i),idim) = f(ind_cell_w(i),idim) + factor * phi_c * grad_u
+           end do
+        end do
+     end do
+  end do
+
+end subroutine compute_fifth_force_dilaton
+
+!#########################################################
+!#########################################################
+!  GALILEON (CUBIC) SCALAR FIELD SOLVER
+!#########################################################
+!#########################################################
+
+!=========================================================
+! galileon_beta: β_G(a) = c₂/(6·c₃·H)
+! H(a) = H0*sqrt(Ωm/a³ + ΩΛ) in code units (H0=1)
+!=========================================================
+function galileon_beta(aa)
+  use amr_parameters, only: dp, c2_galileon, c3_galileon, omega_m, omega_l
+  implicit none
+  real(dp)::galileon_beta
+  real(dp),intent(in)::aa
+  real(dp)::Ha
+
+  Ha = sqrt(omega_m / aa**3 + omega_l)
+  galileon_beta = c2_galileon / (6d0 * c3_galileon * Ha)
+
+end function galileon_beta
+
+!=========================================================
+! galileon_solve_level: top-level cubic Galileon solver
+! Reuses nDGP Vainshtein structure with different coeff/β
+!=========================================================
+subroutine galileon_solve_level(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel, icount
+
+  integer::iter,ncache,info
+  real(dp)::beta_G,coeff_G
+  real(dp)::galileon_beta  ! external function
+  real(dp)::Ha
+  real(dp)::res_max_local,res_max_global
+  real(dp)::src_max_local,src_max_global
+  real(dp)::rel_res
+  logical::converged
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Compute β_G(a) and Vainshtein coeff
+  beta_G = galileon_beta(aexp)
+
+  ! coeff_G = c₃/(c₂·H₀²·a²) → in code units (H0=1):
+  !   coeff_G = c3/(c2*a²)
+  ! But using nDGP parameterization: coeff = 1/(12*omega_rc_eff*beta*a²)
+  ! Here we compute directly: coeff_G = c3_galileon / (c2_galileon * aexp**2)
+  ! But the sign/convention must match nDGP_gauss_seidel's Vainshtein term:
+  ! nDGP: coeff = 1/(12*omega_rc*beta*a²)
+  ! Galileon: coeff_G = c3_galileon / (c2_galileon * aexp**2)
+  coeff_G = c3_galileon / (c2_galileon * aexp**2)
+
+  if(myid==1 .and. nstep==0 .and. ilevel==levelmin) then
+     write(*,'(A,F8.4,A,ES10.3,A,F8.4)') &
+          ' Galileon: beta=', beta_G, ' coeff=', coeff_G, ' at a=', aexp
+  end if
+
+  if(nstep==0) then
+     call galileon_init_scalar(ilevel)
+  end if
+
+  converged = .false.
+  do iter=1,n_iter_galileon
+
+     call galileon_gauss_seidel(ilevel, beta_G, coeff_G, res_max_local, src_max_local)
+
+     call make_virtual_fine_dp(scalar_gr(1), ilevel)
+
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(res_max_local, res_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(src_max_local, src_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     res_max_global = res_max_local
+     src_max_global = src_max_local
+#endif
+
+     if(src_max_global > 0d0) then
+        rel_res = res_max_global / src_max_global
+     else
+        rel_res = 0d0
+     end if
+
+     if(rel_res < galileon_eps) then
+        converged = .true.
+        if(myid==1) write(*,'(A,I2,A,I3,A,ES10.3)') &
+             ' Galileon level ',ilevel,' converged in ',iter,' iters, res=',rel_res
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid==1) then
+     write(*,'(A,I2,A,I3,A,ES10.3)') &
+          ' WARNING: Galileon level ',ilevel,' NOT converged after ', &
+          n_iter_galileon,' iters, res=',rel_res
+  end if
+
+  call galileon_save_old(ilevel)
+
+  ! Fifth force: F5 = -(1/(2β_G)) * grad(φ_G)
+  call compute_fifth_force(ilevel, -0.5d0/beta_G)
+
+end subroutine galileon_solve_level
+
+!=========================================================
+! galileon_init_scalar / galileon_save_old
+!=========================================================
+subroutine galileon_init_scalar(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr(icell) = 0d0
+           scalar_gr_old(icell) = 0d0
+        end do
+     end do
+  end do
+end subroutine galileon_init_scalar
+
+subroutine galileon_save_old(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr_old(icell) = scalar_gr(icell)
+        end do
+     end do
+  end do
+end subroutine galileon_save_old
+
+!=========================================================
+! galileon_gauss_seidel: one Newton-GS sweep
+! Same Vainshtein operator as nDGP, different coeff/source
+!
+! ∇²φ + coeff_G*[(∇²φ)² - (∇ᵢ∇ⱼφ)²] = source
+! source = Ωm*a/β_G * δ
+!=========================================================
+subroutine galileon_gauss_seidel(ilevel, beta_G, coeff_G, res_max, src_max)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(in)::beta_G, coeff_G
+  real(dp),intent(out)::res_max, src_max
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  real(dp)::dx,scale,dx_loc,dx2,dx2_inv
+  integer::nx_loc
+  real(dp)::u_c,lapl,source,residual,jacobian,delta_u
+  real(dp)::phi_xm,phi_xp,phi_ym,phi_yp,phi_zm,phi_zp
+  real(dp)::phi_xx,phi_yy,phi_zz
+  real(dp)::lapl2,trace_ij2,vain_term
+  integer::icolor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) then
+     res_max=0d0; src_max=0d0
+     return
+  end if
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx2=dx_loc**2
+  dx2_inv=1d0/dx2
+
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+  res_max = 0d0
+  src_max = 0d0
+
+  do icolor=0,1
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  u_c,lapl,source,residual,jacobian,delta_u, &
+!$omp&  phi_xm,phi_xp,phi_ym,phi_yp,phi_zm,phi_zp, &
+!$omp&  phi_xx,phi_yy,phi_zz, &
+!$omp&  lapl2,trace_ij2,vain_term) &
+!$omp& reduction(max:res_max,src_max) schedule(dynamic)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        do i=1,ngrid
+           igridn_w(i,0)=ind_grid_w(i)
+        end do
+        do idim=1,ndim
+           do i=1,ngrid
+              igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+              igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+           end do
+        end do
+
+        do ind=1,twotondim
+           if(mod(ind-1, 2) /= icolor) cycle
+
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell_w(i)=iskip+ind_grid_w(i)
+           end do
+
+           do i=1,ngrid
+              if(igridn_w(i,1)==0 .or. igridn_w(i,2)==0 .or. &
+                 igridn_w(i,3)==0 .or. igridn_w(i,4)==0 .or. &
+                 igridn_w(i,5)==0 .or. igridn_w(i,6)==0) cycle
+
+              u_c = scalar_gr(ind_cell_w(i))
+
+              ! Face neighbor values
+              ig_left =ggg(1,1,ind); ig_right=ggg(1,2,ind)
+              phi_xm = scalar_gr(igridn_w(i,ig_left) +ncoarse+(hhh(1,1,ind)-1)*ngridmax)
+              phi_xp = scalar_gr(igridn_w(i,ig_right)+ncoarse+(hhh(1,2,ind)-1)*ngridmax)
+
+              ig_left =ggg(2,1,ind); ig_right=ggg(2,2,ind)
+              phi_ym = scalar_gr(igridn_w(i,ig_left) +ncoarse+(hhh(2,1,ind)-1)*ngridmax)
+              phi_yp = scalar_gr(igridn_w(i,ig_right)+ncoarse+(hhh(2,2,ind)-1)*ngridmax)
+
+              ig_left =ggg(3,1,ind); ig_right=ggg(3,2,ind)
+              phi_zm = scalar_gr(igridn_w(i,ig_left) +ncoarse+(hhh(3,1,ind)-1)*ngridmax)
+              phi_zp = scalar_gr(igridn_w(i,ig_right)+ncoarse+(hhh(3,2,ind)-1)*ngridmax)
+
+              ! Laplacian
+              lapl = (phi_xp + phi_xm + phi_yp + phi_ym + phi_zp + phi_zm - 6d0*u_c) * dx2_inv
+
+              ! Diagonal second derivatives
+              phi_xx = (phi_xp + phi_xm - 2d0*u_c) * dx2_inv
+              phi_yy = (phi_yp + phi_ym - 2d0*u_c) * dx2_inv
+              phi_zz = (phi_zp + phi_zm - 2d0*u_c) * dx2_inv
+
+              ! Vainshtein: (∇²φ)² - (φ_xx² + φ_yy² + φ_zz²)
+              lapl2 = lapl**2
+              trace_ij2 = phi_xx**2 + phi_yy**2 + phi_zz**2
+              vain_term = lapl2 - trace_ij2
+
+              ! Source = Ωm*a/β_G * δ
+              source = omega_m * aexp / beta_G * rho(ind_cell_w(i))
+
+              residual = lapl + coeff_G * vain_term - source
+
+              ! Jacobian (same form as nDGP)
+              jacobian = -6d0*dx2_inv + coeff_G * 2d0 * lapl * (-4d0*dx2_inv)
+
+              if(abs(jacobian) > 1d-30) then
+                 delta_u = -residual / jacobian
+                 if(abs(delta_u) > 0.5d0*dx2*abs(source) .and. abs(source) > 1d-30) then
+                    delta_u = sign(0.5d0*dx2*abs(source), delta_u)
+                 end if
+                 scalar_gr(ind_cell_w(i)) = u_c + delta_u
+              end if
+
+              res_max = max(res_max, abs(residual))
+              src_max = max(src_max, abs(source))
+
+           end do
+        end do
+     end do
+
+  end do
+
+end subroutine galileon_gauss_seidel
+
+!#########################################################
+!#########################################################
+!  COUPLED DARK ENERGY — FORCE MODIFIER
+!#########################################################
+!#########################################################
+
+!=========================================================
+! apply_coupled_de_force: multiply f() by (1 + 2β²)
+! G_eff = G*(1+2β²) for DM component (approximation: apply to all)
+!=========================================================
+subroutine apply_coupled_de_force(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  real(dp)::enhancement
+  integer,dimension(1:nvector)::ind_cell
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  enhancement = 1d0 + 2d0 * beta_cde**2
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim,ind_cell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell(i)=iskip+active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        do i=1,ngrid
+           do idim=1,ndim
+              f(ind_cell(i),idim) = f(ind_cell(i),idim) * enhancement
+           end do
+        end do
+     end do
+  end do
+
+end subroutine apply_coupled_de_force

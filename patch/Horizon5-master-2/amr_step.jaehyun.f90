@@ -550,6 +550,33 @@ recursive subroutine amr_step(ilevel,icount)
         call timer('poisson','start')
      end if
 
+     !-------------------------------------------------
+     ! Symmetron gravity
+     !-------------------------------------------------
+     if(use_symmetron) then
+        call timer('symmetron','start')
+        call symmetron_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! Dilaton gravity
+     !-------------------------------------------------
+     if(use_dilaton) then
+        call timer('dilaton','start')
+        call dilaton_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! Galileon (cubic) gravity
+     !-------------------------------------------------
+     if(use_galileon) then
+        call timer('galileon','start')
+        call galileon_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
      ! Synchronize remaining particles for gravity
      if(pic)then
                                call timer('particles','start')
