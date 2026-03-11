@@ -38,10 +38,23 @@
 \newcommand{\vcm}{\mathbf{v}_{\rm cm}}
 \newcommand{\sigmam}{\sigma/m}
 \newcommand{\kms}{\,\mathrm{km\,s^{-1}}}
+\newcommand{\azero}{a_0}
+\newcommand{\gN}{\mathbf{g}_{\rm N}}
+\newcommand{\gM}{\mathbf{g}_{\rm M}}
+\newcommand{\rhoph}{\rho_{\rm ph}}
+\newcommand{\fR}{f(R)}
+\newcommand{\fRz}{f_{R0}}
+\newcommand{\Geff}{G_{\rm eff}}
+\newcommand{\betaG}{\beta_{\rm G}}
+\newcommand{\betacde}{\beta_{\rm cde}}
+\newcommand{\Oede}{\Omega_{\rm ede}}
+\newcommand{\Mpl}{M_{\rm Pl}}
 
 \title[cuRAMSES~III: Non-Standard Cosmological Models]
-{cuRAMSES~III: CPL Dark Energy Perturbations, Massive Neutrino
-Linear Response, and Self-Interacting Dark Matter
+{cuRAMSES~III: Non-Standard Cosmological Models ---
+CPL Dark Energy, Massive Neutrinos, SIDM, MOND,
+$f(R)$, nDGP, Symmetron, Dilaton, Galileon, Coupled Dark Energy,
+and Early Dark Energy
 in Adaptive Mesh Refinement Simulations}
 
 \author[J.~Kim]{
@@ -67,36 +80,42 @@ $^{1}$Center for Advanced Computation, Korea Institute for Advanced Study,
 % ===================================================================
 \begin{abstract}
 We present extensions to the \curamses\ adaptive mesh refinement (AMR)
-code that enable cosmological hydrodynamic simulations with three
-classes of non-standard physics beyond $\Lambda$CDM: (i)~CPL dark
-energy with dynamical equation of state $w(a)=w_0+w_a(1-a)$ and
-density perturbations, implemented via a table-based linear response
-method that captures the scale-dependent gravitational clustering of
-dark energy for arbitrary sound speed $\cst$; (ii)~massive neutrino
-linear response, in which the neutrino density perturbation is
-obtained as a scale-dependent multiple of the CDM+baryon perturbation
-using precomputed \camb\ transfer function ratios $\Rnu(k,a)$, without
-the need for neutrino particles; and (iii)~self-interacting dark
-matter (SIDM) Monte Carlo scattering, supporting constant,
-velocity-dependent (Yukawa and power-law), and anisotropic
-(Rutherford-like) differential cross-sections, as well as inelastic
-(excited-state) scattering channels.  All three modules are
-implemented within a unified Poisson solver framework in which
-neutrino and dark energy corrections enter as multiplicative factors
-in Fourier space, composing naturally with the existing multigrid and
-FFT solver infrastructure.  The SIDM module uses cell-based random
-pairing with Fisher--Yates shuffling, exact centre-of-mass-frame
-velocity updates ensuring machine-precision momentum and energy
-conservation, and deterministic OpenMP threading.  Each module is
-controlled by dedicated namelist blocks and is verified to recover
-$\Lambda$CDM results when disabled.  We describe the algorithms, unit
-conversions, and numerical validation, providing a self-contained
-reference for non-standard cosmological simulations with AMR codes.
+code that enable cosmological hydrodynamic simulations with eleven
+classes of non-standard physics beyond $\Lambda$CDM.  The first group
+operates within the Poisson solver framework: (i)~CPL dark energy with
+dynamical equation of state $w(a)=w_0+w_a(1-a)$ and density
+perturbations via a table-based linear response method for arbitrary
+sound speed $\cst$; (ii)~massive neutrino linear response using
+precomputed \camb\ transfer function ratios $\Rnu(k,a)$.  The second
+group addresses dark matter phenomenology: (iii)~self-interacting dark
+matter (SIDM) Monte Carlo scattering with constant,
+velocity-dependent, anisotropic, and inelastic cross-sections;
+(iv)~Modified Newtonian Dynamics in QUMOND and AQUAL formulations with
+external field effect (EFE) support.  The third group implements
+scalar field modified gravity theories via Newton--Gauss--Seidel
+relaxation on AMR levels: (v)~$\fR$~Hu--Sawicki gravity with
+chameleon screening; (vi)~nDGP braneworld gravity with Vainshtein
+screening; (vii)~Symmetron gravity with spontaneous symmetry breaking;
+(viii)~environmentally dependent Dilaton gravity; (ix)~cubic Galileon
+gravity reusing the Vainshtein operator.  Finally, two additional
+modules modify forces and background cosmology: (x)~Coupled Dark
+Energy with an enhanced effective gravitational constant
+$\Geff = G(1+2\betacde^2)$ for dark matter; and (xi)~Early Dark
+Energy in the Doran--Robbers parameterisation, which modifies the
+Friedmann equation at high redshift.  All scalar field models (f(R),
+nDGP, MOND, Symmetron, Dilaton, Galileon) are mutually exclusive,
+while coupled DE and early DE can combine freely with any model.  Each
+module is controlled by dedicated namelist blocks and is verified to
+recover $\Lambda$CDM results when disabled.  We describe the
+algorithms, screening mechanisms, unit conversions, and numerical
+validation, providing a self-contained reference for non-standard
+cosmological simulations with AMR codes.
 \end{abstract}
 
 \begin{keywords}
 methods: numerical -- cosmology: simulations -- dark energy --
-neutrinos -- dark matter
+neutrinos -- dark matter -- gravitation -- modified gravity --
+$f(R)$ gravity -- braneworld models
 \end{keywords}
 
 % ===================================================================
@@ -120,7 +139,58 @@ small-scale tensions --- the core--cusp, missing satellites, and
 too-big-to-fail problems --- have motivated self-interacting dark
 matter (SIDM) models in which DM particles scatter elastically or
 inelastically with non-negligible cross-sections
-\citep{Spergel2000,Tulin2018}.
+\citep{Spergel2000,Tulin2018}.  An alternative explanation of these
+small-scale phenomena, as well as of galaxy rotation curves without
+dark matter, is provided by Modified Newtonian Dynamics (MOND;
+\citealt{Milgrom1983}), in which the gravitational acceleration is
+enhanced below a critical threshold $\azero \approx 1.2 \times
+10^{-8}\,\mathrm{cm\,s^{-2}}$.  The quasi-linear formulation of MOND
+(QUMOND; \citealt{Milgrom2010}) recasts this modification as a
+modified Poisson equation that can be solved with standard numerical
+methods.
+
+Beyond these phenomenological approaches, a rich landscape of
+gravitational theories has emerged that modify general relativity (GR)
+on cosmological scales.  $\fR$ gravity
+\citep{HuSawicki2007,Sotiriou2010} introduces a scalar degree of
+freedom through a nonlinear function of the Ricci scalar, with the
+Hu--Sawicki model providing a chameleon screening mechanism that
+recovers GR in high-density environments.  The Dvali--Gabadadze--Porrati
+(DGP) braneworld model \citep{DGP2000} explains cosmic acceleration
+through gravitational leakage into an extra dimension; the normal
+branch (nDGP) exhibits Vainshtein screening
+\citep{Vainshtein1972,Nicolis2009}, whereby nonlinear derivative
+interactions suppress the scalar force near massive sources.  The
+Symmetron mechanism \citep{Hinterbichler2010,Hinterbichler2011}
+employs a scalar field with a spontaneous symmetry-breaking potential
+whose vacuum expectation value (VEV) vanishes in high-density regions,
+effectively decoupling the fifth force.  The environmentally dependent
+Dilaton model \citep{Brax2010,Brax2011} achieves a similar screening
+via the Damour--Polyakov mechanism in which the coupling function has
+a minimum at the cosmological field value.  Cubic Galileon gravity
+\citep{Nicolis2009,Deffayet2009a,Deffayet2009b} features
+shift-symmetric scalar field interactions with second-order equations
+of motion, screened by the Vainshtein mechanism.
+
+Several $N$-body codes have implemented subsets of these models,
+notably \textsc{ecosmog} \citep{Li2012,Li2013}, \textsc{isis}
+\citep{Llinares2014}, \textsc{mg-gadget} \citep{Puchwein2013}, and
+the \ramses-based solver of \citet{Llinares2014}.  The
+Newton--Gauss--Seidel (N-GS) relaxation method with red--black
+ordering has proven robust for the nonlinear scalar field equations
+arising in all these theories \citep{Li2012,Llinares2014}.
+
+Beyond modifications to gravity, the dark energy sector itself may
+couple directly to dark matter.  Coupled dark energy (CDE) models
+\citep{Amendola2000,Amendola2004,Pettorino2008} introduce an
+interaction term in the dark sector Lagrangian, yielding an effective
+gravitational constant $\Geff = G(1+2\betacde^2)$ for DM particles.
+Independently, the coincidence problem and Hubble tension have
+motivated Early Dark Energy (EDE) models
+\citep{DoranRobbers2006,Poulin2019,Hill2020,Smith2020} in which a
+non-negligible dark energy component exists at early times
+($z \sim 3000$) before decaying rapidly, modifying the expansion
+history and sound horizon.
 
 Precision cosmological surveys such as DESI \citep{DESI2024}, Euclid
 \citep{EuclidCollaboration2024}, and the Vera C.\ Rubin Observatory
@@ -130,7 +200,7 @@ Full hydrodynamic simulations that simultaneously capture baryonic
 physics and non-standard dark-sector models are essential for this
 programme.
 
-In this paper we describe the implementation of three non-standard
+In this paper we describe the implementation of eleven non-standard
 cosmological modules in \curamses\ \citep{Kim2026}, a suite of
 algorithmic and GPU-acceleration optimizations for the \ramses\ AMR
 code \citep{Teyssier2002}:
@@ -138,35 +208,71 @@ code \citep{Teyssier2002}:
 \begin{enumerate}
 \item \textbf{CPL dark energy perturbations}
   (Section~\ref{sec:de}): a table-based linear response method for
-  the Chevallier--Poloncki--Linder (CPL) parameterisation, valid for
-  arbitrary sound speed $\cst$ including the clustering limit
-  $\cst=0$.
+  the Chevallier--Poloncki--Linder (CPL) parameterisation.
 
 \item \textbf{Massive neutrino linear response}
-  (Section~\ref{sec:neutrino}): scale-dependent corrections to the
-  Poisson equation using precomputed transfer function ratios from
-  \camb\ \citep{Lewis2000}, avoiding the shot noise and
-  computational cost of neutrino particles.
+  (Section~\ref{sec:neutrino}): scale-dependent Poisson equation
+  corrections using precomputed \camb\ \citep{Lewis2000} transfer
+  function ratios.
 
 \item \textbf{Self-interacting dark matter}
   (Section~\ref{sec:sidm}): cell-based Monte Carlo scattering
-  supporting constant, velocity-dependent, anisotropic, and
-  inelastic cross-sections, with exact momentum and energy
-  conservation.
+  with constant, velocity-dependent, anisotropic, and inelastic
+  cross-sections.
+
+\item \textbf{QUMOND and AQUAL} (Section~\ref{sec:mond}):
+  Modified Newtonian Dynamics with three operational modes and
+  external field effect support.
+
+\item \textbf{$\fR$ Hu--Sawicki gravity}
+  (Section~\ref{sec:fR}): chameleon-screened scalar field solved
+  via Newton--Gauss--Seidel relaxation.
+
+\item \textbf{nDGP braneworld gravity}
+  (Section~\ref{sec:nDGP}): Vainshtein-screened scalar field with
+  the nonlinear Laplacian operator.
+
+\item \textbf{Symmetron gravity}
+  (Section~\ref{sec:symmetron}): spontaneous symmetry-breaking
+  screening with environment-dependent VEV.
+
+\item \textbf{Dilaton gravity}
+  (Section~\ref{sec:dilaton}): Damour--Polyakov environmentally
+  dependent coupling.
+
+\item \textbf{Cubic Galileon gravity}
+  (Section~\ref{sec:galileon}): shift-symmetric scalar field with
+  Vainshtein screening, reusing the nDGP operator.
+
+\item \textbf{Coupled dark energy}
+  (Section~\ref{sec:coupled_de}): enhanced gravitational constant
+  $\Geff = G(1+2\betacde^2)$ for dark matter.
+
+\item \textbf{Early dark energy}
+  (Section~\ref{sec:ede}): Doran--Robbers parameterisation
+  modifying the background Friedmann equation.
 \end{enumerate}
 
-All three modules are designed to compose with the existing \curamses\
-infrastructure --- $k$-section domain decomposition, Morton key
-octree, FFTW3 direct Poisson solver, and OpenMP+MPI hybrid
-parallelism --- without requiring modifications to the core AMR data
-structures.
+All scalar field models (items 4--9) share a common infrastructure:
+the \code{scalar\_gr} array for the field value and the N-GS
+red--black relaxation solver with OpenMP parallelism.  Exactly one
+scalar field model may be active at a time, while coupled DE and
+early DE combine freely with any other model.  All modules compose
+with the existing \curamses\ infrastructure --- $k$-section domain
+decomposition, Morton key octree, FFTW3 direct Poisson solver, and
+OpenMP+MPI hybrid parallelism --- without requiring modifications to
+the core AMR data structures.
 
 The structure of this paper is as follows.
 Section~\ref{sec:poisson_framework} reviews the unified Poisson solver
-framework into which the dark energy and neutrino corrections are
-embedded.  Sections~\ref{sec:de}--\ref{sec:sidm} describe each module
-in detail.  Section~\ref{sec:verification} presents verification
-tests, and Section~\ref{sec:conclusions} concludes.
+framework.  Sections~\ref{sec:de}--\ref{sec:mond} describe the dark
+energy, neutrino, SIDM, and MOND modules.
+Sections~\ref{sec:fR}--\ref{sec:galileon} present the five scalar
+field modified gravity solvers.
+Sections~\ref{sec:coupled_de}--\ref{sec:ede} describe the coupled DE
+and early DE modules.
+Section~\ref{sec:verification} presents verification tests, and
+Section~\ref{sec:conclusions} concludes.
 
 
 % ===================================================================
@@ -321,7 +427,7 @@ Instead, we define an effective response function
 \end{equation}
 where $\Psi_{\rm W}$ is the gauge-invariant Weyl potential returned by
 \camb, and the superscripts `clust' and `smooth' refer to two \camb\
-runs with $\cst = \cst_{\rm target}$ and $\cst = 1$ (non-clustering
+runs with $\cst = c_{\rm s,target}^2$ and $\cst = 1$ (non-clustering
 DE), respectively.  This ratio isolates the extra gravitational
 potential sourced by DE clustering, automatically in the correct
 (Newtonian) gauge.
@@ -849,7 +955,760 @@ Parameter & Type & Default & Description \\
 
 
 % ===================================================================
-% 6. VERIFICATION
+% 6. QUMOND AND AQUAL
+% ===================================================================
+\section{MODIFIED NEWTONIAN DYNAMICS (QUMOND AND AQUAL)}
+\label{sec:mond}
+
+\subsection{Physical Motivation}
+\label{sec:mond_motivation}
+
+Modified Newtonian Dynamics \citep{Milgrom1983} postulates that the
+effective gravitational acceleration deviates from the Newtonian
+prediction $\gN$ when $|\gN| \lesssim \azero$, where $\azero \approx
+1.2 \times 10^{-8}\,\mathrm{cm\,s^{-2}}$ is a universal acceleration
+scale.  MOND successfully reproduces observed galaxy rotation curves,
+the baryonic Tully--Fisher relation, and the radial acceleration
+relation without invoking dark matter on galactic scales
+\citep{Famaey2012,Milgrom2014,McGaugh2016}.
+
+A key requirement for $N$-body implementations is that the modified
+gravitational field be derivable from a potential (i.e.\ curl-free), so
+that energy is conserved.  The quasi-linear formulation of MOND
+(QUMOND; \citealt{Milgrom2010}) achieves this by defining the MOND
+potential $\Phi$ through a modified Poisson equation:
+\begin{equation}
+\nabla^2 \Phi = \nabla \cdot \bigl[\nu(|\nabla\Phi_{\rm N}|/\azero)
+\,\nabla\Phi_{\rm N}\bigr],
+\label{eq:qumond}
+\end{equation}
+where $\Phi_{\rm N}$ is the standard Newtonian potential satisfying
+$\nabla^2 \Phi_{\rm N} = 4\pi G\rho$, and $\nu(y)$ is an
+interpolation function satisfying $\nu \to 1$ for $y \gg 1$
+(Newtonian regime) and $\nu \to y^{-1/2}$ for $y \ll 1$ (deep-MOND
+regime).
+
+An alternative, more fundamental formulation is AQUAL (AQUAdratic
+Lagrangian; \citealt{Bekenstein1984}), which derives from an action
+principle.  The AQUAL modified Poisson equation is
+\begin{equation}
+\nabla \cdot \bigl[\mu(|\nabla\Phi|/\azero)\,\nabla\Phi\bigr]
+= 4\pi G\rho,
+\label{eq:aqual}
+\end{equation}
+where $\mu(x)$ is the MOND interpolation function satisfying
+$\mu \to 1$ for $x \gg 1$ and $\mu \to x$ for $x \ll 1$.  Unlike
+QUMOND, the coefficient $\mu$ depends on the MOND potential $\Phi$
+itself, making equation~(\ref{eq:aqual}) nonlinear.  The $\mu$ and
+$\nu$ functions are related: for the simple family, $\mu(x) = x/(1+x)$
+and $\nu(y) = \tfrac{1}{2} + \tfrac{1}{2}\sqrt{1+4/y}$, where
+$y = x\mu(x)$.
+
+\subsection{Interpolation Functions}
+\label{sec:mond_nu}
+
+We implement two standard interpolation functions, selected by
+\code{mond\_mu\_type}:
+\begin{itemize}
+\item \textbf{Simple} (\code{mond\_mu\_type=1}): corresponding to
+  $\mu(x)=x/(1+x)$, the $\nu$-function is
+  \begin{equation}
+  \nu(y) = \frac{1}{2} + \frac{1}{2}\sqrt{1 + 4/y}.
+  \label{eq:nu_simple}
+  \end{equation}
+
+\item \textbf{Standard} (\code{mond\_mu\_type=2}): corresponding to
+  $\mu(x)=x/\sqrt{1+x^2}$, the $\nu$-function is
+  \begin{equation}
+  \nu(y) = \sqrt{\frac{1}{2} + \frac{1}{2}\sqrt{1 + 4/y^2}}.
+  \label{eq:nu_standard}
+  \end{equation}
+\end{itemize}
+Here $y \equiv |\gN|/\azero$ with $\gN = -\nabla\Phi_{\rm N}$.  Both
+functions are evaluated cell-by-cell from the Newtonian force array
+$f_i = -\partial\Phi_{\rm N}/\partial x_i$ that is already computed by
+\code{force\_fine}.
+
+For AQUAL (Phase~2), the corresponding $\mu$-functions are:
+\begin{itemize}
+\item \textbf{Simple}: $\mu(x) = x/(1+x)$, so $\mu - 1 = -1/(1+x)$.
+\item \textbf{Standard}: $\mu(x) = x/\sqrt{1+x^2}$, so
+  $\mu - 1 = x/\sqrt{1+x^2} - 1$.
+\end{itemize}
+Note that $\mu - 1 < 0$ always (since $\mu < 1$), whereas
+$\nu - 1 > 0$ always (since $\nu > 1$).
+
+\subsection{Phase~0: Algebraic Force Correction}
+\label{sec:mond_phase0}
+
+The simplest implementation (\code{mond\_type=0}) applies the QUMOND
+correction algebraically:
+\begin{equation}
+f_i^{\rm MOND} = \nu(|\mathbf{f}|/\azero)\, f_i,
+\label{eq:mond_algebraic}
+\end{equation}
+where $\mathbf{f}$ is the Newtonian force vector.  This is performed
+in the subroutine \code{apply\_mond\_force}, called immediately after
+\code{gradient\_phi} within \code{force\_fine}.
+
+This approach is computationally inexpensive (a single pass over all
+cells with no additional Poisson solve) and sufficient for
+spherically symmetric mass distributions where the curl of $\nu\gN$
+vanishes by symmetry.  However, for general mass distributions the
+resulting field $\nu\gN$ is not curl-free, leading to a
+non-conservative force and energy conservation violations.
+
+\subsection{Phase~1: Full QUMOND with Phantom Density}
+\label{sec:mond_phase1}
+
+To guarantee a curl-free MOND gravitational field, the full QUMOND
+formulation (\code{mond\_type=1}) introduces a \emph{phantom dark
+matter density} $\rhoph$ and re-solves the Poisson equation.  Expanding
+equation~(\ref{eq:qumond}):
+\begin{equation}
+\nabla^2 \Phi = \nabla^2 \Phi_{\rm N} + \nabla\cdot\bigl[(\nu-1)
+\nabla\Phi_{\rm N}\bigr]
+= 4\pi G\rho + 4\pi G\rhoph,
+\label{eq:phantom_split}
+\end{equation}
+so the phantom density is
+\begin{equation}
+\rhoph = \frac{1}{4\pi G}\,\nabla\cdot\bigl[(\nu-1)
+\nabla\Phi_{\rm N}\bigr]
+= -\frac{1}{4\pi G}\,\nabla\cdot\bigl[(\nu-1)\,\mathbf{f}\bigr],
+\label{eq:rho_phantom}
+\end{equation}
+where we used $\nabla\Phi_{\rm N} = -\mathbf{f}$.  In cosmological
+mode, $4\pi G$ is replaced by $\tfrac{3}{2}\Om a$.
+
+\subsubsection{Divergence computation}
+
+The divergence in equation~(\ref{eq:rho_phantom}) is computed using
+second-order centred differences on the AMR grid:
+\begin{equation}
+\nabla\cdot\bigl[(\nu-1)\mathbf{f}\bigr] \approx
+\sum_{d=1}^{3} \frac{h_d^{+} - h_d^{-}}{2\,\Delta x},
+\label{eq:div_fd}
+\end{equation}
+where $h_d^{\pm} = [\nu(|\mathbf{f}|/\azero) - 1]\,f_d$ evaluated at
+the right ($+$) and left ($-$) face-neighbours in dimension $d$.  The
+neighbour cell indices are obtained from the same \code{ggg}/\code{hhh}
+lookup tables used by \code{gradient\_phi} in \code{force\_fine},
+ensuring consistent stencil geometry.  At coarse--fine level boundaries
+where a face-neighbour grid does not exist at the current refinement
+level (\code{igridn}${}=0$), the cell is skipped; this affects only a
+small fraction of cells near AMR boundaries.
+
+\subsubsection{Algorithm}
+
+The full QUMOND algorithm within a single AMR level proceeds as:
+\begin{enumerate}
+\item Solve the standard Poisson equation:
+  $\nabla^2\Phi_{\rm N} = 4\pi G\rho$.
+\item Compute Newtonian forces:
+  $\mathbf{f} = -\nabla\Phi_{\rm N}$ via \code{force\_fine}.
+\item Compute phantom density $\rhoph$ from equation~(\ref{eq:rho_phantom})
+  and add to $\rho$ in-place (\code{compute\_mond\_phantom\_density}).
+\item Exchange boundaries for the modified $\rho$.
+\item Re-solve the Poisson equation:
+  $\nabla^2\Phi = 4\pi G(\rho + \rhoph)$.
+\item Compute MOND forces:
+  $\mathbf{f}_{\rm MOND} = -\nabla\Phi$ via \code{force\_fine}.
+\end{enumerate}
+Steps 3--6 are inserted in \code{amr\_step} between the initial
+\code{force\_fine} call and the particle synchronisation
+(\code{synchro\_fine}).  The algebraic correction
+(\code{apply\_mond\_force}) is automatically disabled when
+\code{mond\_type}$\geq 1$.
+
+\subsubsection{Thread safety}
+
+The phantom density computation is fully thread-safe under OpenMP:
+each cell's $\rho$ is modified by exactly one thread (the cell index
+is determined uniquely by the grid--octant pair in the parallel loop),
+while the neighbour force values $\mathbf{f}$ are accessed read-only.
+All temporary variables (neighbour indices, $\nu-1$ values, divergence
+accumulator) are declared \code{private}.
+
+\subsection{Phase~2: AQUAL Iterative Solver}
+\label{sec:mond_phase2}
+
+The AQUAL formulation (\code{mond\_type=2}) solves the nonlinear
+modified Poisson equation~(\ref{eq:aqual}) self-consistently via
+fixed-point iteration.  Rewriting equation~(\ref{eq:aqual}) as
+\begin{equation}
+\nabla^2 \Phi = 4\pi G\rho + \nabla\cdot\bigl[(\mu - 1)\,\mathbf{f}\bigr],
+\label{eq:aqual_split}
+\end{equation}
+where $\mathbf{f} = -\nabla\Phi$ and $\mu = \mu(|\mathbf{f}|/\azero)$,
+we define an AQUAL phantom density
+\begin{equation}
+\rhoph^{\rm AQUAL} = +\frac{1}{4\pi G}\,\nabla\cdot\bigl[(\mu - 1)
+\,\mathbf{f}\bigr].
+\label{eq:rho_phantom_aqual}
+\end{equation}
+Note the sign difference from the QUMOND phantom density
+(equation~\ref{eq:rho_phantom}): the QUMOND term uses $\nu - 1 > 0$
+with a minus sign, while the AQUAL term uses $\mu - 1 < 0$ with a
+plus sign; both yield positive $\rhoph$ in the deep-MOND regime.
+
+\subsubsection{Algorithm}
+
+The AQUAL iteration proceeds as follows:
+\begin{enumerate}
+\item Solve the standard Poisson equation to obtain the Newtonian force
+  $\mathbf{f}^{(0)} = -\nabla\Phi_{\rm N}$.
+\item For $n = 0, 1, \ldots, n_{\rm iter}$:
+  \begin{enumerate}
+  \item Restore $\rho$ to the baryonic density $\rho_{\rm bary}$.
+  \item Compute the AQUAL phantom density
+    $\rhoph^{(n)} = +\nabla\cdot[(\mu-1)\mathbf{f}^{(n)}]/(4\pi G)$.
+  \item Add $\rhoph^{(n)}$ to $\rho$ and exchange boundaries.
+  \item Re-solve the Poisson equation:
+    $\nabla^2\Phi^{(n+1)} = 4\pi G(\rho + \rhoph^{(n)})$.
+  \item Compute $\mathbf{f}^{(n+1)} = -\nabla\Phi^{(n+1)}$.
+  \item Check convergence:
+    $\max|\mathbf{f}^{(n+1)} - \mathbf{f}^{(n)}| /
+    \max|\mathbf{f}^{(n+1)}| < \epsilon$.
+  \end{enumerate}
+\item Return the converged force $\mathbf{f}^{(\rm final)}$.
+\end{enumerate}
+The convergence criterion $\epsilon$ is controlled by
+\code{mond\_eps} (default $10^{-6}$).  Convergence is monitored
+globally across all MPI ranks via \code{MPI\_ALLREDUCE} with
+the \code{MPI\_MAX} operator.
+
+\subsubsection{Implementation}
+
+The iteration is implemented in the subroutine \code{aqual\_iterate},
+called from \code{amr\_step} when \code{mond\_type=2}.  The
+baryonic density is saved in a temporary array at the start of the
+iteration and restored at each step to prevent accumulation of
+phantom density.  The existing \code{compute\_mond\_phantom\_density}
+routine is reused with a logical flag \code{is\_aqual} that selects
+between $\nu - 1$ (QUMOND) and $\mu - 1$ (AQUAL), and applies the
+appropriate sign convention.
+
+Each iteration calls the full multigrid (or FFT) Poisson solver and
+\code{force\_fine}, which automatically use the GPU-accelerated or
+FFTW3 code paths when available.  The multigrid solver overwrites
+the $f()$ array internally (using it as scratch for
+residual/RHS/mask), so \code{force\_fine} must be called after each
+solve to reconstruct the forces.
+
+\subsection{External Field Effect}
+\label{sec:mond_efe}
+
+In MOND, an external gravitational field $\mathbf{g}_{\rm ext}$
+breaks the internal dynamics of a subsystem, even if it is
+uniform (the ``external field effect'' or EFE;
+\citealt{Milgrom1983,Bekenstein1984}).  This is relevant for
+isolated galaxy simulations embedded in a large-scale tidal field.
+
+We implement the EFE by replacing $\mathbf{f}$ with
+$\mathbf{f} + \mathbf{g}_{\rm ext}$ in the argument of the
+interpolation function.  The external field is specified via
+\code{g\_ext\_mond(1:3)} in CGS units and converted to code
+units at each timestep.  The EFE modifies each MOND mode:
+\begin{itemize}
+\item \textbf{Phase~0}: $f_d^{\rm MOND} = \nu(|\mathbf{f}+
+  \mathbf{g}_{\rm ext}|/\azero)\,f_d + (\nu - 1)\,g_{{\rm ext},d}$.
+\item \textbf{Phase~1}: the divergence uses $(\nu-1)
+  (f_d + g_{{\rm ext},d})$.
+\item \textbf{Phase~2}: the divergence uses $(\mu-1)
+  (f_d + g_{{\rm ext},d})$.
+\end{itemize}
+When $\mathbf{g}_{\rm ext} = 0$ (the default), all expressions reduce
+to the standard EFE-free forms.  For cosmological periodic boxes the
+EFE is automatically zero.
+
+\subsection{Cosmological Considerations}
+\label{sec:mond_cosmo}
+
+In cosmological $N$-body simulations, the Poisson equation uses the
+density contrast and the force $\mathbf{f}$ represents the peculiar
+gravitational acceleration (the perturbation from the homogeneous
+Hubble flow).  The MOND correction is therefore applied to $|\mathbf{f}|$
+rather than to the total gravitational acceleration.  This ``naive
+cosmological QUMOND'' approach is the standard choice for MOND
+$N$-body cosmological codes
+\citep{Lughausen2015,Candlish2015,Nagesh2021} and is valid in the
+quasi-static regime relevant for structure formation.
+
+The critical acceleration $\azero$ is specified in CGS units
+($\mathrm{cm\,s^{-2}}$) and converted to code units at each timestep
+via
+\begin{equation}
+\azero^{\rm code} = \azero / (L_{\rm box}/t_{\rm code}^2),
+\end{equation}
+where $L_{\rm box}$ and $t_{\rm code}$ are the time-dependent code
+length and time units returned by the \ramses\ \code{units()} routine.
+Since these depend on the scale factor $a$, the code-unit threshold
+evolves correctly with cosmic time.
+
+\subsection{Performance Impact}
+\label{sec:mond_perf}
+
+Phase~0 (\code{mond\_type=0}) adds negligible overhead: a single pass
+over all cells to multiply $\mathbf{f}$ by $\nu$.  Phase~1
+(\code{mond\_type=1}) approximately doubles the Poisson solver cost
+per level, since the multigrid (or FFT) solve and \code{force\_fine}
+are each called twice.  For typical production runs where the Poisson
+solver accounts for ${\sim}36$\,per\,cent of the total step time, the
+overall cost increase is ${\sim}36$\,per\,cent (i.e.\ the total step
+time increases from $1.0\times$ to ${\sim}1.36\times$).
+
+Phase~2 (\code{mond\_type=2}) requires $N_{\rm iter}+1$ Poisson
+solves and force computations per level.  With a typical convergence
+in 5--10 iterations, the cost is ${\sim}6$--$11\times$ the baseline
+Poisson cost.  Using the FFTW3 base-level solver (28.9\,s per
+coarse step), Phase~2 with 10 iterations would cost ${\sim}300$\,s
+per coarse step.  This is acceptable for isolated galaxy simulations
+with moderate box sizes but prohibitive for large cosmological volumes.
+
+\subsection{Namelist Configuration}
+\label{sec:mond_namelist}
+
+The MOND module is enabled by setting \code{use\_mond=.true.} in
+\code{\&RUN\_PARAMS} and providing the physical parameters in a
+dedicated \code{\&MOND\_PARAMS} block:
+
+\begin{table}
+\centering
+\caption{MOND namelist parameters (\code{\&MOND\_PARAMS}).}
+\label{tab:mond_params}
+\small
+\begin{tabular}{llll}
+\toprule
+Parameter & Type & Default & Description \\
+\midrule
+\code{a0\_mond}      & real    & $1.2\times10^{-8}$ & $\azero$ [cm\,s$^{-2}$] \\
+\code{mond\_mu\_type} & integer & 1 & 1=simple, 2=standard \\
+\code{mond\_type}     & integer & 0 & 0=algebraic, 1=QUMOND, 2=AQUAL \\
+\code{n\_iter\_mond}  & integer & 10 & Max AQUAL iterations (type=2 only) \\
+\code{mond\_eps}      & real    & $10^{-6}$ & AQUAL convergence threshold \\
+\code{g\_ext\_mond}   & real(3) & 0,0,0 & External field [cm\,s$^{-2}$] (EFE) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+A minimal QUMOND example:
+\begin{verbatim}
+&RUN_PARAMS
+use_mond=.true.
+/
+
+&MOND_PARAMS
+a0_mond=1.2d-8
+mond_mu_type=1
+mond_type=1
+/
+\end{verbatim}
+
+An AQUAL example with external field:
+\begin{verbatim}
+&MOND_PARAMS
+a0_mond=1.2d-8
+mond_mu_type=1
+mond_type=2
+n_iter_mond=10
+mond_eps=1d-6
+g_ext_mond=0d0,0d0,1d-9
+/
+\end{verbatim}
+
+The code validates that \code{poisson=.true.} when MOND is enabled,
+that $\azero > 0$, that \code{mond\_mu\_type}$\in\{1,2\}$, and that
+\code{mond\_type}$\in\{0,1,2\}$.  For \code{mond\_type=2},
+\code{n\_iter\_mond}$\geq 1$ and \code{mond\_eps}${}>0$ are required.
+A warning is issued if \code{pic=.true.}
+(dark matter particles present), since MOND is designed to replace
+dark matter rather than augment it.
+
+
+% ===================================================================
+% 7. f(R) HU-SAWICKI GRAVITY
+% ===================================================================
+\section{$f(R)$ HU--SAWICKI GRAVITY}
+\label{sec:fR}
+
+\subsection{Theory}
+
+$\fR$ gravity \citep{Sotiriou2010} replaces the Einstein--Hilbert
+action with $S = \int d^4x\,\sqrt{-g}\,[R + f(R)]/(16\pi G)$, where
+$f(R)$ is a nonlinear function of the Ricci scalar.  The
+Hu--Sawicki model \citep{HuSawicki2007} is defined by
+\begin{equation}
+f(R) = -m^2 \frac{c_1 (R/m^2)^n}{c_2(R/m^2)^n + 1},
+\label{eq:fR_HS}
+\end{equation}
+where $m^2 = H_0^2 \Om$ and the ratio $c_1/c_2$ is fixed by the
+requirement $f(R_0) \approx -2\Lambda$.  The scalar degree of freedom
+$f_R \equiv df/dR$ obeys a Klein--Gordon equation that, in the
+quasi-static limit, reduces to
+\begin{equation}
+\nabla^2 f_R = -\frac{a^2}{3}\bigl[R(f_R) - \bar{R}\bigr]
+  + \frac{a^2}{3}\,8\pi G\,\delta\rho,
+\label{eq:fR_eom}
+\end{equation}
+where $\bar{R}$ is the background Ricci scalar and $\delta\rho$ is the
+matter overdensity.  The Hu--Sawicki inversion
+$R(f_R) = \bar{R}_0\,[-n\,\fRz / f_R]^{1/(n+1)}$ maps the field
+value back to the curvature.  In high-density regions, the effective
+mass of $f_R$ becomes large, suppressing deviations from GR ---
+the \emph{chameleon screening mechanism}.
+
+\subsection{Solver}
+
+We solve equation~(\ref{eq:fR_eom}) on each AMR level using
+Newton--Gauss--Seidel (N-GS) relaxation with red--black ordering.
+The field $f_R$ is stored in the \code{scalar\_gr} array, initialised
+to the background value $\bar{f}_R(a)$ on the first step and
+warm-started from the previous step thereafter.  The Jacobian of the
+residual is
+\begin{equation}
+\frac{\partial F}{\partial f_R}\bigg|_c
+  = -\frac{6}{\Delta x^2}
+    - \frac{a^2}{3}\frac{dR}{df_R},
+\end{equation}
+which includes both the standard Laplacian stencil and the nonlinear
+$R(f_R)$ term.  The fifth force is
+\begin{equation}
+\mathbf{F}_5 = -\tfrac{1}{2}\,\nabla f_R,
+\end{equation}
+computed via the shared \code{compute\_fifth\_force} routine.
+Convergence is monitored by
+$\max|F| / \max|S| < \epsilon$ with default $\epsilon = 10^{-6}$.
+
+\subsection{Namelist Configuration}
+
+The $\fR$ module is controlled by \code{use\_fR=.true.} in
+\code{\&RUN\_PARAMS} and the dedicated \code{\&FR\_PARAMS} block:
+\code{fR0} (amplitude, $< 0$; default $-10^{-6}$),
+\code{fR\_n} (Hu--Sawicki index; default 1),
+\code{n\_iter\_fR} (max iterations; default 20),
+\code{fR\_eps} (convergence threshold; default $10^{-6}$).
+
+
+% ===================================================================
+% 8. nDGP GRAVITY
+% ===================================================================
+\section{nDGP BRANEWORLD GRAVITY}
+\label{sec:nDGP}
+
+\subsection{Theory}
+
+The Dvali--Gabadadze--Porrati (DGP) model \citep{DGP2000} embeds our
+4D spacetime in a 5D bulk, with a crossover scale $r_c$ below which
+gravity is 4-dimensional.  In the quasi-static limit, the scalar
+degree of freedom $\varphi$ (the brane-bending mode) satisfies
+\begin{equation}
+\nabla^2\varphi + \frac{r_c^2}{3\beta a^2}
+\bigl[(\nabla^2\varphi)^2 - (\nabla_i\nabla_j\varphi)^2\bigr]
+  = \frac{\Om\,a}{\beta}\,\delta,
+\label{eq:nDGP_eom}
+\end{equation}
+where $\beta(a) = 1 + 2 H r_c (1 + \dot{H}/(3H^2))$ and
+$\delta = \delta\rho/\bar\rho$.  The nonlinear derivative terms
+provide \emph{Vainshtein screening}: near massive objects the
+second-order operators dominate, suppressing the scalar force.
+
+The normal branch (nDGP; $\epsilon = +1$) does not self-accelerate and
+requires an explicit cosmological constant, but provides a useful
+testbed for Vainshtein screening.  The self-accelerating branch
+($\epsilon = -1$) suffers from ghost instabilities but is included
+for completeness.
+
+\subsection{Solver}
+
+We solve equation~(\ref{eq:nDGP_eom}) using Newton--Gauss--Seidel
+relaxation, identical in structure to the $\fR$ solver but with the
+additional Vainshtein bilinear term.  The diagonal approximation
+\citep{Li2013} drops off-diagonal second derivatives
+($\partial_i\partial_j\varphi$ with $i \neq j$), which is accurate to
+the level of the grid resolution.  The Jacobian is
+\begin{equation}
+J = -\frac{6}{\Delta x^2}
+  + \frac{r_c^2}{3\beta a^2}\cdot 2\nabla^2\varphi\cdot
+    \Bigl(-\frac{4}{\Delta x^2}\Bigr).
+\end{equation}
+The fifth force is $\mathbf{F}_5 = -[1/(2\beta)]\,\nabla\varphi$,
+computed via \code{compute\_fifth\_force}.
+
+\subsection{Namelist Configuration}
+
+Controlled by \code{use\_nDGP=.true.} in \code{\&RUN\_PARAMS} and
+\code{\&NDGP\_PARAMS}:
+\code{omega\_rc} ($\Omega_{r_c} = 1/(4r_c^2 H_0^2)$; default 0.25),
+\code{nDGP\_branch} ($+1$ normal, $-1$ self-accelerating),
+\code{n\_iter\_nDGP} (default 20),
+\code{nDGP\_eps} (default $10^{-6}$).
+
+
+% ===================================================================
+% 9. SYMMETRON GRAVITY
+% ===================================================================
+\section{SYMMETRON GRAVITY}
+\label{sec:symmetron}
+
+\subsection{Theory}
+
+The Symmetron model \citep{Hinterbichler2010,Hinterbichler2011}
+features a scalar field $\phi$ with a $\mathbb{Z}_2$-symmetric
+potential
+\begin{equation}
+V(\phi) = -\frac{\mu^2}{2}\phi^2 + \frac{\lambda}{4}\phi^4
+  + V_0,
+\end{equation}
+and a universal coupling to matter
+$A(\phi) = 1 + \phi^2/(2M^2)$.
+The effective potential in a region of density $\rho$ is
+\begin{equation}
+V_{\rm eff}(\phi)
+  = \frac{1}{2}\Bigl(\frac{\rho}{\rho_{\rm ssb}} - 1\Bigr)
+    \frac{\mu^2}{2}\phi^2
+  + \frac{\lambda}{4}\phi^4,
+\end{equation}
+where $\rho_{\rm ssb} = \mu^2 M^2$ is the critical density.  When
+$\rho > \rho_{\rm ssb}$, the effective mass-squared is positive and the
+field sits at $\phi = 0$ (symmetry restored), suppressing the fifth
+force.  When $\rho < \rho_{\rm ssb}$, symmetry is spontaneously broken
+and $\phi \neq 0$ generates a fifth force --- the
+\emph{symmetron screening mechanism}.
+
+In terms of the normalised field $\chi = \phi/\phi_0$ and the
+Compton wavelength $L$, the quasi-static equation of motion is
+\begin{equation}
+\nabla^2\chi = \frac{a^2}{2L^2}
+  \biggl[\Bigl(\frac{\rho}{\rho_{\rm ssb}}
+    - \frac{a_{\rm ssb}^3}{a^3}\Bigr)\chi + \chi^3\biggr].
+\label{eq:symmetron_eom}
+\end{equation}
+
+\subsection{Fifth Force}
+
+The Symmetron fifth force is \emph{field-dependent}:
+\begin{equation}
+\mathbf{F}_5 = -6\,\Om\,\beta_{\rm s}^2\,
+  \frac{a_{\rm ssb}}{a}\,\chi\,\nabla\chi,
+\label{eq:symmetron_force}
+\end{equation}
+which differs from the $\fR$ and nDGP cases where the force is a
+simple gradient of the scalar field.  A dedicated
+\code{compute\_fifth\_force\_symmetron} routine implements the
+$\chi\,\nabla\chi$ product.
+
+\subsection{Solver}
+
+The equation is solved by N-GS relaxation.  Denoting the
+right-hand side coefficients as $m_{\rm eff}^2 = (a^2/2L^2)
+[(\rho/\rho_{\rm ssb}) - (a_{\rm ssb}/a)^3]$ and
+$\lambda_{\rm eff} = a^2/(2L^2)$, the residual and Jacobian are
+\begin{align}
+F &= \nabla^2\chi - m_{\rm eff}^2\,\chi
+  - \lambda_{\rm eff}\,\chi^3, \\
+J &= -6/\Delta x^2 - m_{\rm eff}^2 - 3\lambda_{\rm eff}\,\chi^2.
+\end{align}
+The Compton wavelength $L$ is converted from Mpc/$h$ to code units
+using $L_{\rm code} = L / L_{\rm box}$.
+
+\subsection{Namelist Configuration}
+
+Controlled by \code{use\_symmetron=.true.} and
+\code{\&SYMMETRON\_PARAMS}:
+\code{a\_ssb} (SSB scale factor; default 0.5),
+\code{beta\_symmetron} (coupling; default 1.0),
+\code{L\_symmetron} (range in Mpc/$h$; default 1.0),
+\code{n\_iter\_symmetron} (default 20),
+\code{symmetron\_eps} (default $10^{-6}$).
+
+
+% ===================================================================
+% 10. DILATON GRAVITY
+% ===================================================================
+\section{DILATON GRAVITY}
+\label{sec:dilaton}
+
+\subsection{Theory}
+
+The environmentally dependent Dilaton model
+\citep{Brax2010,Brax2011} employs the Damour--Polyakov mechanism in
+which the coupling function $A(\phi_D) = 1 + A_2\,\phi_D^2/2$ has a
+minimum at the cosmological field value.  The quasi-static field
+equation has the same structure as the Symmetron:
+\begin{equation}
+\nabla^2\phi_D = \frac{a^2}{2L_D^2}
+  \biggl[\Bigl(\frac{\rho}{\rho_0}
+    - \frac{a_0^3}{a^3}\Bigr)\phi_D
+  + \xi_2\,\phi_D^3\biggr],
+\label{eq:dilaton_eom}
+\end{equation}
+where $L_D$ is the Dilaton Compton wavelength, $a_0$ is the
+transition scale factor, and $\xi_2$ parameterises the cubic
+self-interaction (set to unity in our implementation).
+
+\subsection{Fifth Force}
+
+The Dilaton fifth force is also field-dependent:
+\begin{equation}
+\mathbf{F}_5 = -2\,\beta_D^2\,\phi_D\,\nabla\phi_D,
+\label{eq:dilaton_force}
+\end{equation}
+implemented in a dedicated \code{compute\_fifth\_force\_dilaton}
+routine, structurally identical to the Symmetron force routine but
+with different coupling coefficients.
+
+\subsection{Solver and Namelist}
+
+The solver is identical in structure to the Symmetron solver with
+$(a_{\rm ssb}, L_{\rm sym}) \to (a_0, L_D)$.  Parameters are set
+via \code{use\_dilaton=.true.} and \code{\&DILATON\_PARAMS}:
+\code{beta\_dilaton} (default 1.0),
+\code{L\_dilaton} (Mpc/$h$; default 1.0),
+\code{a0\_dilaton} (default 0.5),
+\code{n\_iter\_dilaton} (default 20),
+\code{dilaton\_eps} (default $10^{-6}$).
+
+
+% ===================================================================
+% 11. GALILEON GRAVITY
+% ===================================================================
+\section{CUBIC GALILEON GRAVITY}
+\label{sec:galileon}
+
+\subsection{Theory}
+
+The cubic Galileon \citep{Nicolis2009,Deffayet2009a} is a scalar field
+theory with second-order equations of motion and a shift symmetry
+$\phi \to \phi + c$.  The Lagrangian is
+$\mathcal{L} = c_2\,(\partial\phi)^2 + (c_3/\Lambda^3)\,
+\Box\phi\,(\partial\phi)^2$, and the quasi-static field equation is
+\begin{equation}
+\nabla^2\phi_G + \frac{c_3}{c_2 H_0^2 a^2}
+\bigl[(\nabla^2\phi_G)^2
+  - (\nabla_i\nabla_j\phi_G)^2\bigr]
+= \frac{\Om\,a}{\betaG}\,\delta,
+\label{eq:galileon_eom}
+\end{equation}
+where $\betaG(a) = c_2/(6\,c_3\,H)$ and $H$ is the Hubble parameter.
+This has the same Vainshtein operator as the nDGP equation
+(\ref{eq:nDGP_eom}), with $r_c^2/(3\beta)$ replaced by
+$c_3/(c_2\,H_0^2)$.
+
+\subsection{Solver}
+
+We reuse the nDGP Gauss--Seidel infrastructure with substituted
+coefficients:
+$\mathrm{coeff}_G = c_3/(c_2\,a^2)$ and source
+$= \Om\,a\,\delta/\betaG$.  The fifth force is
+$\mathbf{F}_5 = -[1/(2\betaG)]\,\nabla\phi_G$, computed via the
+shared \code{compute\_fifth\_force} routine.
+
+\subsection{Namelist Configuration}
+
+Controlled by \code{use\_galileon=.true.} and
+\code{\&GALILEON\_PARAMS}:
+\code{c2\_galileon} (kinetic coefficient; default $-1.0$),
+\code{c3\_galileon} (cubic coefficient; default 1.0),
+\code{n\_iter\_galileon} (default 20),
+\code{galileon\_eps} (default $10^{-6}$).
+
+
+% ===================================================================
+% 12. COUPLED DARK ENERGY
+% ===================================================================
+\section{COUPLED DARK ENERGY}
+\label{sec:coupled_de}
+
+\subsection{Theory}
+
+Coupled Dark Energy (CDE) models
+\citep{Amendola2000,Amendola2004,Pettorino2008} introduce a direct
+interaction between dark energy and dark matter in the Einstein frame.
+For a constant coupling $\betacde$, the effective gravitational
+constant experienced by dark matter particles is enhanced:
+\begin{equation}
+\Geff = G\,(1 + 2\betacde^2).
+\label{eq:Geff_cde}
+\end{equation}
+Baryons remain uncoupled and feel only the standard gravitational
+force.  For simplicity, our implementation applies the enhancement
+to all matter (DM + baryons), which is exact when baryons are a
+subdominant component and provides a useful approximation otherwise.
+
+\subsection{Implementation}
+
+After the standard gradient of the gravitational potential is computed
+in \code{force\_fine}, the \code{apply\_coupled\_de\_force} subroutine
+multiplies the force array by $(1+2\betacde^2)$:
+\begin{equation}
+f_d \to (1 + 2\betacde^2)\,f_d, \quad d = 1,2,3.
+\end{equation}
+No scalar field is required; the enhancement is a simple
+post-processing step applied at the same point as the MOND algebraic
+correction.
+
+\subsection{Namelist Configuration}
+
+Controlled by \code{use\_coupled\_de=.true.} in
+\code{\&RUN\_PARAMS} and \code{\&COUPLED\_DE\_PARAMS}:
+\code{beta\_cde} (coupling constant; default 0.1).
+Setting $\betacde = 0$ recovers standard gravity.
+This module can be used simultaneously with any scalar field model
+or with early dark energy.
+
+
+% ===================================================================
+% 13. EARLY DARK ENERGY
+% ===================================================================
+\section{EARLY DARK ENERGY}
+\label{sec:ede}
+
+\subsection{Theory}
+
+Early Dark Energy (EDE) models
+\citep{DoranRobbers2006,Poulin2019,Hill2020} introduce a transient
+dark energy component at early times that modifies the expansion
+history.  We implement the Doran--Robbers parameterisation in which
+the EDE energy density fraction is
+\begin{equation}
+f_{\rm ede}(a) = \frac{(a_c/a)^{3(1+w_{\rm ede})}}
+  {1 + (a/a_c)^{3(1+w_{\rm ede})}},
+\label{eq:f_ede}
+\end{equation}
+where $a_c = 1/(1+z_{\rm ede})$ is the critical scale factor
+and $w_{\rm ede}$ is the EDE equation of state.  For
+$a \ll a_c$, $f_{\rm ede} \to 1$, contributing a constant
+$\Oede$ to the Friedmann equation; for $a \gg a_c$,
+$f_{\rm ede}$ decays as a power law and EDE becomes negligible.
+
+\subsection{Implementation}
+
+The EDE contribution enters the Friedmann equation through the
+\code{dadtau} and \code{dadt} functions in \code{init\_time.f90}:
+\begin{equation}
+H^2(a) = H_0^2\Bigl[\frac{\Om}{a^3} + \Ol\,f_{\rm DE}(a)
+  + \Omega_k\,a^{-2} + \Oede\,f_{\rm ede}(a)\Bigr].
+\label{eq:friedmann_ede}
+\end{equation}
+No modification to the force calculation is needed; the effect
+propagates entirely through the modified expansion history, which
+changes the conformal time--scale factor mapping and thus the
+cosmological time stepping.
+
+\subsection{Namelist Configuration}
+
+Controlled by \code{use\_ede=.true.} in \code{\&RUN\_PARAMS} and
+\code{\&EDE\_PARAMS}:
+\code{omega\_ede} (EDE fraction; default 0.04),
+\code{z\_ede} (injection redshift; default 3000),
+\code{w\_ede} (EDE equation of state; default 1/3).
+Setting $\Oede = 0$ recovers the standard $\Lambda$CDM expansion.
+This module can be used simultaneously with any other model.
+
+
+% ===================================================================
+% 14. VERIFICATION
 % ===================================================================
 \section{VERIFICATION}
 \label{sec:verification}
@@ -886,6 +1745,48 @@ nominally enabled but set to produce no physical effect:
 
 \item \textbf{SIDM}: \code{sidm=.false.}.  The scattering routine is
   not called.  Result: bit-identical to baseline.
+
+\item \textbf{MOND}: \code{use\_mond=.true.} with $\azero$ set to an
+  extremely small value (${\sim}10^{-30}\,\mathrm{cm\,s^{-2}}$),
+  placing all cells deep in the Newtonian regime ($\nu \approx 1$,
+  $\mu \approx 1$).
+  All three modes (\code{mond\_type=0}, 1, and 2) recover the
+  baseline forces.  Setting \code{use\_mond=.false.} is
+  bit-identical to the reference run.
+
+\item \textbf{$\fR$ Hu--Sawicki}:
+  \code{use\_fR=.true.} with $|\fRz| \to 0$ (e.g.\
+  $\fRz = -10^{-10}$).  The chameleon mass becomes extremely large,
+  screening all cells.  The scalar field stays near the background
+  value and the fifth force is negligible.
+
+\item \textbf{nDGP}:
+  \code{use\_nDGP=.true.} with $\Omega_{r_c} \to \infty$.  In
+  this limit $\beta \to \infty$ and the fifth force
+  $\propto 1/\beta \to 0$.
+
+\item \textbf{Symmetron}:
+  \code{use\_symmetron=.true.} with
+  $\beta_{\rm s} \to 0$ ($10^{-10}$).  The fifth force prefactor
+  $\propto \beta_{\rm s}^2$ vanishes.
+
+\item \textbf{Dilaton}:
+  \code{use\_dilaton=.true.} with
+  $\beta_D \to 0$ ($10^{-10}$).  Identical argument.
+
+\item \textbf{Galileon}:
+  \code{use\_galileon=.true.} with $c_3 \to 0$ ($10^{-10}$).
+  The Vainshtein term vanishes and $\betaG \to \infty$, so
+  the fifth force $\propto 1/\betaG \to 0$.
+
+\item \textbf{Coupled DE}:
+  \code{use\_coupled\_de=.true.} with $\betacde = 0$.
+  $\Geff = G(1+0) = G$, identical to standard gravity.
+
+\item \textbf{Early DE}:
+  \code{use\_ede=.true.} with $\Oede = 0$.
+  The EDE term in the Friedmann equation vanishes identically,
+  recovering standard $\Lambda$CDM expansion.
 \end{itemize}
 
 \subsection{SIDM Conservation}
@@ -918,6 +1819,28 @@ The deterministic per-thread seed initialisation
 per-event diagnostics are identical between OMP${}=1$ and OMP${}=5$
 runs, verifying that the threading does not introduce spurious
 stochasticity.
+
+\subsection{MOND Phase Consistency}
+\label{sec:verify_mond}
+
+For a spherically symmetric mass distribution, the curl of
+$\nu\gN$ vanishes, so Phase~0 (algebraic) and Phase~1 (phantom
+density) should produce identical forces.  We verify this by
+comparing the force field at a high-density peak region in the
+test snapshot: the relative difference $|\mathbf{f}_{\rm Phase\,0} -
+\mathbf{f}_{\rm Phase\,1}|/|\mathbf{f}_{\rm Phase\,1}|$ is at the
+$10^{-3}$ level near the peak (where the geometry is approximately
+spherical) and reaches a few per~cent in asymmetric regions, as
+expected from the non-vanishing curl field that Phase~1 correctly
+removes.
+
+For Phase~2 (AQUAL), the converged solution should agree with
+QUMOND in the curl-free limit (spherical symmetry).  In general
+mass distributions the two formulations differ because AQUAL solves
+for a self-consistent potential while QUMOND uses the Newtonian
+potential as input.  The AQUAL iteration convergence is monitored
+at each step via the relative force change
+$\max|\Delta\mathbf{f}|/\max|\mathbf{f}|$.
 
 \subsection{Neutrino Power Spectrum Suppression}
 \label{sec:verify_nu_pk}
@@ -977,52 +1900,58 @@ correctly reproduces the \camb\ predictions.
 \section{CONCLUSIONS}
 \label{sec:conclusions}
 
-We have presented three non-standard cosmological modules for the
-\curamses\ AMR code:
+We have presented eleven non-standard cosmological modules for the
+\curamses\ AMR code, spanning three broad categories.
 
-\begin{enumerate}
-\item \textbf{CPL dark energy perturbations}: a table-based linear
-  response method using precomputed \camb\ Weyl-potential ratios
-  $\Rde(k,a)$, valid for arbitrary sound speed $\cst$ including the
-  clustering limit $\cst = 0$.  The Weyl-potential extraction
-  correctly maps from \camb's synchronous gauge to the Newtonian
-  gauge used by the $N$-body solver
-  (Section~\ref{sec:de_table}).  Matter power spectra for four DE
-  models agree with \camb\ linear predictions at the per~cent level
-  (Section~\ref{sec:verify_de_pk}).  A quasi-static Helmholtz fallback
-  is available for $\cst > 0$ without a table.
+\textbf{Poisson solver extensions:}
+(i)~CPL dark energy perturbations via a table-based linear response
+method using precomputed \camb\ Weyl-potential ratios, valid for
+arbitrary sound speed including the clustering limit $\cst = 0$;
+(ii)~massive neutrino linear response via scale-dependent
+$\Rnu(k,a)$ corrections.
 
-\item \textbf{Massive neutrino linear response}: scale-dependent
-  Poisson equation corrections via precomputed $\Rnu(k,a)$ ratios,
-  avoiding the noise and cost of neutrino particles while correctly
-  capturing the free-streaming suppression.
+\textbf{Dark matter phenomenology:}
+(iii)~SIDM Monte Carlo scattering with constant, velocity-dependent,
+anisotropic, and inelastic cross-sections, with machine-precision
+conservation;
+(iv)~QUMOND and AQUAL (three modes: algebraic, phantom density,
+iterative) with external field effect.
 
-\item \textbf{Self-interacting dark matter}: cell-based Monte Carlo
-  scattering with constant, velocity-dependent (Yukawa, power-law),
-  and anisotropic (Rutherford) cross-sections, plus inelastic
-  (excited-state) channels.  Momentum and energy conservation are
-  exact to machine precision.
-\end{enumerate}
+\textbf{Scalar field modified gravity:}
+(v)~$\fR$ Hu--Sawicki with chameleon screening;
+(vi)~nDGP braneworld with Vainshtein screening;
+(vii)~Symmetron with spontaneous symmetry-breaking screening;
+(viii)~Dilaton with Damour--Polyakov environmentally dependent coupling;
+(ix)~cubic Galileon with Vainshtein screening.  All five share a
+common Newton--Gauss--Seidel solver infrastructure with red--black
+ordering and OpenMP parallelism.
 
-All three modules are designed within a unified Poisson solver
-framework in which neutrino and dark energy corrections compose
-multiplicatively in Fourier space (equation~\ref{eq:green_unified}).
+\textbf{Force and background modifications:}
+(x)~coupled dark energy with $\Geff = G(1+2\betacde^2)$;
+(xi)~early dark energy in the Doran--Robbers parameterisation,
+modifying the Friedmann equation at high redshift.
+
 Each module is self-contained, controlled by dedicated namelist
 blocks, and verified to recover the $\Lambda$CDM baseline when
-disabled.
+disabled.  The six scalar field gravity models (MOND, $\fR$, nDGP,
+Symmetron, Dilaton, Galileon) are mutually exclusive, while coupled
+DE and early DE can combine freely with any model.
 
 Together with the algorithmic optimizations described in
 \citet{Kim2026} --- $k$-section domain decomposition, Morton key
 octree, spatial hash feedback, and hybrid CPU/GPU dispatch ---
 \curamses\ now provides a comprehensive platform for precision
 cosmological simulations that span the standard model and its
-extensions.
+extensions across all major theoretical frameworks: dynamical dark
+energy, massive neutrinos, self-interacting dark matter, modified
+gravity, and modified expansion history.
 
 Future work will apply these modules to constrained-realisation
 simulations targeting DESI and Euclid survey volumes, enabling
 direct comparison of $\Lambda$CDM, $w_0w_a$CDM, $\nu\Lambda$CDM,
-and SIDM predictions for the halo mass function, galaxy clustering,
-and weak lensing observables.
+SIDM, MOND, $\fR$, nDGP, Symmetron, Dilaton, and Galileon
+predictions for the halo mass function, galaxy rotation curves,
+galaxy clustering, and weak lensing observables.
 
 
 % ===================================================================
@@ -1211,6 +2140,159 @@ Hahn O., Abel T., 2011, MNRAS, 415, 2101,
 \href{https://doi.org/10.1111/j.1365-2966.2011.18820.x}{doi:10.1111/j.1365-2966.2011.18820.x},
 \href{https://arxiv.org/abs/1103.6031}{arXiv:1103.6031}
 
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{1983}]{Milgrom1983}
+Milgrom M., 1983, ApJ, 270, 365,
+\href{https://doi.org/10.1086/161130}{doi:10.1086/161130}
+
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{2010}]{Milgrom2010}
+Milgrom M., 2010, MNRAS, 403, 886,
+\href{https://doi.org/10.1111/j.1365-2966.2009.16184.x}{doi:10.1111/j.1365-2966.2009.16184.x},
+\href{https://arxiv.org/abs/0911.5464}{arXiv:0911.5464}
+
+\bibitem[\protect\citeauthoryear{Milgrom}{Milgrom}{2014}]{Milgrom2014}
+Milgrom M., 2014, Scholarpedia, 9, 31410,
+\href{https://doi.org/10.4249/scholarpedia.31410}{doi:10.4249/scholarpedia.31410}
+
+\bibitem[\protect\citeauthoryear{Famaey \& McGaugh}{Famaey \& McGaugh}{2012}]{Famaey2012}
+Famaey B., McGaugh S.~S., 2012, Living Rev.\ Relativ., 15, 10,
+\href{https://doi.org/10.12942/lrr-2012-10}{doi:10.12942/lrr-2012-10},
+\href{https://arxiv.org/abs/1112.3960}{arXiv:1112.3960}
+
+\bibitem[\protect\citeauthoryear{McGaugh, Lelli \& Schombert}{McGaugh et al.}{2016}]{McGaugh2016}
+McGaugh S.~S., Lelli F., Schombert J.~M., 2016, Phys.\ Rev.\ Lett., 117, 201101,
+\href{https://doi.org/10.1103/PhysRevLett.117.201101}{doi:10.1103/PhysRevLett.117.201101},
+\href{https://arxiv.org/abs/1609.05917}{arXiv:1609.05917}
+
+\bibitem[\protect\citeauthoryear{L{\"u}ghausen, Famaey \& Kroupa}{L{\"u}ghausen et al.}{2015}]{Lughausen2015}
+L{\"u}ghausen F., Famaey B., Kroupa P., 2015, Canadian J.\ Phys., 93, 232,
+\href{https://doi.org/10.1139/cjp-2014-0168}{doi:10.1139/cjp-2014-0168},
+\href{https://arxiv.org/abs/1405.5963}{arXiv:1405.5963}
+
+\bibitem[\protect\citeauthoryear{Candlish, Smith \& Fellhauer}{Candlish et al.}{2015}]{Candlish2015}
+Candlish G.~N., Smith R., Fellhauer M., 2015, MNRAS, 446, 1060,
+\href{https://doi.org/10.1093/mnras/stu2158}{doi:10.1093/mnras/stu2158},
+\href{https://arxiv.org/abs/1410.3844}{arXiv:1410.3844}
+
+\bibitem[\protect\citeauthoryear{Nagesh et al.}{Nagesh et al.}{2021}]{Nagesh2021}
+Nagesh S.~T., Banik I., Thies I., Kroupa P., Famaey B., L{\"u}ghausen F., Wittenburg N., Parziale R., 2021, Canadian J.\ Phys., 99, 607,
+\href{https://doi.org/10.1139/cjp-2020-0624}{doi:10.1139/cjp-2020-0624},
+\href{https://arxiv.org/abs/2009.12155}{arXiv:2009.12155}
+
+% --- Modified gravity references ---
+
+\bibitem[\protect\citeauthoryear{Hu \& Sawicki}{Hu \& Sawicki}{2007}]{HuSawicki2007}
+Hu W., Sawicki I., 2007, Phys.\ Rev.\ D, 76, 064004,
+\href{https://doi.org/10.1103/PhysRevD.76.064004}{doi:10.1103/PhysRevD.76.064004},
+\href{https://arxiv.org/abs/0705.1158}{arXiv:0705.1158}
+
+\bibitem[\protect\citeauthoryear{Sotiriou \& Faraoni}{Sotiriou \& Faraoni}{2010}]{Sotiriou2010}
+Sotiriou T.~P., Faraoni V., 2010, Rev.\ Mod.\ Phys., 82, 451,
+\href{https://doi.org/10.1103/RevModPhys.82.451}{doi:10.1103/RevModPhys.82.451},
+\href{https://arxiv.org/abs/0805.1726}{arXiv:0805.1726}
+
+\bibitem[\protect\citeauthoryear{Dvali, Gabadadze \& Porrati}{Dvali et al.}{2000}]{DGP2000}
+Dvali G., Gabadadze G., Porrati M., 2000, Phys.\ Lett.\ B, 485, 208,
+\href{https://doi.org/10.1016/S0370-2693(00)00669-9}{doi:10.1016/S0370-2693(00)00669-9},
+\href{https://arxiv.org/abs/hep-th/0005016}{arXiv:hep-th/0005016}
+
+\bibitem[\protect\citeauthoryear{Vainshtein}{Vainshtein}{1972}]{Vainshtein1972}
+Vainshtein A.~I., 1972, Phys.\ Lett.\ B, 39, 393,
+\href{https://doi.org/10.1016/0370-2693(72)90147-5}{doi:10.1016/0370-2693(72)90147-5}
+
+\bibitem[\protect\citeauthoryear{Nicolis, Rattazzi \& Trincherini}{Nicolis et al.}{2009}]{Nicolis2009}
+Nicolis A., Rattazzi R., Trincherini E., 2009, Phys.\ Rev.\ D, 79, 064036,
+\href{https://doi.org/10.1103/PhysRevD.79.064036}{doi:10.1103/PhysRevD.79.064036},
+\href{https://arxiv.org/abs/0811.2197}{arXiv:0811.2197}
+
+\bibitem[\protect\citeauthoryear{Deffayet et al.}{Deffayet et al.}{2009a}]{Deffayet2009a}
+Deffayet C., Esposito-Far{\`e}se G., Vikman A., 2009, Phys.\ Rev.\ D, 79, 084003,
+\href{https://doi.org/10.1103/PhysRevD.79.084003}{doi:10.1103/PhysRevD.79.084003},
+\href{https://arxiv.org/abs/0901.1314}{arXiv:0901.1314}
+
+\bibitem[\protect\citeauthoryear{Deffayet, Deser \& Esposito-Far{\`e}se}{Deffayet et al.}{2009b}]{Deffayet2009b}
+Deffayet C., Deser S., Esposito-Far{\`e}se G., 2009, Phys.\ Rev.\ D, 80, 064015,
+\href{https://doi.org/10.1103/PhysRevD.80.064015}{doi:10.1103/PhysRevD.80.064015},
+\href{https://arxiv.org/abs/0906.1967}{arXiv:0906.1967}
+
+\bibitem[\protect\citeauthoryear{Hinterbichler \& Khoury}{Hinterbichler \& Khoury}{2010}]{Hinterbichler2010}
+Hinterbichler K., Khoury J., 2010, Phys.\ Rev.\ Lett., 104, 231301,
+\href{https://doi.org/10.1103/PhysRevLett.104.231301}{doi:10.1103/PhysRevLett.104.231301},
+\href{https://arxiv.org/abs/1001.4525}{arXiv:1001.4525}
+
+\bibitem[\protect\citeauthoryear{Hinterbichler et al.}{Hinterbichler et al.}{2011}]{Hinterbichler2011}
+Hinterbichler K., Khoury J., Levy A., Matas A., 2011, Phys.\ Rev.\ D, 84, 103521,
+\href{https://doi.org/10.1103/PhysRevD.84.103521}{doi:10.1103/PhysRevD.84.103521},
+\href{https://arxiv.org/abs/1107.2112}{arXiv:1107.2112}
+
+\bibitem[\protect\citeauthoryear{Brax et al.}{Brax et al.}{2010}]{Brax2010}
+Brax P., van~de~Bruck C., Davis A.-C., Shaw D., 2010, Phys.\ Rev.\ D, 82, 063519,
+\href{https://doi.org/10.1103/PhysRevD.82.063519}{doi:10.1103/PhysRevD.82.063519},
+\href{https://arxiv.org/abs/1005.3735}{arXiv:1005.3735}
+
+\bibitem[\protect\citeauthoryear{Brax et al.}{Brax et al.}{2011}]{Brax2011}
+Brax P., van~de~Bruck C., Davis A.-C., Li B., Shaw D.~J., 2011, Phys.\ Rev.\ D, 83, 104026,
+\href{https://doi.org/10.1103/PhysRevD.83.104026}{doi:10.1103/PhysRevD.83.104026},
+\href{https://arxiv.org/abs/1102.3692}{arXiv:1102.3692}
+
+\bibitem[\protect\citeauthoryear{Li, Zhao \& Koyama}{Li et al.}{2012}]{Li2012}
+Li B., Zhao G.-B., Koyama K., 2012, MNRAS, 421, 3481,
+\href{https://doi.org/10.1111/j.1365-2966.2012.20573.x}{doi:10.1111/j.1365-2966.2012.20573.x},
+\href{https://arxiv.org/abs/1111.2602}{arXiv:1111.2602}
+
+\bibitem[\protect\citeauthoryear{Li et al.}{Li et al.}{2013}]{Li2013}
+Li B., Zhao G.-B., Teyssier R., Koyama K., 2013, J.\ Cosmol.\ Astropart.\ Phys., 2013, 023,
+\href{https://doi.org/10.1088/1475-7516/2013/01/023}{doi:10.1088/1475-7516/2013/01/023},
+\href{https://arxiv.org/abs/1110.1379}{arXiv:1110.1379}
+
+\bibitem[\protect\citeauthoryear{Llinares, Mota \& Winther}{Llinares et al.}{2014}]{Llinares2014}
+Llinares C., Mota D.~F., Winther H.~A., 2014, A\&A, 562, A78,
+\href{https://doi.org/10.1051/0004-6361/201322412}{doi:10.1051/0004-6361/201322412},
+\href{https://arxiv.org/abs/1307.6748}{arXiv:1307.6748}
+
+\bibitem[\protect\citeauthoryear{Puchwein, Baldi \& Springel}{Puchwein et al.}{2013}]{Puchwein2013}
+Puchwein E., Baldi M., Springel V., 2013, MNRAS, 436, 348,
+\href{https://doi.org/10.1093/mnras/stt1575}{doi:10.1093/mnras/stt1575},
+\href{https://arxiv.org/abs/1305.2418}{arXiv:1305.2418}
+
+% --- Coupled DE references ---
+
+\bibitem[\protect\citeauthoryear{Amendola}{Amendola}{2000}]{Amendola2000}
+Amendola L., 2000, Phys.\ Rev.\ D, 62, 043511,
+\href{https://doi.org/10.1103/PhysRevD.62.043511}{doi:10.1103/PhysRevD.62.043511},
+\href{https://arxiv.org/abs/astro-ph/9908023}{arXiv:astro-ph/9908023}
+
+\bibitem[\protect\citeauthoryear{Amendola}{Amendola}{2004}]{Amendola2004}
+Amendola L., 2004, Phys.\ Rev.\ D, 69, 103524,
+\href{https://doi.org/10.1103/PhysRevD.69.103524}{doi:10.1103/PhysRevD.69.103524},
+\href{https://arxiv.org/abs/astro-ph/0311175}{arXiv:astro-ph/0311175}
+
+\bibitem[\protect\citeauthoryear{Pettorino \& Baccigalupi}{Pettorino \& Baccigalupi}{2008}]{Pettorino2008}
+Pettorino V., Baccigalupi C., 2008, Phys.\ Rev.\ D, 77, 103003,
+\href{https://doi.org/10.1103/PhysRevD.77.103003}{doi:10.1103/PhysRevD.77.103003},
+\href{https://arxiv.org/abs/0802.0086}{arXiv:0802.0086}
+
+% --- Early Dark Energy references ---
+
+\bibitem[\protect\citeauthoryear{Doran \& Robbers}{Doran \& Robbers}{2006}]{DoranRobbers2006}
+Doran M., Robbers G., 2006, J.\ Cosmol.\ Astropart.\ Phys., 2006, 026,
+\href{https://doi.org/10.1088/1475-7516/2006/06/026}{doi:10.1088/1475-7516/2006/06/026},
+\href{https://arxiv.org/abs/astro-ph/0601544}{arXiv:astro-ph/0601544}
+
+\bibitem[\protect\citeauthoryear{Poulin et al.}{Poulin et al.}{2019}]{Poulin2019}
+Poulin V., Smith T.~L., Karwal T., Kamionkowski M., 2019, Phys.\ Rev.\ Lett., 122, 221301,
+\href{https://doi.org/10.1103/PhysRevLett.122.221301}{doi:10.1103/PhysRevLett.122.221301},
+\href{https://arxiv.org/abs/1811.04083}{arXiv:1811.04083}
+
+\bibitem[\protect\citeauthoryear{Hill et al.}{Hill et al.}{2020}]{Hill2020}
+Hill J.~C., McDonough E., Toomey M.~W., Alexander S., 2020, Phys.\ Rev.\ D, 102, 043507,
+\href{https://doi.org/10.1103/PhysRevD.102.043507}{doi:10.1103/PhysRevD.102.043507},
+\href{https://arxiv.org/abs/2003.07355}{arXiv:2003.07355}
+
+\bibitem[\protect\citeauthoryear{Smith \& Poulin}{Smith \& Poulin}{2020}]{Smith2020}
+Smith T.~L., Poulin V., 2020, Phys.\ Rev.\ D, 101, 063523,
+\href{https://doi.org/10.1103/PhysRevD.101.063523}{doi:10.1103/PhysRevD.101.063523},
+\href{https://arxiv.org/abs/2009.10740}{arXiv:2009.10740}
+
 \end{thebibliography}
 
 
@@ -1241,6 +2323,14 @@ Parameter & Namelist & Type & Default & Description \\
 \code{sidm}             & \code{\&RUN\_PARAMS}      & logical & F   & Enable SIDM scattering \\
 \code{use\_neutrino}    & \code{\&RUN\_PARAMS}      & logical & F   & Enable neutrino linear response \\
 \code{de\_perturb}      & \code{\&RUN\_PARAMS}      & logical & F   & Enable DE perturbation \\
+\code{use\_mond}        & \code{\&RUN\_PARAMS}      & logical & F   & Enable QUMOND \\
+\code{use\_fR}          & \code{\&RUN\_PARAMS}      & logical & F   & Enable $f(R)$ gravity \\
+\code{use\_nDGP}        & \code{\&RUN\_PARAMS}      & logical & F   & Enable nDGP gravity \\
+\code{use\_symmetron}   & \code{\&RUN\_PARAMS}      & logical & F   & Enable Symmetron gravity \\
+\code{use\_dilaton}     & \code{\&RUN\_PARAMS}      & logical & F   & Enable Dilaton gravity \\
+\code{use\_galileon}    & \code{\&RUN\_PARAMS}      & logical & F   & Enable cubic Galileon gravity \\
+\code{use\_coupled\_de} & \code{\&RUN\_PARAMS}      & logical & F   & Enable coupled DE \\
+\code{use\_ede}         & \code{\&RUN\_PARAMS}      & logical & F   & Enable early DE \\
 \code{dump\_pk}         & \code{\&RUN\_PARAMS}      & logical & F   & Dump matter $P(k)$ at each output \\
 \midrule
 \multicolumn{5}{l}{\emph{CPL dark energy (\code{\&CPL\_PARAMS})}} \\
@@ -1255,6 +2345,54 @@ Parameter & Namelist & Type & Default & Description \\
 \midrule
 \multicolumn{5}{l}{\emph{SIDM (\code{\&SIDM\_PARAMS})}} \\
 \multicolumn{5}{l}{See Table~\ref{tab:sidm_params}} \\
+\midrule
+\multicolumn{5}{l}{\emph{MOND (\code{\&MOND\_PARAMS})}} \\
+\code{a0\_mond}        & \code{\&MOND\_PARAMS}     & real    & $1.2\times10^{-8}$ & $\azero$ [cm\,s$^{-2}$] \\
+\code{mond\_mu\_type}  & \code{\&MOND\_PARAMS}     & integer & 1   & $\nu$/$\mu$-function: 1=simple, 2=standard \\
+\code{mond\_type}      & \code{\&MOND\_PARAMS}     & integer & 0   & 0=algebraic, 1=QUMOND, 2=AQUAL \\
+\code{n\_iter\_mond}   & \code{\&MOND\_PARAMS}     & integer & 10  & Max AQUAL iterations \\
+\code{mond\_eps}       & \code{\&MOND\_PARAMS}     & real    & $10^{-6}$ & AQUAL convergence threshold \\
+\code{g\_ext\_mond}    & \code{\&MOND\_PARAMS}     & real(3) & 0,0,0 & External field (EFE) [cm\,s$^{-2}$] \\
+\midrule
+\multicolumn{5}{l}{\emph{$f(R)$ Hu--Sawicki (\code{\&FR\_PARAMS})}} \\
+\code{fR0}             & \code{\&FR\_PARAMS}       & real    & $-10^{-6}$ & $f_{R,0}$ amplitude ($<0$) \\
+\code{fR\_n}           & \code{\&FR\_PARAMS}       & integer & 1   & Hu--Sawicki index \\
+\code{n\_iter\_fR}     & \code{\&FR\_PARAMS}       & integer & 20  & Max N-GS iterations \\
+\code{fR\_eps}         & \code{\&FR\_PARAMS}       & real    & $10^{-6}$ & Convergence threshold \\
+\midrule
+\multicolumn{5}{l}{\emph{nDGP (\code{\&NDGP\_PARAMS})}} \\
+\code{omega\_rc}       & \code{\&NDGP\_PARAMS}     & real    & 0.25 & $\Omega_{r_c}$ \\
+\code{nDGP\_branch}    & \code{\&NDGP\_PARAMS}     & integer & $+1$ & $+1$=normal, $-1$=self-accel. \\
+\code{n\_iter\_nDGP}   & \code{\&NDGP\_PARAMS}     & integer & 20  & Max N-GS iterations \\
+\code{nDGP\_eps}       & \code{\&NDGP\_PARAMS}     & real    & $10^{-6}$ & Convergence threshold \\
+\midrule
+\multicolumn{5}{l}{\emph{Symmetron (\code{\&SYMMETRON\_PARAMS})}} \\
+\code{a\_ssb}          & \code{\&SYMMETRON\_PARAMS} & real   & 0.5 & SSB scale factor \\
+\code{beta\_symmetron} & \code{\&SYMMETRON\_PARAMS} & real   & 1.0 & Coupling strength \\
+\code{L\_symmetron}    & \code{\&SYMMETRON\_PARAMS} & real   & 1.0 & Range [Mpc/$h$] \\
+\code{n\_iter\_symmetron} & \code{\&SYMMETRON\_PARAMS} & integer & 20 & Max iterations \\
+\code{symmetron\_eps}  & \code{\&SYMMETRON\_PARAMS} & real   & $10^{-6}$ & Convergence threshold \\
+\midrule
+\multicolumn{5}{l}{\emph{Dilaton (\code{\&DILATON\_PARAMS})}} \\
+\code{beta\_dilaton}   & \code{\&DILATON\_PARAMS}  & real    & 1.0 & Coupling strength \\
+\code{L\_dilaton}      & \code{\&DILATON\_PARAMS}  & real    & 1.0 & Range [Mpc/$h$] \\
+\code{a0\_dilaton}     & \code{\&DILATON\_PARAMS}  & real    & 0.5 & Transition scale factor \\
+\code{n\_iter\_dilaton}& \code{\&DILATON\_PARAMS}  & integer & 20  & Max iterations \\
+\code{dilaton\_eps}    & \code{\&DILATON\_PARAMS}  & real    & $10^{-6}$ & Convergence threshold \\
+\midrule
+\multicolumn{5}{l}{\emph{Galileon (\code{\&GALILEON\_PARAMS})}} \\
+\code{c2\_galileon}    & \code{\&GALILEON\_PARAMS} & real    & $-1.0$ & Kinetic coefficient \\
+\code{c3\_galileon}    & \code{\&GALILEON\_PARAMS} & real    & 1.0 & Cubic coefficient \\
+\code{n\_iter\_galileon}& \code{\&GALILEON\_PARAMS}& integer & 20  & Max iterations \\
+\code{galileon\_eps}   & \code{\&GALILEON\_PARAMS} & real    & $10^{-6}$ & Convergence threshold \\
+\midrule
+\multicolumn{5}{l}{\emph{Coupled DE (\code{\&COUPLED\_DE\_PARAMS})}} \\
+\code{beta\_cde}       & \code{\&COUPLED\_DE\_PARAMS} & real & 0.1 & DM--DE coupling \\
+\midrule
+\multicolumn{5}{l}{\emph{Early DE (\code{\&EDE\_PARAMS})}} \\
+\code{omega\_ede}      & \code{\&EDE\_PARAMS}      & real    & 0.04 & EDE fraction \\
+\code{z\_ede}          & \code{\&EDE\_PARAMS}      & real    & 3000 & Injection redshift \\
+\code{w\_ede}          & \code{\&EDE\_PARAMS}      & real    & 1/3  & EDE equation of state \\
 \bottomrule
 \end{tabular}
 \end{table*}
