@@ -35,15 +35,22 @@ subroutine read_params
        & ,exchange_method &
        & ,use_neutrino &
        & ,sidm &
-       & ,de_perturb
+       & ,de_perturb &
+       & ,use_mond &
+       & ,use_fR &
+       & ,use_nDGP
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
+  namelist/fR_params/fR0,fR_n,n_iter_fR,fR_eps
+  namelist/nDGP_params/omega_rc,nDGP_branch,n_iter_nDGP,nDGP_eps
   namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
        & sidm_angular,sidm_epsilon, &
        & sidm_inelastic,sidm_delta,sidm_frac_excited
+  namelist/mond_params/a0_mond,mond_mu_type,mond_type, &
+       & n_iter_mond,mond_eps,g_ext_mond
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0
   namelist/output_params/noutput,foutput,fbackup,aout,tout,output_mode &
        & ,tend,delta_tout,aend,delta_aout,gadget_output,walltime_hrs,minutes_dump &
@@ -197,6 +204,21 @@ subroutine read_params
   rewind(1)
   read(1,NML=sidm_params,END=77)
 77 continue
+  rewind(1)
+  read(1,NML=mond_params,END=75)
+75 continue
+  ! f(R) parameters
+  if(use_fR) then
+     rewind(1)
+     read(1,NML=fR_params,END=74)
+74   continue
+  end if
+  ! nDGP parameters
+  if(use_nDGP) then
+     rewind(1)
+     read(1,NML=nDGP_params,END=73)
+73   continue
+  end if
 
   !-------------------------------------------------
   ! Read optional nrestart command-line argument
@@ -343,6 +365,134 @@ subroutine read_params
            write(*,'(A,ES10.3,A)') '   iSIDM: delta=', sidm_delta, ' keV'
            write(*,'(A,F6.3)')     '   frac_excited=', sidm_frac_excited
         end if
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! MOND (Modified Newtonian Dynamics)
+  !-------------------------------------------------
+  if(use_mond) then
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_mond=T requires poisson=T'
+        call clean_stop
+     end if
+     if(a0_mond <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: use_mond=T but a0_mond<=0'
+        call clean_stop
+     end if
+     if(mond_mu_type < 1 .or. mond_mu_type > 2) then
+        if(myid==1) write(*,*) 'ERROR: mond_mu_type must be 1 (simple) or 2 (standard)'
+        call clean_stop
+     end if
+     if(mond_type < 0 .or. mond_type > 2) then
+        if(myid==1) write(*,*) 'ERROR: mond_type must be 0, 1 (QUMOND), or 2 (AQUAL)'
+        call clean_stop
+     end if
+     if(mond_type == 2) then
+        if(n_iter_mond < 1) then
+           if(myid==1) write(*,*) 'ERROR: n_iter_mond must be >= 1'
+           call clean_stop
+        end if
+        if(mond_eps <= 0d0) then
+           if(myid==1) write(*,*) 'ERROR: mond_eps must be > 0'
+           call clean_stop
+        end if
+     end if
+     ! Warn if DM particles likely present
+     if(pic) then
+        if(myid==1) then
+           write(*,'(A)') ' WARNING: use_mond=T with pic=T (DM particles likely present)'
+           write(*,'(A)') '   MOND replaces DM — running both gives excess gravity.'
+           write(*,'(A)') '   Use DM-free ICs or set pic=.false. for pure MOND.'
+        end if
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' MOND (QUMOND) enabled:'
+        write(*,'(A,ES12.4,A)') '   a0 = ', a0_mond, ' cm/s^2'
+        if(mond_mu_type==1) then
+           write(*,'(A)') '   mu-function: simple [mu=x/(1+x)]'
+        else
+           write(*,'(A)') '   mu-function: standard [mu=x/sqrt(1+x^2)]'
+        end if
+        if(mond_type==0) then
+           write(*,'(A)') '   mode: algebraic QUMOND (Phase 0)'
+        else if(mond_type==1) then
+           write(*,'(A)') '   mode: full QUMOND with phantom density (Phase 1)'
+        else
+           write(*,'(A,I3,A,ES10.3)') &
+                '   mode: AQUAL iterative (Phase 2), max_iter=', n_iter_mond, &
+                ' eps=', mond_eps
+        end if
+        if(g_ext_mond(1)**2+g_ext_mond(2)**2+g_ext_mond(3)**2 > 0d0) then
+           write(*,'(A,3ES12.4,A)') '   g_ext = (', g_ext_mond, ') cm/s^2'
+        end if
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! f(R) Hu-Sawicki gravity
+  !-------------------------------------------------
+  if(use_fR) then
+     ! Mutual exclusion checks
+     if(use_nDGP) then
+        if(myid==1) write(*,*) 'ERROR: Cannot use both f(R) and nDGP simultaneously'
+        call clean_stop
+     end if
+     if(use_mond) then
+        if(myid==1) write(*,*) 'ERROR: Cannot use both f(R) and MOND simultaneously'
+        call clean_stop
+     end if
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: f(R) gravity requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_fR=T requires poisson=T'
+        call clean_stop
+     end if
+     if(fR0 >= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: fR0 must be negative'
+        call clean_stop
+     end if
+     if(fR_n < 1) then
+        if(myid==1) write(*,*) 'ERROR: fR_n must be >= 1'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' f(R) Hu-Sawicki gravity enabled'
+        write(*,'(A,ES10.3,A,I2)') '   fR0=', fR0, '  n=', fR_n
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_fR, '  eps=', fR_eps
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! nDGP gravity
+  !-------------------------------------------------
+  if(use_nDGP) then
+     if(use_mond) then
+        if(myid==1) write(*,*) 'ERROR: Cannot use both nDGP and MOND simultaneously'
+        call clean_stop
+     end if
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'ERROR: nDGP gravity requires cosmo=.true.'
+        call clean_stop
+     end if
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_nDGP=T requires poisson=T'
+        call clean_stop
+     end if
+     if(omega_rc <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: omega_rc must be > 0'
+        call clean_stop
+     end if
+     if(abs(nDGP_branch) /= 1) then
+        if(myid==1) write(*,*) 'ERROR: nDGP_branch must be 1 or -1'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' nDGP gravity enabled'
+        write(*,'(A,ES10.3,A,I2)') '   omega_rc=', omega_rc, '  branch=', nDGP_branch
+        write(*,'(A,I3,A,ES10.3)') '   max_iter=', n_iter_nDGP, '  eps=', nDGP_eps
      end if
   end if
 

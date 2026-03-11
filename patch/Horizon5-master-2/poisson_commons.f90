@@ -47,6 +47,10 @@ module poisson_commons
   real(dp), allocatable :: mg_ri_coarse_rhs(:)
   real(dp), allocatable :: mg_ri_coarse_phi(:)
 
+  ! Modified gravity scalar field (f_R or phi_nDGP)
+  real(dp),allocatable,dimension(:)  ::scalar_gr       ! Scalar field
+  real(dp),allocatable,dimension(:)  ::scalar_gr_old   ! Previous step (initial guess)
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

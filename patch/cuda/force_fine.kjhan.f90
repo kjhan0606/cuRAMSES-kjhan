@@ -157,6 +157,11 @@ subroutine force_fine(ilevel,icount)
      end do
 #endif
 
+     ! Apply MOND (QUMOND) correction to Newtonian force
+     if(use_mond .and. mond_type == 0) then
+        call apply_mond_force(ilevel)
+     end if
+
      do idim=1,ndim
         call make_virtual_fine_dp(f(1,idim),ilevel)
      end do
@@ -565,3 +570,1219 @@ subroutine gradient_phi(ilevel,igrid,ngrid,icount)
   end do
 
 end subroutine gradient_phi
+!#########################################################
+!#########################################################
+subroutine apply_mond_force(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  !-------------------------------------------------------
+  ! QUMOND: multiply Newtonian force by nu(|g_N+g_ext|/a0)
+  ! With EFE: f_d = nu * f_d + (nu-1) * g_ext_d
+  !-------------------------------------------------------
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  real(dp)::scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2
+  real(dp)::scale_a,a0_code,gnorm,x,nu
+  real(dp)::g_ext_code(1:3)
+  integer,dimension(1:nvector)::ind_cell
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Convert a0 and g_ext from CGS to code units
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+  scale_a = scale_l / scale_t**2
+  a0_code = a0_mond / scale_a
+  g_ext_code(1:3) = g_ext_mond(1:3) / scale_a
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim,ind_cell, &
+!$omp&  gnorm,x,nu) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell(i)=iskip+active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        do i=1,ngrid
+           gnorm = sqrt((f(ind_cell(i),1)+g_ext_code(1))**2 &
+                      + (f(ind_cell(i),2)+g_ext_code(2))**2 &
+                      + (f(ind_cell(i),3)+g_ext_code(3))**2)
+
+           if(gnorm > 1d-30*a0_code) then
+              x = gnorm / a0_code
+              ! Compute nu-function
+              if(mond_mu_type == 1) then
+                 nu = 0.5d0 + 0.5d0*sqrt(1d0 + 4d0/x)
+              else
+                 nu = sqrt(0.5d0 + 0.5d0*sqrt(1d0 + 4d0/(x*x)))
+              end if
+              ! f_d = nu * f_d + (nu-1) * g_ext_d
+              do idim=1,ndim
+                 f(ind_cell(i),idim) = nu * f(ind_cell(i),idim) &
+                      + (nu - 1d0) * g_ext_code(idim)
+              end do
+           end if
+        end do
+     end do
+  end do
+
+end subroutine apply_mond_force
+!#########################################################
+!#########################################################
+subroutine compute_mond_phantom_density(ilevel, is_aqual)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  logical,intent(in)::is_aqual
+  !-------------------------------------------------------
+  ! Compute phantom density and add to rho() in-place.
+  !
+  ! QUMOND (is_aqual=.false.):
+  !   rho_ph = -div[(nu-1)*(f+g_ext)] / fourpi  (nu-1 > 0)
+  ! AQUAL (is_aqual=.true.):
+  !   rho_ph = +div[(mu-1)*(f+g_ext)] / fourpi  (mu-1 < 0)
+  !
+  ! Uses f() (force, already boundary-exchanged)
+  ! with 6-neighbor centered difference for divergence.
+  ! Cells at coarse-fine boundaries (igridn=0) are skipped.
+  !-------------------------------------------------------
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  real(dp)::scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2
+  real(dp)::scale_a,a0_code
+  real(dp)::g_ext_code(1:3)
+  real(dp)::dx,scale,dx_loc,fourpi
+  integer::nx_loc
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::gnorm_nb,x_nb,func_m1
+  real(dp)::h_right,h_left,div_h
+  logical::skip_cell
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Unit conversion
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+  scale_a = scale_l / scale_t**2
+  a0_code = a0_mond / scale_a
+  g_ext_code(1:3) = g_ext_mond(1:3) / scale_a
+
+  ! Mesh size
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+
+  ! 4piG factor (same convention as force_fine)
+  fourpi=4.0D0*ACOS(-1.0D0)
+  if(cosmo)fourpi=1.5D0*omega_m*aexp
+
+  ! Neighbor lookup tables (left=1, right=2 per dimension)
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right, &
+!$omp&  gnorm_nb,x_nb,func_m1, &
+!$omp&  h_right,h_left,div_h,skip_cell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     ! Gather neighboring grids (6 faces)
+     do i=1,ngrid
+        igridn_w(i,0)=ind_grid_w(i)
+     end do
+     do idim=1,ndim
+        do i=1,ngrid
+           igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+           igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+        end do
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell_w(i)=iskip+ind_grid_w(i)
+        end do
+
+        do i=1,ngrid
+           ! Check if all neighbors exist (skip at coarse-fine boundaries)
+           skip_cell=.false.
+           do idim=1,ndim
+              ig_left =ggg(idim,1,ind)
+              ig_right=ggg(idim,2,ind)
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) then
+                 skip_cell=.true.
+                 exit
+              end if
+           end do
+           if(skip_cell) cycle
+
+           ! Compute divergence of (func-1)*(f+g_ext)
+           div_h = 0d0
+           do idim=1,ndim
+              ig_left =ggg(idim,1,ind)
+              ig_right=ggg(idim,2,ind)
+              ih_left =ncoarse+(hhh(idim,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(idim,2,ind)-1)*ngridmax
+
+              ind_nb_left =igridn_w(i,ig_left )+ih_left
+              ind_nb_right=igridn_w(i,ig_right)+ih_right
+
+              ! Left neighbor
+              gnorm_nb = sqrt((f(ind_nb_left,1)+g_ext_code(1))**2 &
+                            + (f(ind_nb_left,2)+g_ext_code(2))**2 &
+                            + (f(ind_nb_left,3)+g_ext_code(3))**2)
+              x_nb = gnorm_nb / a0_code
+              if(is_aqual) then
+                 call get_mond_mu_minus1(x_nb, mond_mu_type, func_m1)
+              else
+                 call get_mond_nu_minus1(x_nb, mond_mu_type, func_m1)
+              end if
+              h_left = func_m1 * (f(ind_nb_left, idim) + g_ext_code(idim))
+
+              ! Right neighbor
+              gnorm_nb = sqrt((f(ind_nb_right,1)+g_ext_code(1))**2 &
+                            + (f(ind_nb_right,2)+g_ext_code(2))**2 &
+                            + (f(ind_nb_right,3)+g_ext_code(3))**2)
+              x_nb = gnorm_nb / a0_code
+              if(is_aqual) then
+                 call get_mond_mu_minus1(x_nb, mond_mu_type, func_m1)
+              else
+                 call get_mond_nu_minus1(x_nb, mond_mu_type, func_m1)
+              end if
+              h_right = func_m1 * (f(ind_nb_right, idim) + g_ext_code(idim))
+
+              div_h = div_h + (h_right - h_left)
+           end do
+
+           ! QUMOND: rho_ph = -div[(nu-1)*(f+g_ext)] / (2*dx) / fourpi
+           ! AQUAL:  rho_ph = +div[(mu-1)*(f+g_ext)] / (2*dx) / fourpi
+           if(is_aqual) then
+              rho(ind_cell_w(i)) = rho(ind_cell_w(i)) + div_h / (2d0*dx_loc) / fourpi
+           else
+              rho(ind_cell_w(i)) = rho(ind_cell_w(i)) - div_h / (2d0*dx_loc) / fourpi
+           end if
+
+        end do  ! i
+     end do  ! ind
+  end do  ! igrid
+
+end subroutine compute_mond_phantom_density
+!#########################################################
+!#########################################################
+subroutine get_mond_nu_minus1(x, mu_type, num1)
+  use amr_parameters, only: dp
+  implicit none
+  real(dp),intent(in)::x
+  integer,intent(in)::mu_type
+  real(dp),intent(out)::num1
+  ! Returns nu(x) - 1 for MOND interpolation function
+  if(x < 1d-30) then
+     num1 = 0d0
+     return
+  end if
+  if(mu_type == 1) then
+     ! Simple: mu=x/(1+x) -> nu = 0.5*(1+sqrt(1+4/x))
+     num1 = 0.5d0*(-1d0 + sqrt(1d0 + 4d0/x))
+  else
+     ! Standard: mu=x/sqrt(1+x^2) -> nu = sqrt(0.5+0.5*sqrt(1+4/x^2))
+     num1 = sqrt(0.5d0 + 0.5d0*sqrt(1d0 + 4d0/(x*x))) - 1d0
+  end if
+end subroutine get_mond_nu_minus1
+!#########################################################
+!#########################################################
+subroutine get_mond_mu_minus1(x, mu_type, mum1)
+  use amr_parameters, only: dp
+  implicit none
+  real(dp),intent(in)::x
+  integer,intent(in)::mu_type
+  real(dp),intent(out)::mum1
+  ! Returns mu(x) - 1 for MOND interpolation function
+  ! mu(x) - 1 < 0 always (mu < 1 in deep-MOND)
+  if(x < 1d-30) then
+     mum1 = -1d0   ! mu(0) = 0
+     return
+  end if
+  if(mu_type == 1) then
+     ! Simple: mu=x/(1+x) -> mu-1 = -1/(1+x)
+     mum1 = -1d0 / (1d0 + x)
+  else
+     ! Standard: mu=x/sqrt(1+x^2) -> mu-1 = x/sqrt(1+x^2) - 1
+     mum1 = x / sqrt(1d0 + x*x) - 1d0
+  end if
+end subroutine get_mond_mu_minus1
+!#########################################################
+!#########################################################
+subroutine aqual_iterate(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer, intent(in) :: ilevel, icount
+  !-------------------------------------------------------
+  ! AQUAL Phase 2: iterative fixed-point solver
+  ! Solves: div[mu(|grad(Phi)|/a0) * grad(Phi)] = 4piG*rho
+  ! by iterating:
+  !   1. Compute AQUAL phantom density from current forces
+  !   2. Re-solve Poisson with rho_bary + rho_phantom
+  !   3. Re-compute forces
+  !   4. Check convergence: max|f_new - f_old| / max|f_new|
+  !-------------------------------------------------------
+  integer :: iter, ncache, ind, iskip, i, idx, idim, info
+  real(dp) :: delta_f_local, f_norm_local
+  real(dp) :: delta_f_global, f_norm_global, rel_change
+  logical :: converged
+
+  real(dp), allocatable :: rho_bary(:)
+  real(dp), allocatable :: f_old(:,:)
+  integer :: ncell_active
+  integer, allocatable :: ind_cell_list(:)
+
+  ncache = active(ilevel)%ngrid
+  if(ncache == 0) return
+
+  ncell_active = ncache * twotondim
+  allocate(rho_bary(1:ncell_active))
+  allocate(f_old(1:ncell_active, 1:ndim))
+  allocate(ind_cell_list(1:ncell_active))
+
+  ! Build cell list and save rho_bary
+  idx = 0
+  do ind = 1, twotondim
+     iskip = ncoarse + (ind-1) * ngridmax
+     do i = 1, ncache
+        idx = idx + 1
+        ind_cell_list(idx) = iskip + active(ilevel)%igrid(i)
+        rho_bary(idx) = rho(ind_cell_list(idx))
+     end do
+  end do
+
+  ! Save current forces (Newtonian) as f_old
+  do idx = 1, ncell_active
+     do idim = 1, ndim
+        f_old(idx, idim) = f(ind_cell_list(idx), idim)
+     end do
+  end do
+
+  converged = .false.
+  do iter = 1, n_iter_mond
+
+     ! (a) Restore rho to baryonic
+     do idx = 1, ncell_active
+        rho(ind_cell_list(idx)) = rho_bary(idx)
+     end do
+
+     ! (b) Compute AQUAL phantom density (mu-1, current forces)
+     call compute_mond_phantom_density(ilevel, .true.)
+     call make_virtual_fine_dp(rho(1), ilevel)
+
+     ! (c) Re-solve Poisson
+     if(ilevel > levelmin) then
+        if(ilevel .ge. cg_levelmin) then
+           call phi_fine_cg(ilevel, icount)
+        else
+           call multigrid_fine(ilevel, icount)
+        end if
+     else
+        call multigrid_fine(levelmin, icount)
+     end if
+
+     ! (d) Re-compute forces
+     call force_fine(ilevel, icount)
+
+     ! (e) Convergence check
+     delta_f_local = 0d0
+     f_norm_local = 0d0
+!$omp parallel do private(idx, idim) &
+!$omp& reduction(max:delta_f_local, f_norm_local)
+     do idx = 1, ncell_active
+        do idim = 1, ndim
+           delta_f_local = max(delta_f_local, &
+                abs(f(ind_cell_list(idx), idim) - f_old(idx, idim)))
+           f_norm_local = max(f_norm_local, &
+                abs(f(ind_cell_list(idx), idim)))
+        end do
+     end do
+
+     ! Save forces for next convergence check
+     do idx = 1, ncell_active
+        do idim = 1, ndim
+           f_old(idx, idim) = f(ind_cell_list(idx), idim)
+        end do
+     end do
+
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(delta_f_local, delta_f_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(f_norm_local, f_norm_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     delta_f_global = delta_f_local
+     f_norm_global = f_norm_local
+#endif
+
+     if(f_norm_global > 0d0) then
+        rel_change = delta_f_global / f_norm_global
+     else
+        rel_change = 0d0
+     end if
+
+     if(myid == 1) then
+        write(*,'(A,I3,A,ES12.4)') &
+             ' AQUAL iter ', iter, ': delta_f/f_norm = ', rel_change
+     end if
+
+     if(rel_change < mond_eps) then
+        converged = .true.
+        if(myid == 1) write(*,'(A,I3,A)') &
+             ' AQUAL converged in ', iter, ' iterations'
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid == 1) then
+     write(*,'(A,I3,A,ES12.4)') &
+          ' WARNING: AQUAL did NOT converge after ', n_iter_mond, &
+          ' iters, rel_change=', rel_change
+  end if
+
+  deallocate(rho_bary, f_old, ind_cell_list)
+end subroutine aqual_iterate
+!#########################################################
+!#########################################################
+! f(R) Hu-Sawicki gravity + nDGP gravity solvers
+!#########################################################
+!#########################################################
+
+!=========================================================
+! compute_fifth_force: add gradient of scalar_gr to f()
+! factor = -0.5 for f(R), -1/(2*beta) for nDGP
+!=========================================================
+subroutine compute_fifth_force(ilevel, factor)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(in)::factor
+  !-------------------------------------------------------
+  ! Compute F5_d = factor * (scalar_gr(right)-scalar_gr(left))/(2*dx)
+  ! and add to f(icell, idim).
+  ! Uses simple 2-point centered difference (same as rho divergence).
+  !-------------------------------------------------------
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc
+  integer::nx_loc
+  real(dp)::grad_u
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+
+  ! Neighbor lookup tables (left=1, right=2)
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right,grad_u) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     ngrid=MIN(nvector,ncache-igrid+1)
+     do i=1,ngrid
+        ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+     end do
+
+     ! Gather neighboring grids
+     do i=1,ngrid
+        igridn_w(i,0)=ind_grid_w(i)
+     end do
+     do idim=1,ndim
+        do i=1,ngrid
+           igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+           igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+        end do
+     end do
+
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,ngrid
+           ind_cell_w(i)=iskip+ind_grid_w(i)
+        end do
+
+        do i=1,ngrid
+           do idim=1,ndim
+              ig_left =ggg(idim,1,ind)
+              ig_right=ggg(idim,2,ind)
+
+              ! Skip at coarse-fine boundaries
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+
+              ih_left =ncoarse+(hhh(idim,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(idim,2,ind)-1)*ngridmax
+
+              ind_nb_left =igridn_w(i,ig_left )+ih_left
+              ind_nb_right=igridn_w(i,ig_right)+ih_right
+
+              grad_u = (scalar_gr(ind_nb_right) - scalar_gr(ind_nb_left)) / (2d0*dx_loc)
+              f(ind_cell_w(i),idim) = f(ind_cell_w(i),idim) + factor * grad_u
+           end do
+        end do
+     end do
+  end do
+
+end subroutine compute_fifth_force
+
+!=========================================================
+! fR_background: compute background Ricci scalar and f_R
+!=========================================================
+subroutine fR_background(aa, R_bar, fR_bar)
+  use amr_parameters, only: dp, omega_m, omega_l, fR0, fR_n
+  implicit none
+  real(dp),intent(in) ::aa
+  real(dp),intent(out)::R_bar, fR_bar
+  !-------------------------------------------------------
+  ! R_bar = 3*H0^2*(Omega_m/a^3 + 4*Omega_Lambda)
+  ! In code units where H0=1:
+  !   R_bar = 3*(omega_m/a^3 + 4*omega_l)
+  ! f_R_bar = -|fR0| * n * (R_bar0/R_bar)^(n+1)
+  !   where R_bar0 = R_bar(a=1)
+  !-------------------------------------------------------
+  real(dp)::R_bar0
+  integer::np1
+
+  np1 = fR_n + 1
+  R_bar  = 3d0 * (omega_m / aa**3 + 4d0 * omega_l)
+  R_bar0 = 3d0 * (omega_m + 4d0 * omega_l)
+  fR_bar = fR0 * dble(fR_n) * (R_bar0 / R_bar)**np1
+
+end subroutine fR_background
+
+!=========================================================
+! fR_solve_level: top-level f(R) solver for one AMR level
+!=========================================================
+subroutine fR_solve_level(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel, icount
+  !-------------------------------------------------------
+  ! 1. Initialize scalar_gr to background fR_bar
+  ! 2. Newton-GS iteration
+  ! 3. Add fifth force F5 = -0.5 * grad(fR)
+  !-------------------------------------------------------
+  integer::iter,ncache,info
+  real(dp)::R_bar,fR_bar
+  real(dp)::res_max_local,res_max_global
+  real(dp)::src_max_local,src_max_global
+  real(dp)::rel_res
+  logical::converged
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Get background values
+  call fR_background(aexp, R_bar, fR_bar)
+
+  ! Initialize scalar_gr to background value on first call
+  ! (scalar_gr_old provides a warm start from previous step)
+  if(nstep==0) then
+     call fR_init_scalar(ilevel, fR_bar)
+  end if
+
+  ! Newton-GS relaxation
+  converged = .false.
+  do iter=1,n_iter_fR
+
+     call fR_gauss_seidel(ilevel, R_bar, fR_bar, res_max_local, src_max_local)
+
+     ! Exchange boundaries after each sweep
+     call make_virtual_fine_dp(scalar_gr(1), ilevel)
+
+     ! Global convergence check
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(res_max_local, res_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(src_max_local, src_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     res_max_global = res_max_local
+     src_max_global = src_max_local
+#endif
+
+     if(src_max_global > 0d0) then
+        rel_res = res_max_global / src_max_global
+     else
+        rel_res = 0d0
+     end if
+
+     if(rel_res < fR_eps) then
+        converged = .true.
+        if(myid==1) write(*,'(A,I2,A,I3,A,ES10.3)') &
+             ' f(R) level ',ilevel,' converged in ',iter,' iters, res=',rel_res
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid==1) then
+     write(*,'(A,I2,A,I3,A,ES10.3)') &
+          ' WARNING: f(R) level ',ilevel,' NOT converged after ', &
+          n_iter_fR,' iters, res=',rel_res
+  end if
+
+  ! Save scalar_gr for warm start next step
+  call fR_save_old(ilevel)
+
+  ! Add fifth force: F5 = -(1/2) * grad(fR)
+  call compute_fifth_force(ilevel, -0.5d0)
+
+  ! Exchange f boundaries (force_fine will do this later, but be safe)
+  ! (No — force boundaries are exchanged by the caller in amr_step)
+
+end subroutine fR_solve_level
+
+!=========================================================
+! fR_init_scalar: initialize scalar_gr at a level
+!=========================================================
+subroutine fR_init_scalar(ilevel, fR_bar)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(in)::fR_bar
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr(icell) = fR_bar
+           scalar_gr_old(icell) = fR_bar
+        end do
+     end do
+  end do
+
+end subroutine fR_init_scalar
+
+!=========================================================
+! fR_save_old: save scalar_gr → scalar_gr_old
+!=========================================================
+subroutine fR_save_old(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr_old(icell) = scalar_gr(icell)
+        end do
+     end do
+  end do
+
+end subroutine fR_save_old
+
+!=========================================================
+! fR_gauss_seidel: one Newton-GS sweep for f(R) equation
+! ∇²f_R = -(a²/3)[R(f_R) - R_bar] + (a²/3)*8πG*δρ
+!
+! In RAMSES code units (H0=1, fourpi=1.5*Ωm*a):
+!   ∇²f_R = -(a²/3)*[R(f_R) - R_bar] + 2*a*Ωm*δρ/ρ_bar
+!
+! Hu-Sawicki inversion: R(f_R) from f_R ↔ R relation
+!=========================================================
+subroutine fR_gauss_seidel(ilevel, R_bar, fR_bar, res_max, src_max)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(in)::R_bar, fR_bar
+  real(dp),intent(out)::res_max, src_max
+  !-------------------------------------------------------
+  ! Newton-GS update: u_new = u - F/J
+  !   F = laplacian(u) - source(u)
+  !   J = -6/dx² - dS/du
+  ! Red-black ordering
+  !-------------------------------------------------------
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc,dx2,dx2_inv
+  integer::nx_loc
+  real(dp)::u_c,lapl,source,R_of_u,dR_du,residual,jacobian,delta_u
+  real(dp)::a2_over_3,rho_bar
+  real(dp)::R_bar0
+  integer::np1,icolor
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) then
+     res_max=0d0; src_max=0d0
+     return
+  end if
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx2=dx_loc**2
+  dx2_inv=1d0/dx2
+
+  np1 = fR_n + 1
+  a2_over_3 = aexp**2 / 3d0
+  R_bar0 = 3d0 * (omega_m + 4d0 * omega_l)
+  ! Mean density in code units: ρ_bar = Ω_m / a^3 (with H0=1)
+  rho_bar = omega_m / aexp**3
+
+  ! Neighbor lookup
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+  res_max = 0d0
+  src_max = 0d0
+
+  ! Red-black sweep (icolor=0: red, icolor=1: black)
+  do icolor=0,1
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right, &
+!$omp&  u_c,lapl,source,R_of_u,dR_du,residual,jacobian,delta_u) &
+!$omp& reduction(max:res_max,src_max) schedule(dynamic)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        ! Gather neighbors
+        do i=1,ngrid
+           igridn_w(i,0)=ind_grid_w(i)
+        end do
+        do idim=1,ndim
+           do i=1,ngrid
+              igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+              igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+           end do
+        end do
+
+        do ind=1,twotondim
+           ! Red-black coloring
+           if(mod(ind-1, 2) /= icolor) cycle
+
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell_w(i)=iskip+ind_grid_w(i)
+           end do
+
+           do i=1,ngrid
+              ! Check all neighbors exist
+              ig_left =ggg(1,1,ind)
+              ig_right=ggg(1,2,ind)
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+              ig_left =ggg(2,1,ind)
+              ig_right=ggg(2,2,ind)
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+              ig_left =ggg(3,1,ind)
+              ig_right=ggg(3,2,ind)
+              if(igridn_w(i,ig_left)==0 .or. igridn_w(i,ig_right)==0) cycle
+
+              u_c = scalar_gr(ind_cell_w(i))
+
+              ! Compute Laplacian
+              lapl = 0d0
+              do idim=1,ndim
+                 ig_left =ggg(idim,1,ind)
+                 ig_right=ggg(idim,2,ind)
+                 ih_left =ncoarse+(hhh(idim,1,ind)-1)*ngridmax
+                 ih_right=ncoarse+(hhh(idim,2,ind)-1)*ngridmax
+                 ind_nb_left =igridn_w(i,ig_left )+ih_left
+                 ind_nb_right=igridn_w(i,ig_right)+ih_right
+                 lapl = lapl + (scalar_gr(ind_nb_left) + scalar_gr(ind_nb_right) - 2d0*u_c) * dx2_inv
+              end do
+
+              ! R(f_R) from Hu-Sawicki inversion:
+              ! f_R = fR0 * n * (R_bar0/R)^(n+1)
+              ! → R = R_bar0 * (n*fR0/f_R)^(1/(n+1))
+              ! Since fR0<0 and f_R<0, use absolute values
+              if(abs(u_c) > 1d-30*abs(fR0)) then
+                 R_of_u = R_bar0 * (dble(fR_n)*abs(fR0)/abs(u_c))**(1d0/dble(np1))
+              else
+                 R_of_u = R_bar  ! fallback to background
+              end if
+
+              ! Source = -(a²/3)*[R(fR) - R_bar] + (a²/3)*8πG*δρ
+              ! In code units: δρ/ρ_bar = rho(cell)/rho_bar - 1
+              ! and 8πG*ρ_bar = 3*Ω_m*H0²/a³ = 3*omega_m/a³  (H0=1)
+              ! So (a²/3)*8πG*δρ = a²*omega_m/a³ * (rho(cell)/rho_bar - 1)
+              !                  = omega_m/(a) * (ρ/ρ_bar - 1)
+              ! But rho() in RAMSES code is overdensity: rho_code = ρ/ρ_bar - 1 when fourpi is set properly
+              ! Actually, in super-comoving coords, the Poisson source is:
+              !   ∇²Φ = 1.5*Ωm*a * (ρ/ρ_bar - 1) = fourpi * δ
+              ! So for f(R): source = -a²/3*(R(fR) - R_bar) + 2*fourpi/3 * δ
+              !   where fourpi = 1.5*Ωm*a and δ = rho(cell) (already overdensity)
+              source = -a2_over_3*(R_of_u - R_bar) + a2_over_3 * 2d0 * 1.5d0 * omega_m * aexp * rho(ind_cell_w(i))
+
+              ! Residual: F = laplacian - source
+              residual = lapl - source
+
+              ! Jacobian of source w.r.t. u_c:
+              ! dS/du = -(a²/3) * dR/dfR
+              ! dR/dfR = -R/(n+1)/fR  (from the inversion formula)
+              if(abs(u_c) > 1d-30*abs(fR0)) then
+                 dR_du = -R_of_u / (dble(np1) * u_c)
+              else
+                 dR_du = 0d0
+              end if
+
+              ! Jacobian: J = -6/dx² - dSource/du = -6/dx² + (a²/3)*dR/du
+              jacobian = -6d0*dx2_inv + a2_over_3*dR_du
+
+              ! Newton update
+              if(abs(jacobian) > 1d-30) then
+                 delta_u = -residual / jacobian
+                 ! Clamp update to prevent overshoot
+                 if(abs(delta_u) > 0.5d0*abs(u_c) .and. abs(u_c) > 1d-30*abs(fR0)) then
+                    delta_u = sign(0.5d0*abs(u_c), delta_u)
+                 end if
+                 scalar_gr(ind_cell_w(i)) = u_c + delta_u
+                 ! Enforce f_R < 0 (physical constraint)
+                 if(scalar_gr(ind_cell_w(i)) > 0d0) scalar_gr(ind_cell_w(i)) = 0.5d0*u_c
+              end if
+
+              ! Track convergence
+              res_max = max(res_max, abs(residual))
+              src_max = max(src_max, abs(source))
+
+           end do  ! i
+        end do  ! ind
+     end do  ! igrid
+
+  end do  ! icolor
+
+end subroutine fR_gauss_seidel
+
+!=========================================================
+! nDGP_beta: compute β(a) parameter
+!=========================================================
+function nDGP_beta(aa, orc, branch) result(beta)
+  use amr_parameters, only: dp, omega_m, omega_l
+  implicit none
+  real(dp),intent(in)::aa, orc
+  integer,intent(in)::branch
+  real(dp)::beta
+  !-------------------------------------------------------
+  ! H(a) = H0 * sqrt(Ω_m/a³ + Ω_Λ)  [flat ΛCDM]
+  ! Ḣ/H² = -(3/2)*(Ω_m/a³)/(Ω_m/a³ + Ω_Λ)
+  ! r_c = 1/(2*sqrt(omega_rc)) / H0
+  ! β = 1 + branch * 2*H*r_c*(1 + Ḣ/(3H²))
+  !   = 1 + branch / sqrt(omega_rc) * sqrt(Ω_m/a³+Ω_Λ)
+  !         * (1 - (Ω_m/a³)/(2*(Ω_m/a³+Ω_Λ)))
+  !-------------------------------------------------------
+  real(dp)::Oma3, E2, Hdot_over_H2, HrC
+
+  Oma3 = omega_m / aa**3
+  E2   = Oma3 + omega_l          ! H²/H0²
+  Hdot_over_H2 = -1.5d0 * Oma3 / E2
+  ! H*r_c = sqrt(E2)/H0 * 1/(2*sqrt(omega_rc)*H0) = sqrt(E2)/(2*sqrt(omega_rc))
+  HrC = sqrt(E2) / (2d0 * sqrt(orc))
+  beta = 1d0 + dble(branch) * 2d0 * HrC * (1d0 + Hdot_over_H2 / 3d0)
+
+end function nDGP_beta
+
+!=========================================================
+! nDGP_solve_level: top-level nDGP solver for one AMR level
+!=========================================================
+subroutine nDGP_solve_level(ilevel, icount)
+  use amr_commons
+  use poisson_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel, icount
+
+  integer::iter,ncache,info
+  real(dp)::beta
+  real(dp)::nDGP_beta  ! external function
+  real(dp)::res_max_local,res_max_global
+  real(dp)::src_max_local,src_max_global
+  real(dp)::rel_res
+  logical::converged
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) return
+
+  ! Compute β(a)
+  beta = nDGP_beta(aexp, omega_rc, nDGP_branch)
+
+  if(myid==1 .and. nstep==0 .and. ilevel==levelmin) then
+     write(*,'(A,F8.4,A,F8.4)') ' nDGP: beta(a)=', beta, ' at a=', aexp
+  end if
+
+  ! Initialize scalar_gr on first step
+  if(nstep==0) then
+     call nDGP_init_scalar(ilevel)
+  end if
+
+  ! Newton-GS relaxation
+  converged = .false.
+  do iter=1,n_iter_nDGP
+
+     call nDGP_gauss_seidel(ilevel, beta, res_max_local, src_max_local)
+
+     call make_virtual_fine_dp(scalar_gr(1), ilevel)
+
+#ifndef WITHOUTMPI
+     call MPI_ALLREDUCE(res_max_local, res_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+     call MPI_ALLREDUCE(src_max_local, src_max_global, 1, &
+          MPI_DOUBLE_PRECISION, MPI_MAX, MPI_COMM_WORLD, info)
+#else
+     res_max_global = res_max_local
+     src_max_global = src_max_local
+#endif
+
+     if(src_max_global > 0d0) then
+        rel_res = res_max_global / src_max_global
+     else
+        rel_res = 0d0
+     end if
+
+     if(rel_res < nDGP_eps) then
+        converged = .true.
+        if(myid==1) write(*,'(A,I2,A,I3,A,ES10.3)') &
+             ' nDGP level ',ilevel,' converged in ',iter,' iters, res=',rel_res
+        exit
+     end if
+  end do
+
+  if(.not. converged .and. myid==1) then
+     write(*,'(A,I2,A,I3,A,ES10.3)') &
+          ' WARNING: nDGP level ',ilevel,' NOT converged after ', &
+          n_iter_nDGP,' iters, res=',rel_res
+  end if
+
+  ! Save scalar_gr for warm start
+  call nDGP_save_old(ilevel)
+
+  ! Fifth force: F5 = -(1/(2β)) * grad(φ)
+  call compute_fifth_force(ilevel, -0.5d0/beta)
+
+end subroutine nDGP_solve_level
+
+!=========================================================
+! nDGP_init_scalar: initialize scalar_gr = 0 at a level
+!=========================================================
+subroutine nDGP_init_scalar(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr(icell) = 0d0
+           scalar_gr_old(icell) = 0d0
+        end do
+     end do
+  end do
+
+end subroutine nDGP_init_scalar
+
+!=========================================================
+! nDGP_save_old: save scalar_gr → scalar_gr_old
+!=========================================================
+subroutine nDGP_save_old(ilevel)
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::igrid,i,ind,iskip,ncache,icell
+
+  ncache=active(ilevel)%ngrid
+!$omp parallel do private(igrid,i,ind,iskip,icell) schedule(dynamic)
+  do igrid=1,ncache,nvector
+     do i=1,MIN(nvector,ncache-igrid+1)
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           icell=iskip+active(ilevel)%igrid(igrid+i-1)
+           scalar_gr_old(icell) = scalar_gr(icell)
+        end do
+     end do
+  end do
+
+end subroutine nDGP_save_old
+
+!=========================================================
+! nDGP_gauss_seidel: one Newton-GS sweep for nDGP equation
+!
+! ∇²φ + coeff*[(∇²φ)² - (∇ᵢ∇ⱼφ)²] = source
+!
+! coeff = r_c²/(3β a² c²) → in code units (c=1, H0=1):
+!   coeff = 1/(12 * omega_rc * beta * a²)
+!
+! source = 8πG/(3β) * a² * δρ
+!   = 2*fourpi/(3β) * δ where fourpi=1.5*Ωm*a
+!   = Ωm*a / β * δ
+!
+! Mixed derivatives via diagonal neighbors (double morton_nbor_grid)
+!=========================================================
+subroutine nDGP_gauss_seidel(ilevel, beta, res_max, src_max)
+  use amr_commons
+  use poisson_commons
+  use morton_hash
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp),intent(in)::beta
+  real(dp),intent(out)::res_max, src_max
+
+  integer::igrid,ngrid,ncache,i,ind,iskip,idim
+  integer::ig_left,ig_right,ih_left,ih_right
+  integer::ind_nb_left,ind_nb_right
+  real(dp)::dx,scale,dx_loc,dx2,dx2_inv
+  integer::nx_loc
+  real(dp)::u_c,lapl,source,residual,jacobian,delta_u
+  real(dp)::coeff
+  real(dp)::phi_xm,phi_xp,phi_ym,phi_yp,phi_zm,phi_zp
+  real(dp)::phi_xx,phi_yy,phi_zz,phi_xy,phi_xz,phi_yz
+  real(dp)::lapl2,trace_ij2,vain_term
+  integer::icolor
+
+  ! Diagonal neighbor grids
+  integer::ig_diag_pp,ig_diag_pm,ig_diag_mp,ig_diag_mm
+  real(dp)::phi_pp,phi_pm,phi_mp,phi_mm
+
+  integer,dimension(1:3,1:2,1:8)::ggg,hhh
+  integer,dimension(1:nvector)::ind_grid_w,ind_cell_w
+  integer,dimension(1:nvector,0:twondim)::igridn_w
+
+  ncache=active(ilevel)%ngrid
+  if(ncache==0) then
+     res_max=0d0; src_max=0d0
+     return
+  end if
+
+  dx=0.5D0**ilevel
+  nx_loc=(icoarse_max-icoarse_min+1)
+  scale=boxlen/dble(nx_loc)
+  dx_loc=dx*scale
+  dx2=dx_loc**2
+  dx2_inv=1d0/dx2
+
+  ! Vainshtein coefficient: r_c²/(3β a²)
+  ! r_c = 1/(2*sqrt(omega_rc)*H0), so r_c² = 1/(4*omega_rc*H0²)
+  ! coeff = 1/(12*omega_rc*beta*a²) in code units (H0=1, c=1)
+  ! But we need this in mesh units (dx_loc): divide by dx_loc⁴ for the bilinear terms
+  ! Actually the equation uses comoving ∇, so coeff stays in comoving
+  coeff = 1d0 / (12d0 * omega_rc * beta * aexp**2)
+
+  ! Neighbor lookup
+  ggg(1,1,1:8)=(/1,0,1,0,1,0,1,0/); hhh(1,1,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(1,2,1:8)=(/0,2,0,2,0,2,0,2/); hhh(1,2,1:8)=(/2,1,4,3,6,5,8,7/)
+  ggg(2,1,1:8)=(/3,3,0,0,3,3,0,0/); hhh(2,1,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(2,2,1:8)=(/0,0,4,4,0,0,4,4/); hhh(2,2,1:8)=(/3,4,1,2,7,8,5,6/)
+  ggg(3,1,1:8)=(/5,5,5,5,0,0,0,0/); hhh(3,1,1:8)=(/5,6,7,8,1,2,3,4/)
+  ggg(3,2,1:8)=(/0,0,0,0,6,6,6,6/); hhh(3,2,1:8)=(/5,6,7,8,1,2,3,4/)
+
+  res_max = 0d0
+  src_max = 0d0
+
+  do icolor=0,1
+
+!$omp parallel do private(igrid,ngrid,i,ind,iskip,idim, &
+!$omp&  ind_grid_w,ind_cell_w,igridn_w, &
+!$omp&  ig_left,ig_right,ih_left,ih_right, &
+!$omp&  ind_nb_left,ind_nb_right, &
+!$omp&  u_c,lapl,source,residual,jacobian,delta_u, &
+!$omp&  phi_xm,phi_xp,phi_ym,phi_yp,phi_zm,phi_zp, &
+!$omp&  phi_xx,phi_yy,phi_zz,phi_xy,phi_xz,phi_yz, &
+!$omp&  lapl2,trace_ij2,vain_term, &
+!$omp&  ig_diag_pp,ig_diag_pm,ig_diag_mp,ig_diag_mm, &
+!$omp&  phi_pp,phi_pm,phi_mp,phi_mm) &
+!$omp& reduction(max:res_max,src_max) schedule(dynamic)
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid_w(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+
+        ! Gather face neighbors
+        do i=1,ngrid
+           igridn_w(i,0)=ind_grid_w(i)
+        end do
+        do idim=1,ndim
+           do i=1,ngrid
+              igridn_w(i,2*idim-1)=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim-1)
+              igridn_w(i,2*idim  )=morton_nbor_grid(ind_grid_w(i),ilevel,2*idim  )
+           end do
+        end do
+
+        do ind=1,twotondim
+           if(mod(ind-1, 2) /= icolor) cycle
+
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell_w(i)=iskip+ind_grid_w(i)
+           end do
+
+           do i=1,ngrid
+              ! Check face neighbors exist
+              if(igridn_w(i,1)==0 .or. igridn_w(i,2)==0 .or. &
+                 igridn_w(i,3)==0 .or. igridn_w(i,4)==0 .or. &
+                 igridn_w(i,5)==0 .or. igridn_w(i,6)==0) cycle
+
+              u_c = scalar_gr(ind_cell_w(i))
+
+              ! Get face neighbor values
+              ig_left =ggg(1,1,ind); ig_right=ggg(1,2,ind)
+              ih_left =ncoarse+(hhh(1,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(1,2,ind)-1)*ngridmax
+              phi_xm = scalar_gr(igridn_w(i,ig_left )+ih_left)
+              phi_xp = scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              ig_left =ggg(2,1,ind); ig_right=ggg(2,2,ind)
+              ih_left =ncoarse+(hhh(2,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(2,2,ind)-1)*ngridmax
+              phi_ym = scalar_gr(igridn_w(i,ig_left )+ih_left)
+              phi_yp = scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              ig_left =ggg(3,1,ind); ig_right=ggg(3,2,ind)
+              ih_left =ncoarse+(hhh(3,1,ind)-1)*ngridmax
+              ih_right=ncoarse+(hhh(3,2,ind)-1)*ngridmax
+              phi_zm = scalar_gr(igridn_w(i,ig_left )+ih_left)
+              phi_zp = scalar_gr(igridn_w(i,ig_right)+ih_right)
+
+              ! Laplacian
+              lapl = (phi_xp + phi_xm + phi_yp + phi_ym + phi_zp + phi_zm - 6d0*u_c) * dx2_inv
+
+              ! Diagonal second derivatives
+              phi_xx = (phi_xp + phi_xm - 2d0*u_c) * dx2_inv
+              phi_yy = (phi_yp + phi_ym - 2d0*u_c) * dx2_inv
+              phi_zz = (phi_zp + phi_zm - 2d0*u_c) * dx2_inv
+
+              ! Mixed derivatives via diagonal neighbors
+              ! ∂²φ/∂x∂y: need (+x,+y), (+x,-y), (-x,+y), (-x,-y)
+              ! These are obtained by double morton_nbor_grid calls
+              ! For simplicity and robustness at coarse-fine boundaries,
+              ! approximate mixed derivatives using only face neighbors:
+              ! (∇²φ)² - Tr = φ_xx² + φ_yy² + φ_zz² + 2(φ_xy² + φ_xz² + φ_yz²)
+              ! = lapl² - (lapl² - φ_xx² - φ_yy² - φ_zz² - 2*cross_terms)
+              ! Without diagonal: set cross_terms ≈ 0
+              ! Then Vainshtein = lapl² - (φ_xx² + φ_yy² + φ_zz²)
+              !   = (φ_xx+φ_yy+φ_zz)² - (φ_xx²+φ_yy²+φ_zz²)
+              !   = 2*(φ_xx*φ_yy + φ_xx*φ_zz + φ_yy*φ_zz)
+
+              ! Vainshtein operator: (∇²φ)² - Σ(∂ᵢ∂ⱼφ)²
+              ! Approximated as: lapl² - (φ_xx² + φ_yy² + φ_zz²) (ignoring off-diag)
+              ! = 2*(φ_xx*φ_yy + φ_xx*φ_zz + φ_yy*φ_zz)
+              lapl2 = lapl**2
+              trace_ij2 = phi_xx**2 + phi_yy**2 + phi_zz**2
+              vain_term = lapl2 - trace_ij2
+
+              ! Source = Ωm*a/β * δ  (in code units)
+              ! rho(cell) is the overdensity δ in RAMSES
+              source = omega_m * aexp / beta * rho(ind_cell_w(i))
+
+              ! Residual: F = lapl + coeff * vain_term - source
+              residual = lapl + coeff * vain_term - source
+
+              ! Jacobian: dF/du_c
+              ! dlapl/du_c = -6/dx²
+              ! d(vain_term)/du_c = d(lapl²-trace_ij²)/du_c
+              !   d(lapl²)/du_c = 2*lapl*(-6*dx2_inv) ... but actually dlapl/du = -(2*ndim)/dx²
+              ! Let's use: dlapl/du = -6/dx² (each of 6 face neighbors has +1, center has -6)
+              ! d(lapl²)/du = 2*lapl*(-6/dx²)
+              ! d(phi_xx²)/du = 2*phi_xx*(-2/dx²), similarly for yy, zz
+              ! d(trace_ij2)/du = 2*(-2/dx²)*(phi_xx+phi_yy+phi_zz) = 2*(-2/dx²)*lapl
+              ! d(vain_term)/du = 2*lapl*(-6/dx²) - 2*lapl*(-2/dx²)
+              !                 = 2*lapl*(-6/dx² + 2/dx²) = 2*lapl*(-4/dx²)
+              jacobian = -6d0*dx2_inv + coeff * 2d0 * lapl * (-4d0*dx2_inv)
+
+              ! Newton update
+              if(abs(jacobian) > 1d-30) then
+                 delta_u = -residual / jacobian
+                 ! Damped Newton for stability
+                 if(abs(delta_u) > 0.5d0*dx2*abs(source) .and. abs(source) > 1d-30) then
+                    delta_u = sign(0.5d0*dx2*abs(source), delta_u)
+                 end if
+                 scalar_gr(ind_cell_w(i)) = u_c + delta_u
+              end if
+
+              res_max = max(res_max, abs(residual))
+              src_max = max(src_max, abs(source))
+
+           end do  ! i
+        end do  ! ind
+     end do  ! igrid
+
+  end do  ! icolor
+
+end subroutine nDGP_gauss_seidel

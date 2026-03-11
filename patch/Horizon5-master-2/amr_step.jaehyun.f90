@@ -501,6 +501,55 @@ recursive subroutine amr_step(ilevel,icount)
 !       endif
 !############################################################
 
+     !-------------------------------------------------
+     ! MOND: phantom density + Poisson re-solve
+     !-------------------------------------------------
+     if(use_mond .and. mond_type >= 1) then
+        call timer('mond-phantom','start')
+
+        if(mond_type == 1) then
+           ! Phase 1: QUMOND single-pass
+           call compute_mond_phantom_density(ilevel, .false.)
+           call make_virtual_fine_dp(rho(1),ilevel)
+
+           if(ilevel>levelmin)then
+              if(ilevel .ge. cg_levelmin) then
+                 call phi_fine_cg(ilevel,icount)
+              else
+                 call multigrid_fine(ilevel,icount)
+              end if
+           else
+              call multigrid_fine(levelmin,icount)
+           end if
+
+           call force_fine(ilevel,icount)
+
+        else if(mond_type == 2) then
+           ! Phase 2: AQUAL iterative
+           call aqual_iterate(ilevel, icount)
+        end if
+
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! f(R) Hu-Sawicki gravity
+     !-------------------------------------------------
+     if(use_fR) then
+        call timer('fR-solve','start')
+        call fR_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
+     !-------------------------------------------------
+     ! nDGP gravity
+     !-------------------------------------------------
+     if(use_nDGP) then
+        call timer('nDGP-solve','start')
+        call nDGP_solve_level(ilevel, icount)
+        call timer('poisson','start')
+     end if
+
      ! Synchronize remaining particles for gravity
      if(pic)then
                                call timer('particles','start')
@@ -860,23 +909,26 @@ recursive subroutine amr_step(ilevel,icount)
   endif
 #endif
 
-  ! Print particle sub-timers at last step
-  if(ilevel==levelmin .and. nstep>=nstepmax .and. myid==1) then
+  ! Print particle & sink sub-timers every coarse step, then reset
+  if(ilevel==levelmin .and. myid==1) then
      write(*,'(A)') ' === Particle sub-timers ==='
-     write(*,'(A,F8.3,A)') '   make_tree  : ', pt_mktree, ' s'
-     write(*,'(A,F8.3,A)') '   kill+virt  : ', pt_killtree, ' s'
-     write(*,'(A,F8.3,A)') '   synchro    : ', pt_synchro, ' s'
-     write(*,'(A,F8.3,A)') '   move       : ', pt_move, ' s'
-     write(*,'(A,F8.3,A)') '   merge      : ', pt_merge, ' s'
-     write(*,'(A,F8.3,A)') '   TOTAL      : ', &
+     write(*,'(A,F10.3,A)') '   make_tree  : ', pt_mktree, ' s'
+     write(*,'(A,F10.3,A)') '   kill+virt  : ', pt_killtree, ' s'
+     write(*,'(A,F10.3,A)') '   synchro    : ', pt_synchro, ' s'
+     write(*,'(A,F10.3,A)') '   move       : ', pt_move, ' s'
+     write(*,'(A,F10.3,A)') '   merge      : ', pt_merge, ' s'
+     write(*,'(A,F10.3,A)') '   TOTAL      : ', &
           pt_mktree+pt_killtree+pt_synchro+pt_move+pt_merge, ' s'
      write(*,'(A)') ' === Sink sub-timers ==='
-     write(*,'(A,F8.3,A)') '   AGN_feedback : ', sk_agn_fb, ' s'
-     write(*,'(A,F8.3,A)') '   create_sink  : ', sk_create_sink, ' s'
-     write(*,'(A,F8.3,A)') '   grow_bondi   : ', sk_grow, ' s'
-     write(*,'(A,F8.3,A)') '   bondi_hoyle  : ', sk_bondi_hoyle, ' s'
-     write(*,'(A,F8.3,A)') '   TOTAL        : ', &
+     write(*,'(A,F10.3,A)') '   AGN_feedback : ', sk_agn_fb, ' s'
+     write(*,'(A,F10.3,A)') '   create_sink  : ', sk_create_sink, ' s'
+     write(*,'(A,F10.3,A)') '   grow_bondi   : ', sk_grow, ' s'
+     write(*,'(A,F10.3,A)') '   bondi_hoyle  : ', sk_bondi_hoyle, ' s'
+     write(*,'(A,F10.3,A)') '   TOTAL        : ', &
           sk_agn_fb+sk_create_sink+sk_grow+sk_bondi_hoyle, ' s'
+     ! Reset for next coarse step
+     pt_mktree=0; pt_killtree=0; pt_synchro=0; pt_move=0; pt_merge=0
+     sk_agn_fb=0; sk_create_sink=0; sk_grow=0; sk_bondi_hoyle=0
   end if
 
 999 format(' Entering amr_step',i1,' for level',i2, '  for a levelmin ',i3)

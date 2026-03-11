@@ -25,6 +25,10 @@ module poisson_commons
   ! nbor_grid_fine(j, igrid_mg) = morton_nbor_grid(active(ilevel)%igrid(igrid_mg), ilevel, j)
   integer, allocatable, dimension(:,:) :: nbor_grid_fine
 
+  ! Modified gravity scalar field (f_R or phi_nDGP)
+  real(dp),allocatable,dimension(:)  ::scalar_gr       ! Scalar field
+  real(dp),allocatable,dimension(:)  ::scalar_gr_old   ! Previous step (initial guess)
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

@@ -143,7 +143,7 @@ module amr_parameters
   integer::output_mode=0      ! Output mode (for hires runs)
   logical::gadget_output=.false. ! Output in gadget format
   logical::output_now=.false. ! write output next step
-  character(LEN=128)::jobcontrolfile=''  ! Job control file for runtime stop/output
+  character(LEN=128)::jobcontrolfile='jobcontrol.txt'  ! Job control file for runtime stop/output
   character(len=10)::informat  = 'original'  ! 'original' or 'hdf5'
   character(len=10)::outformat = 'original'  ! 'original' or 'hdf5'
 !jhshin1
@@ -313,7 +313,30 @@ module amr_parameters
   real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV]
   real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction
 
+  ! MOND (Modified Newtonian Dynamics) parameters
+  logical ::use_mond=.false.             ! Enable QUMOND acceleration correction
+  real(dp)::a0_mond=1.2d-8              ! MOND critical acceleration [cm/s^2]
+  integer ::mond_mu_type=1               ! 1=simple mu, 2=standard mu
+  integer ::mond_type=0                  ! 0=algebraic, 1=full QUMOND (phantom density), 2=AQUAL iterative
+  ! AQUAL iteration parameters (mond_type=2)
+  integer ::n_iter_mond=10               ! Max AQUAL fixed-point iterations
+  real(dp)::mond_eps=1.0d-6             ! AQUAL convergence threshold
+  ! External field effect (all mond_types)
+  real(dp),dimension(1:3)::g_ext_mond=(/0d0,0d0,0d0/)  ! External field [cm/s^2]
 
+  ! f(R) Hu-Sawicki gravity parameters
+  logical ::use_fR=.false.               ! Enable f(R) gravity
+  real(dp)::fR0=-1.0d-6                 ! f_{R,0} amplitude (< 0)
+  integer ::fR_n=1                       ! Hu-Sawicki power-law index
+  integer ::n_iter_fR=20                 ! Max Newton-GS iterations per level
+  real(dp)::fR_eps=1.0d-6               ! Convergence threshold
+
+  ! nDGP gravity parameters
+  logical ::use_nDGP=.false.             ! Enable nDGP gravity
+  real(dp)::omega_rc=0.25d0             ! Omega_rc = 1/(4 r_c^2 H_0^2)
+  integer ::nDGP_branch=1               ! 1=normal, -1=self-accelerating
+  integer ::n_iter_nDGP=20              ! Max Newton-GS iterations
+  real(dp)::nDGP_eps=1.0d-6             ! Convergence threshold
 
 !chemo flags and variables
   real(dp)::rcell  =2.0D0     ! Supernovae superbubble radius in cells

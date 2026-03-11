@@ -28,6 +28,12 @@ subroutine init_poisson
   allocate(phi_old (1:ncell))
   allocate(f   (1:ncell,1:3))
   rho=0.0D0; rho_star=0d0; phi=0.0D0; f=0.0D0
+  if(use_fR .or. use_nDGP) then
+     allocate(scalar_gr    (1:ncell))
+     allocate(scalar_gr_old(1:ncell))
+     scalar_gr    = 0d0
+     scalar_gr_old= 0d0
+  end if
   if(cic_levelmax>0)then
      allocate(rho_top(1:ncell))
      rho_top=0d0
