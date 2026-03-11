@@ -12,7 +12,7 @@
 \usepackage{algorithmic}
 \usepackage{booktabs}
 \usepackage{multirow}
-\usepackage{xcolor}
+\usepackage[table]{xcolor}
 \usepackage{hyperref}
 
 % Algorithm formatting
@@ -262,6 +262,59 @@ with the existing \curamses\ infrastructure --- $k$-section domain
 decomposition, Morton key octree, FFTW3 direct Poisson solver, and
 OpenMP+MPI hybrid parallelism --- without requiring modifications to
 the core AMR data structures.
+
+Table~\ref{tab:compatibility} summarizes the inter-model compatibility.
+Each module operates at a distinct physical level --- background
+expansion, Poisson source, gravitational force, or particle dynamics
+--- so most combinations are allowed.  The sole restriction is that
+the six scalar field / modified gravity models (MOND, $\fR$, nDGP,
+Symmetron, Dilaton, Galileon) are \emph{mutually exclusive} because
+they share the \code{scalar\_gr} storage array and solve fundamentally
+different field equations.
+
+\begin{table*}
+\centering
+\caption{Inter-model compatibility matrix for the eleven non-standard
+modules.  \textcolor{green!60!black}{\checkmark}\ = fully compatible
+(may be enabled simultaneously),
+\textcolor{red!80!black}{$\times$}\ = mutually exclusive.
+The six scalar field models (MOND through Galileon) share the
+\texttt{scalar\_gr} array and are mutually exclusive; all other
+combinations are allowed.  CPL~DE includes its perturbation
+sub-module.  Models are grouped by the physical level at which they
+operate: background expansion (B), Poisson source (P), force
+modification (F), or particle dynamics (D).}
+\label{tab:compatibility}
+\smallskip
+\renewcommand{\arraystretch}{1.15}
+\newcommand{\yes}{\textcolor{green!60!black}{\checkmark}}
+\newcommand{\no}{\textcolor{red!80!black}{$\times$}}
+\newcommand{\self}{\cellcolor{gray!25}---}
+\setlength{\tabcolsep}{3.5pt}
+\begin{tabular}{l c c c c c c c c c c c}
+\toprule
+ & \rotatebox{70}{CPL~DE} & \rotatebox{70}{Neutrino}
+ & \rotatebox{70}{SIDM} & \rotatebox{70}{MOND}
+ & \rotatebox{70}{$\fR$} & \rotatebox{70}{nDGP}
+ & \rotatebox{70}{Symmetron} & \rotatebox{70}{Dilaton}
+ & \rotatebox{70}{Galileon} & \rotatebox{70}{Coupled~DE}
+ & \rotatebox{70}{Early~DE} \\
+Level & B/P & P & D & F & F & F & F & F & F & F & B \\
+\midrule
+CPL~DE     & \self & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes \\
+Neutrino   & \yes  & \self & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes \\
+SIDM       & \yes  & \yes & \self & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes \\
+MOND       & \yes  & \yes & \yes & \self & \no  & \no  & \no  & \no  & \no  & \yes & \yes \\
+$\fR$      & \yes  & \yes & \yes & \no  & \self & \no  & \no  & \no  & \no  & \yes & \yes \\
+nDGP       & \yes  & \yes & \yes & \no  & \no  & \self & \no  & \no  & \no  & \yes & \yes \\
+Symmetron  & \yes  & \yes & \yes & \no  & \no  & \no  & \self & \no  & \no  & \yes & \yes \\
+Dilaton    & \yes  & \yes & \yes & \no  & \no  & \no  & \no  & \self & \no  & \yes & \yes \\
+Galileon   & \yes  & \yes & \yes & \no  & \no  & \no  & \no  & \no  & \self & \yes & \yes \\
+Coupled~DE & \yes  & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \self & \yes \\
+Early~DE   & \yes  & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \yes & \self \\
+\bottomrule
+\end{tabular}
+\end{table*}
 
 The structure of this paper is as follows.
 Section~\ref{sec:poisson_framework} reviews the unified Poisson solver
