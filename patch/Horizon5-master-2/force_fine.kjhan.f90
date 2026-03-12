@@ -152,7 +152,7 @@ subroutine force_fine(ilevel,icount)
         call gradient_phi(ilevel,igrid,ngrid,icount)
      end do
      ! End loop over grids
-     
+
   ! Update boundaries
      do idim=1,ndim
         call make_virtual_fine_dp(f(1,idim),ilevel)
@@ -366,8 +366,4 @@ subroutine gradient_phi(ilevel,igrid,ngrid,icount)
   end do
 
 end subroutine gradient_phi
-
-
-
-
 

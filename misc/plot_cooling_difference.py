@@ -416,28 +416,28 @@ if __name__ == '__main__':
     ax = axes[0, 0]
     r = ramses_rate.copy()
     vmax = np.max(np.abs(r[r != 0])) if np.any(r != 0) else 1e-20
-    im = ax.pcolormesh(log_T, log_nH, r, cmap='RdBu_r',
+    im = ax.pcolormesh(log_nH, log_T, r.T, cmap='RdBu_r',
                        norm=SymLogNorm(linthresh=1e-30, vmin=-vmax, vmax=vmax),
                        shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\Lambda_{\rm net}$ [erg/cm$^3$/s]')
     ax.set_title(f'RAMSES (Courty UV, CC07 metal)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     # Panel 2: Grackle net cooling rate
     ax = axes[0, 1]
     g = grackle_rate.copy()
-    im = ax.pcolormesh(log_T, log_nH, g, cmap='RdBu_r',
+    im = ax.pcolormesh(log_nH, log_T, g.T, cmap='RdBu_r',
                        norm=SymLogNorm(linthresh=1e-30, vmin=-vmax, vmax=vmax),
                        shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\Lambda_{\rm net}$ [erg/cm$^3$/s]')
     ax.set_title(f'Grackle (HM2012 UV, non-LTE)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     # Panel 3: log10 ratio |RAMSES/Grackle| — clipped
     ax = axes[1, 0]
@@ -446,19 +446,19 @@ if __name__ == '__main__':
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio = np.log10(np.abs(ramses_rate + eps) / np.abs(grackle_rate + eps))
     ratio = np.clip(ratio, -3, 3)
-    im = ax.pcolormesh(log_T, log_nH, ratio, cmap='coolwarm',
+    im = ax.pcolormesh(log_nH, log_T, ratio.T, cmap='coolwarm',
                        vmin=-3, vmax=3, shading='nearest')
     cb = plt.colorbar(im, ax=ax, label=r'log$_{10}$(|$\Lambda_{\rm RAMSES}$| / |$\Lambda_{\rm Grackle}$|)')
     ax.set_title('Cooling Rate Ratio (red = RAMSES stronger)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
     # Equilibrium temperature contour (net=0 lines)
     try:
-        ax.contour(log_T, log_nH, grackle_rate, levels=[0], colors='lime',
+        ax.contour(log_nH, log_T, grackle_rate.T, levels=[0], colors='lime',
                    linewidths=1.5, linestyles='--')
-        ax.contour(log_T, log_nH, ramses_rate, levels=[0], colors='yellow',
+        ax.contour(log_nH, log_T, ramses_rate.T, levels=[0], colors='yellow',
                    linewidths=1.5, linestyles='-')
     except Exception:
         pass
@@ -467,20 +467,20 @@ if __name__ == '__main__':
     ax = axes[1, 1]
     mu_diff = ramses_mu - grackle_mu
     vabs = max(np.max(np.abs(mu_diff)), 0.01)
-    im = ax.pcolormesh(log_T, log_nH, mu_diff, cmap='coolwarm',
+    im = ax.pcolormesh(log_nH, log_T, mu_diff.T, cmap='coolwarm',
                        vmin=-vabs, vmax=vabs, shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\mu_{\rm RAMSES} - \mu_{\rm Grackle}$')
     ax.set_title(r'Mean Molecular Weight Difference $\Delta\mu$', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     fig.suptitle(f'RAMSES vs Grackle Cooling Comparison  (z = {z_val:.1f}, '
                  f'Z = {Z_actual:.1e} Z$_\\odot$)',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
-    outfile = os.path.join(outdir, 'cooling_rate_difference.png')
+    outfile = os.path.join(basedir, 'misc', 'cooling_rate_difference.png')
     plt.savefig(outfile, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'Saved {outfile}')
@@ -512,43 +512,43 @@ if __name__ == '__main__':
 
     vmax_sol = np.max(np.abs(ramses_rate_sol[ramses_rate_sol != 0]))
     ax = axes[0, 0]
-    im = ax.pcolormesh(log_T, log_nH, ramses_rate_sol, cmap='RdBu_r',
+    im = ax.pcolormesh(log_nH, log_T, ramses_rate_sol.T, cmap='RdBu_r',
                        norm=SymLogNorm(linthresh=1e-30, vmin=-vmax_sol, vmax=vmax_sol),
                        shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\Lambda_{\rm net}$ [erg/cm$^3$/s]')
     ax.set_title('RAMSES (Courty UV, CC07 metal)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     ax = axes[0, 1]
-    im = ax.pcolormesh(log_T, log_nH, grackle_rate_sol, cmap='RdBu_r',
+    im = ax.pcolormesh(log_nH, log_T, grackle_rate_sol.T, cmap='RdBu_r',
                        norm=SymLogNorm(linthresh=1e-30, vmin=-vmax_sol, vmax=vmax_sol),
                        shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\Lambda_{\rm net}$ [erg/cm$^3$/s]')
     ax.set_title('Grackle (HM2012 UV, non-LTE)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     ax = axes[1, 0]
     with np.errstate(divide='ignore', invalid='ignore'):
         ratio_sol = np.log10(np.abs(ramses_rate_sol + eps) / np.abs(grackle_rate_sol + eps))
     ratio_sol = np.clip(ratio_sol, -3, 3)
-    im = ax.pcolormesh(log_T, log_nH, ratio_sol, cmap='coolwarm',
+    im = ax.pcolormesh(log_nH, log_T, ratio_sol.T, cmap='coolwarm',
                        vmin=-3, vmax=3, shading='nearest')
     plt.colorbar(im, ax=ax, label=r'log$_{10}$(|$\Lambda_{\rm RAMSES}$| / |$\Lambda_{\rm Grackle}$|)')
     ax.set_title('Cooling Rate Ratio (red = RAMSES stronger)', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
     try:
-        ax.contour(log_T, log_nH, grackle_rate_sol, levels=[0], colors='lime',
+        ax.contour(log_nH, log_T, grackle_rate_sol.T, levels=[0], colors='lime',
                    linewidths=1.5, linestyles='--')
-        ax.contour(log_T, log_nH, ramses_rate_sol, levels=[0], colors='yellow',
+        ax.contour(log_nH, log_T, ramses_rate_sol.T, levels=[0], colors='yellow',
                    linewidths=1.5, linestyles='-')
     except Exception:
         pass
@@ -556,20 +556,20 @@ if __name__ == '__main__':
     ax = axes[1, 1]
     mu_diff_sol = ramses_mu_sol - grackle_mu_sol
     vabs_sol = max(np.max(np.abs(mu_diff_sol)), 0.01)
-    im = ax.pcolormesh(log_T, log_nH, mu_diff_sol, cmap='coolwarm',
+    im = ax.pcolormesh(log_nH, log_T, mu_diff_sol.T, cmap='coolwarm',
                        vmin=-vabs_sol, vmax=vabs_sol, shading='nearest')
     plt.colorbar(im, ax=ax, label=r'$\mu_{\rm RAMSES} - \mu_{\rm Grackle}$')
     ax.set_title(r'Mean Molecular Weight Difference $\Delta\mu$', fontsize=11)
-    ax.set_xlabel(r'log$_{10}$(T [K])')
-    ax.set_ylabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
-    ax.set_xlim(1, 9)
-    ax.set_ylim(-8, 4)
+    ax.set_xlabel(r'log$_{10}$(n$_H$ [cm$^{-3}$])')
+    ax.set_ylabel(r'log$_{10}$(T [K])')
+    ax.set_xlim(-8, 4)
+    ax.set_ylim(1, 9)
 
     fig.suptitle(f'RAMSES vs Grackle Cooling Comparison  (z = {z_val:.1f}, '
                  f'Z = {Z_sol:.2f} Z$_\\odot$)',
                  fontsize=14, fontweight='bold')
     plt.tight_layout()
-    outfile2 = os.path.join(outdir, 'cooling_rate_difference_Zsolar.png')
+    outfile2 = os.path.join(basedir, 'misc', 'cooling_rate_difference_Zsolar.png')
     plt.savefig(outfile2, dpi=150, bbox_inches='tight')
     plt.close()
     print(f'Saved {outfile2}')

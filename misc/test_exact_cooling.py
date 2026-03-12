@@ -673,6 +673,7 @@ TEST_CONDITIONS = [
     ('ISM',       1e0,   3e4,   1e0,  r'ISM: $n_{\rm H}=1$, $T=3\times10^4\,$K'),
     ('Dense_hot', 1e2,   1e7,   1e0,  r'Dense: $n_{\rm H}=10^2$, $T=10^7\,$K'),
     ('Strong',    1e0,   1e7,   1e0,  r'Strong: $n_{\rm H}=1$, $T=10^7\,$K'),
+    ('Dense_ISM', 1e1,   3e4,   1e0,  r'Dense ISM: $n_{\rm H}=10$, $T=3\times10^4\,$K'),
 ]
 
 
@@ -724,9 +725,7 @@ def fig_dtindep(profiles, townsend_solvers, outdir):
 
         print(f'  {name}: t_cool = {t_cool/yr_s:.2e} yr, T_eq = {equil}')
 
-    # Legend panel
-    ax_leg = axes_flat[5]
-    ax_leg.set_visible(False)
+    # All 6 panels used (no empty legend panel)
 
     plt.tight_layout()
     outfile = os.path.join(outdir, 'fig_cooling_dtindep.pdf')
@@ -863,49 +862,62 @@ def fig_nsub_vs_varmax(profiles, outdir):
 # Figure D: T(t) cooling trajectories
 # ============================================================
 def fig_trajectory(profiles, townsend_solvers, outdir):
-    """2 panels: 'Strong' and 'ISM' cooling trajectories.
+    """2x2 panels: T=1.5e4 K cooling trajectories at various n_H.
 
     Key: N-R uses COARSE steps (dt = 1 t_cool per hydro step) to reveal
     overshoot behavior. Townsend uses same coarse steps to show dt-independence.
     RK4 reference uses fine adaptive steps.
     """
-    print('\n[Figure D] T(t) cooling trajectories...')
+    print('\n[Figure D] T(t) cooling trajectories (T=1.5e4 K, multiple nH)...')
 
-    cases = [
-        (4, 'Strong'),
-        (2, 'ISM'),
+    T0 = 1.5e4
+    Z = 1.0  # solar metallicity
+    traj_cases = [
+        (1e-2, r'$n_{\rm H}=10^{-2}\,{\rm cm}^{-3}$'),
+        (1e-1, r'$n_{\rm H}=10^{-1}\,{\rm cm}^{-3}$'),
+        (1e0,  r'$n_{\rm H}=1\,{\rm cm}^{-3}$'),
+        (1e1,  r'$n_{\rm H}=10\,{\rm cm}^{-3}$'),
     ]
 
-    fig, axes = plt.subplots(1, 2, figsize=(7.0, 3.2))
+    fig, axes = plt.subplots(2, 2, figsize=(7.0, 5.5))
+    axes_flat = axes.flatten()
 
-    for panel_idx, (cond_idx, case_name) in enumerate(cases):
-        name, nH, T0, Z, label = TEST_CONDITIONS[cond_idx]
-        ax = axes[panel_idx]
-        prof = profiles[(nH, Z)]
-        ts = townsend_solvers[(nH, Z)]
+    for panel_idx, (nH, label) in enumerate(traj_cases):
+        ax = axes_flat[panel_idx]
+        key = (nH, Z)
+
+        # Get or build profile
+        if key in profiles:
+            prof = profiles[key]
+            ts = townsend_solvers[key]
+        else:
+            # Need to build from the table used in main
+            prof = profiles.get(key)
+            ts = townsend_solvers.get(key)
+            if prof is None:
+                print(f'  WARNING: profile ({nH}, {Z}) not found, skipping')
+                continue
+
         t_cool = prof.cooling_time(T0)
         t_total = 5.0 * t_cool
 
         # RK4 reference trajectory (fine steps)
         t_rk4, T_rk4 = rk4_trajectory(prof, T0, t_total, n_output=500)
 
-        # Townsend with coarse steps (dt = 1*t_cool) to show dt-independence
-        n_coarse = 5  # 5 steps of 1*t_cool each
+        # Townsend and N-R with coarse steps (markers only, no lines)
+        n_coarse = 12
         t_tw, T_tw = townsend_trajectory(ts, T0, t_total, n_output=n_coarse)
-        # Also fine Townsend for reference
-        t_tw_fine, T_tw_fine = townsend_trajectory(ts, T0, t_total, n_output=500)
 
-        # N-R with coarse steps (dt = 1*t_cool) to reveal overshoot
+        # N-R with coarse steps to reveal overshoot
         t_nr4, T_nr4 = nr_trajectory(prof, T0, t_total, n_output=n_coarse, varmax=4.0)
         t_nr20, T_nr20 = nr_trajectory(prof, T0, t_total, n_output=n_coarse, varmax=20.0)
 
         ax.semilogy(t_rk4 / t_cool, T_rk4, 'k-', lw=2, label='RK4 ref', zorder=5)
-        ax.semilogy(t_tw_fine / t_cool, T_tw_fine, 'b-', lw=1.0, alpha=0.4, zorder=3)
-        ax.semilogy(t_tw / t_cool, T_tw, 'b-o', lw=1.5, ms=5,
-                    label=r'Townsend ($\Delta t = t_{\rm cool}$)', zorder=4)
-        ax.semilogy(t_nr4 / t_cool, T_nr4, 'r--s', lw=1.2, ms=5,
+        ax.semilogy(t_tw / t_cool, T_tw, 'bo', ms=4, markerfacecolor='none', lw=0,
+                    label=r'Townsend', zorder=4)
+        ax.semilogy(t_nr4 / t_cool, T_nr4, 'rs', ms=4, markerfacecolor='none', lw=0,
                     label=r'N-R $\Delta_{\rm var}$=4', zorder=3)
-        ax.semilogy(t_nr20 / t_cool, T_nr20, 'g-.^', lw=1.2, ms=5,
+        ax.semilogy(t_nr20 / t_cool, T_nr20, 'g^', ms=4, markerfacecolor='none', lw=0,
                     label=r'N-R $\Delta_{\rm var}$=20', zorder=3)
 
         # Equilibrium lines
@@ -914,17 +926,18 @@ def fig_trajectory(profiles, townsend_solvers, outdir):
             yvals = np.concatenate([T_rk4, T_tw])
             if min(yvals) * 0.1 < Teq < max(yvals) * 10:
                 ax.axhline(Teq, color='orange', ls='-.', lw=1, alpha=0.7,
-                           label=f'$T_{{\\rm eq}}$ = {Teq:.0e} K')
+                           label=f'$T_{{\\rm eq}}$ = {Teq:.0f} K')
 
         ax.set_xlabel(r'$t / t_{\rm cool}$', fontsize=9)
         ax.set_ylabel('T [K]', fontsize=9)
         ax.set_title(label, fontsize=8)
-        ax.legend(fontsize=5.5, loc='best')
+        if panel_idx == 0:
+            ax.legend(fontsize=5.5, loc='best')
         ax.tick_params(labelsize=7)
         ax.grid(True, alpha=0.3, which='both')
         ax.set_xlim(0, 5)
 
-        print(f'  {case_name}: t_cool = {t_cool/yr_s:.2e} yr')
+        print(f'  nH={nH:.0e}: t_cool = {t_cool/yr_s:.2e} yr, equil = {equil}')
 
     plt.tight_layout()
     outfile = os.path.join(outdir, 'fig_cooling_trajectory.pdf')
@@ -1027,6 +1040,19 @@ def main():
             L0 = profiles[key].get_Lambda(T0)
             print(f'  ({nH:.0e}, Z={Z:.0e}): T_eq={equil}, '
                   f'Lambda(T0)={L0:.3e}, t_cool={t_cool/yr_s:.2e} yr')
+
+    # Also build profiles for trajectory figure (T=1.5e4, various nH, Z=1)
+    traj_nH_list = [1e-2, 1e-1, 1e0, 1e1]
+    for nH_traj in traj_nH_list:
+        key = (nH_traj, 1.0)
+        if key not in profiles:
+            profiles[key] = CoolingProfile(tab, nH_traj, 1.0)
+            townsend_solvers[key] = TownsendSolver(profiles[key])
+            equil = profiles[key].find_equilibria()
+            t_cool = profiles[key].cooling_time(1.5e4)
+            L0 = profiles[key].get_Lambda(1.5e4)
+            print(f'  ({nH_traj:.0e}, Z=1e+00): T_eq={equil}, '
+                  f'Lambda(T0=1.5e4)={L0:.3e}, t_cool={t_cool/yr_s:.2e} yr')
 
     outdir = basedir
 
