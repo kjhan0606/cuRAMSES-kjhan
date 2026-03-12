@@ -922,13 +922,16 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
               eint = MAX(uin(l,i,j,k,ndim+2)*oneoverrho-eken-erad,smalle)
               q(l,i,j,k,ndim+2) = (gamma-one)*q(l,i,j,k,1)*eint
 
-              ! Compute sound speed
+              ! Compute sound speed (c_eff includes SGS turbulent pressure)
               c(l,i,j,k)=gamma*q(l,i,j,k,ndim+2)
 #if NENER>0
               do irad=1,nener
                  c(l,i,j,k)=c(l,i,j,k)+gamma_rad(irad)*q(l,i,j,k,ndim+2+irad)
               enddo
 #endif
+              if(use_sgs .and. isgs>0) then
+                 c(l,i,j,k)=c(l,i,j,k)+(2d0/3d0)*q(l,i,j,k,1)*max(q(l,i,j,k,isgs),0d0)
+              end if
               c(l,i,j,k)=sqrt(c(l,i,j,k)*oneoverrho)
 
               ! Gravity predictor step

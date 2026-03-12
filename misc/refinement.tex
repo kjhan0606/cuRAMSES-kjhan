@@ -34,8 +34,8 @@
 \newcommand{\twotondim}{2^{N_{\rm dim}}}
 \newcommand{\code}[1]{\texttt{#1}}
 
-\title[cuRAMSES~II: The Jeans Criterion in Cosmological AMR Simulations]
-{cuRAMSES~II: The Jeans Criterion in Cosmological AMR Simulations --- Cooling, Holdback, and Refinement}
+\title[cuRAMSES~II: The Effect of Exact Cooling on the Adaptive Mesh Refinement]
+{cuRAMSES~II: The Effect of Exact Cooling on the Adaptive Mesh Refinement}
 
 \author[J. Kim]{Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
 \\
@@ -78,9 +78,11 @@ quantify how cooling rate differences between the standard
 \ramses\ solver and the Grackle library propagate into
 40--80\,per\,cent errors in the Jeans length at low densities,
 and demonstrate that the exact integrator removes the stochastic
-refinement noise caused by temperature overshooting.  Future
-extensions incorporating \emph{turbulent pressure support} into the
-Jeans criterion are outlined.
+refinement noise caused by temperature overshooting.
+We further present a \emph{sub-grid scale turbulence model} that
+evolves the unresolved turbulent kinetic energy self-consistently
+within the Riemann solver, providing turbulent pressure support that
+naturally limits the refinement depth without requiring the holdback.
 \end{abstract}
 
 \begin{keywords}
@@ -409,6 +411,421 @@ expanded by \code{nexpand($\ell$)} cell widths in each direction via a
 dilation operator (\code{smooth\_fine}).
 This cubic buffer ensures smooth refinement boundaries, preventing
 the Godunov solver from encountering abrupt level transitions.
+
+
+%----------------------------------------------------------------------
+\subsection{Sub-Grid Scale Turbulence Model}
+\label{sec:sgs}
+%----------------------------------------------------------------------
+
+The purely thermal Jeans length
+(equation~\ref{eq:jeans_crit}) ignores the additional pressure
+support provided by unresolved turbulent motions.  In cosmological
+simulations without a polytropic equation of state ($\gstar < 2$),
+the Jeans length $\lJ \propto \rho^{(\gstar - 2)/2}$ shrinks as
+density increases, triggering runaway refinement cascades that
+exhaust memory and inflate the number of fine time-steps by up to
+$7\times$.  The \emph{cosmological holdback}
+(Section~\ref{sec:holdback}) was introduced as a pragmatic
+workaround, but it blocks all refinement criteria indiscriminately and
+introduces artificial starbursts when levels are released.
+
+We address this root cause by implementing a \emph{sub-grid scale}
+(SGS) turbulence model that evolves the unresolved turbulent kinetic
+energy alongside the hydrodynamic variables, following the
+compressible SGS framework of
+\citet{Schmidt2006,Schmidt2011,Scannapieco2008}.  The turbulent
+pressure enters both the Riemann solver and the Jeans criterion,
+providing self-consistent pressure support that naturally limits
+refinement depth without the holdback.
+
+
+\subsubsection{Governing Equations}
+\label{sec:sgs_eqs}
+
+We introduce a new conserved variable $\rho e_{\rm sgs}$, the SGS
+turbulent kinetic energy density, advected alongside the standard
+hydrodynamic variables $(\rho, \rho\mathbf{v}, E)$.  The evolution
+equation is
+\begin{equation}
+  \frac{\partial (\rho e_{\rm sgs})}{\partial t}
+  + \nabla\cdot(\rho e_{\rm sgs}\,\mathbf{v})
+  = -P_{\rm turb}\,\nabla\cdot\mathbf{v}
+    + \mathcal{P}_{\rm grav}
+    - \varepsilon_{\rm diss},
+  \label{eq:sgs_evolution}
+\end{equation}
+where the three source terms on the right-hand side represent,
+respectively, the pressure--dilatation coupling, gravitational
+production, and dissipation at the grid scale.
+
+The \emph{turbulent pressure} is defined as
+\begin{equation}
+  P_{\rm turb} = \tfrac{2}{3}\,\rho\,e_{\rm sgs},
+  \label{eq:pturb}
+\end{equation}
+which acts as an isotropic closure of the Reynolds stress tensor
+$\tau_{ij}^{\rm sgs} \approx \frac{2}{3}\rho\,e_{\rm sgs}\,\delta_{ij}$
+\citep{Schmidt2006}.  The total effective pressure entering the
+momentum equation is $P_{\rm eff} = P_{\rm therm} + P_{\rm turb}$.
+
+The \emph{SGS turbulent velocity dispersion} is related to the
+specific SGS energy by
+\begin{equation}
+  \sigma_{\rm turb} = \sqrt{\tfrac{2}{3}\,e_{\rm sgs}},
+  \label{eq:sigma_turb}
+\end{equation}
+so that $P_{\rm turb} = \rho\,\sigma_{\rm turb}^2$.
+
+\paragraph{Pressure--dilatation (PdV) coupling.}
+The first source term in equation~(\ref{eq:sgs_evolution}),
+$-P_{\rm turb}\,\nabla\cdot\mathbf{v}$, represents the work done by
+turbulent pressure during compression ($\nabla\cdot\mathbf{v} < 0$)
+or expansion ($\nabla\cdot\mathbf{v} > 0$).  In compression,
+$e_{\rm sgs}$ increases at the expense of the resolved kinetic energy,
+while in expansion it decreases.  This term conserves total energy
+exactly: the corresponding work is removed from the thermal/kinetic
+budget by the $P_{\rm turb}$ contribution to the Riemann solver
+fluxes (Section~\ref{sec:sgs_riemann}).
+
+\paragraph{Gravitational production.}
+In self-gravitating systems, gravitational contraction stirs turbulent
+motions at the grid scale.  We model this as
+\begin{equation}
+  \mathcal{P}_{\rm grav}
+    = C_{\rm prod}\,\rho\,e_{\rm sgs}\,\sqrt{f_G\,\rho},
+  \label{eq:sgs_prod}
+\end{equation}
+where $C_{\rm prod}$ is a dimensionless production coefficient and
+$f_G$ is the gravitational coupling factor:
+\begin{equation}
+  f_G =
+  \begin{cases}
+    \dfrac{3\,\Omega_m}{8\pi\,a} & \text{(cosmological),} \\[6pt]
+    1 & \text{(non-cosmological),}
+  \end{cases}
+  \label{eq:factG}
+\end{equation}
+identical to the factor appearing in the Jeans length evaluation.  The
+production rate $\sqrt{f_G\rho}$ has dimensions of inverse time and
+is proportional to the local free-fall rate $\sim (G\rho)^{1/2}$,
+ensuring that turbulent energy is injected most vigorously in
+collapsing regions where the Jeans criterion is most critical.
+
+\paragraph{Dissipation.}
+Turbulent energy cascades from the grid scale $\dx$ to smaller scales
+where it is dissipated into heat.  Following
+\citet{Schmidt2006,Semenov2016}, the dissipation rate is
+\begin{equation}
+  \varepsilon_{\rm diss}
+    = C_{\rm diss}\,\rho\,
+      \frac{\sigma_{\rm turb}^3}{\dx}
+    = C_{\rm diss}\,\rho\,
+      \frac{(2e_{\rm sgs}/3)^{3/2}}{\dx},
+  \label{eq:sgs_diss}
+\end{equation}
+where $C_{\rm diss}$ is a dimensionless coefficient calibrated to
+reproduce the Kolmogorov energy transfer rate.  The $\sigma^3/\dx$
+scaling follows directly from dimensional analysis of the turbulent
+cascade: the energy transfer rate per unit mass is
+$\sim\sigma^3/\ell$ at the driving scale $\ell$.
+
+Since $\varepsilon_{\rm diss} \propto e_{\rm sgs}^{3/2}$, this term
+is highly non-linear and can be stiff when $e_{\rm sgs}$ is large.
+The dissipation time-scale
+$t_{\rm diss} = e_{\rm sgs}/\varepsilon_{\rm diss}
+  \propto \dx/\sigma_{\rm turb}$
+can be much shorter than the hydrodynamic time-step, demanding an
+implicit treatment (Section~\ref{sec:sgs_implicit}).
+
+Crucially, the dissipated SGS energy is not lost: it is deposited
+as thermal energy, maintaining total energy conservation:
+\begin{equation}
+  \left.\frac{\partial E_{\rm therm}}{\partial t}\right|_{\rm sgs}
+  = +\varepsilon_{\rm diss}.
+  \label{eq:sgs_heating}
+\end{equation}
+
+
+\subsubsection{Equilibrium Analysis and Self-Regulation}
+\label{sec:sgs_equilib}
+
+In a quasi-static gravitationally collapsing region, the production
+and dissipation terms in equation~(\ref{eq:sgs_evolution}) reach a
+local balance.  Setting $\mathcal{P}_{\rm grav} = \varepsilon_{\rm diss}$
+and solving for the equilibrium SGS velocity dispersion yields
+\begin{equation}
+  \sigma_{\rm eq}^2
+  = \left(\frac{C_{\rm prod}}{C_{\rm diss}}\right)^2
+    f_G\,\rho\,\dx^2.
+  \label{eq:sigma_eq}
+\end{equation}
+The corresponding equilibrium turbulent Jeans length is
+\begin{align}
+  \lJ^{\rm eff}
+  &= \sqrt{\frac{\pi\,(c_s^2 + \sigma_{\rm eq}^2)}{G\,\rho}}
+  \nonumber\\
+  &\ge \sqrt{\frac{\pi\,\sigma_{\rm eq}^2}{G\,\rho}}
+  = \frac{C_{\rm prod}}{C_{\rm diss}}
+    \sqrt{\frac{\pi f_G}{G}}\;\dx.
+  \label{eq:jeans_eff}
+\end{align}
+In the cosmological case where $f_G = 3\Omega_m/(8\pi a)$ and
+$G = 3\Omega_m H_0^2/(8\pi)$ in code units, the ratio
+$f_G/G = 1/(aH_0^2)$ is independent of density.  Therefore
+the number of cells per effective Jeans length at equilibrium is
+\begin{equation}
+  N_{J,\rm eff}
+  = \frac{\lJ^{\rm eff}}{\dx}
+  \ge \frac{C_{\rm prod}}{C_{\rm diss}}
+      \sqrt{\frac{\pi f_G}{G}}.
+  \label{eq:NJ_eff}
+\end{equation}
+For our fiducial parameters $C_{\rm prod} = 1.0$, $C_{\rm diss} = 0.5$,
+this gives $N_{J,\rm eff} \approx 3.5$, close to the
+\citet{Truelove1997} minimum of~4.  Importantly, since
+$\sigma_{\rm eq}^2 \propto \dx^2$, the turbulent pressure support
+automatically adjusts to the local grid scale: finer cells have less
+turbulent support, so they are refined only when thermally warranted.
+This is in sharp contrast to a uniform polytropic floor
+($\gstar = 2$), which raises the sound speed uniformly across all
+scales and produces catastrophic CFL time-step reductions (a factor
+$\sim$300 at high densities).
+
+The self-regulation mechanism works as follows: if a cell is refined,
+its child cells have half the grid spacing, so
+$\sigma_{\rm eq}^2 \propto \dx^2$ drops by a factor of~4.  The
+effective Jeans length decreases, and the Jeans criterion becomes
+harder to satisfy --- \emph{unless the thermal Jeans length is
+genuinely unresolved}.  The cascade therefore terminates when the
+thermal Jeans length is resolved by $\sim N_{J,\rm eff}$ cells,
+precisely the behaviour desired.
+
+
+\subsubsection{Riemann Solver Modifications}
+\label{sec:sgs_riemann}
+
+The turbulent pressure $P_{\rm turb}$ must enter the Riemann solver
+to maintain consistency between the SGS source terms and the
+resolved-scale fluxes.  We modify all five Riemann solvers available
+in \ramses\ (HLLC, HLL, Lax--Friedrichs, acoustic, and
+Roe-approximate).
+
+\paragraph{Effective pressure and wave speeds.}
+In each solver, the total pressure driving the momentum flux is
+replaced by
+\begin{equation}
+  P_{\rm tot} = P_{\rm therm} + P_{\rm turb}
+  = P_{\rm therm} + \tfrac{2}{3}\,\rho\,e_{\rm sgs},
+  \label{eq:ptot}
+\end{equation}
+and the characteristic wave speed is computed from the effective
+sound speed:
+\begin{equation}
+  c_{\rm eff}^2 = \frac{\gamma\,P_{\rm therm} + P_{\rm turb}}{\rho}
+  = \frac{\gamma\,P_{\rm therm}}{\rho} + \sigma_{\rm turb}^2.
+  \label{eq:ceff}
+\end{equation}
+Note that the coefficient of $P_{\rm turb}$ in
+equation~(\ref{eq:ceff}) is unity (not $\gamma$), because
+$P_{\rm turb}$ acts as an independent isotropic pressure with its own
+equation of state.  The effective sound speed enters the signal speed
+estimates $S_L$, $S_R$ (HLLC/HLL), the Lagrangian sound speed
+$c_L^2 = \rho^2 c_{\rm eff}^2$ (Roe-approximate), and the CFL
+time-step computation (\code{cmpdt}).
+
+\paragraph{Energy flux.}
+The total energy density $E = \frac{1}{2}\rho v^2 + e_{\rm therm}$
+does \emph{not} include $\rho e_{\rm sgs}$.  Following
+\citet{Schmidt2011}, the SGS energy is treated as a separate
+conserved quantity advected by the Godunov scheme.  However,
+$P_{\rm turb}$ contributes to the energy flux:
+\begin{equation}
+  F_E = (E + P_{\rm tot})\,v_n
+  = (E + P_{\rm therm} + P_{\rm turb})\,v_n,
+  \label{eq:energy_flux}
+\end{equation}
+where $v_n$ is the velocity normal to the cell interface.  This
+ensures that the $P_{\rm turb}\,\nabla\cdot\mathbf{v}$ work done by
+turbulent pressure in compression/expansion is correctly accounted
+for in the total energy budget.
+
+\paragraph{Primitive variable reconstruction.}
+In the MUSCL--Hancock reconstruction (\code{ctoprim}), the sound
+speed used for slope limiting and characteristic tracing is likewise
+replaced by $c_{\rm eff}$ (equation~\ref{eq:ceff}), ensuring
+numerical stability at cell interfaces where $P_{\rm turb}$ is
+significant.
+
+
+\subsubsection{Implicit Source Term Integration}
+\label{sec:sgs_implicit}
+
+The dissipation term (equation~\ref{eq:sgs_diss}) is stiff:
+the dissipation time-scale $t_{\rm diss} = \dx/\sigma_{\rm turb}$
+can be orders of magnitude shorter than the CFL time-step in
+high-$e_{\rm sgs}$ regions.  Explicit integration would require
+prohibitively small sub-steps.
+
+We exploit the analytical structure of the dissipation ODE to obtain
+an unconditionally stable implicit solution without iteration.
+Consider the pure dissipation problem for
+$\sigma = \sqrt{2e_{\rm sgs}/3}$:
+\begin{equation}
+  \frac{\mathrm{d}\sigma^2}{\mathrm{d}t}
+  = -\frac{2}{3}\,\frac{C_{\rm diss}\,(\sigma^2)^{3/2}}{\dx},
+\end{equation}
+which has the exact solution
+\begin{equation}
+  \sigma_{\rm new}
+  = \frac{\sigma_{\rm old}}{
+    1 + \dfrac{C_{\rm diss}\,\sigma_{\rm old}\,\Delta t}{2\,\dx}}.
+  \label{eq:sigma_implicit}
+\end{equation}
+This is a first-order $L$-stable scheme: $\sigma_{\rm new} \to 0$ as
+$\Delta t \to \infty$, so there is no risk of overshooting or
+negative energies regardless of the time-step size.  The updated SGS
+energy is
+\begin{equation}
+  e_{\rm sgs}^{\rm new} = \tfrac{3}{2}\,\sigma_{\rm new}^2,
+\end{equation}
+and the dissipated energy
+$\Delta e_{\rm diss} = e_{\rm sgs}^{\rm old} - e_{\rm sgs}^{\rm new}$
+is deposited into the thermal energy
+(equation~\ref{eq:sgs_heating}).
+
+The production and PdV terms are integrated explicitly (first-order)
+before the implicit dissipation step, using operator splitting.
+Since the production rate
+$\mathcal{P}_{\rm grav} \propto e_{\rm sgs}\sqrt{\rho}$ is at most
+linearly stiff, explicit integration is adequate for typical CFL
+time-steps.
+
+This approach is analogous to the exact cooling integrator
+(Section~\ref{sec:exact_cooling}): by exploiting the analytical
+structure of the ODE, we avoid Newton--Raphson iteration entirely
+and eliminate the convergence failures and overshooting that plague
+implicit root-finding methods applied to stiff source terms.
+
+
+\subsubsection{Jeans Criterion with SGS Turbulence}
+\label{sec:sgs_jeans}
+
+The Jeans length criterion (equation~\ref{eq:jeans_crit}) is
+generalised to include turbulent pressure support:
+\begin{equation}
+  \lJ^{\rm eff} =
+  \sqrt{\frac{\pi\,(c_s^2 + \sigma_{\rm turb}^2)}{G\,\rho}}
+  < N_J\,\dx_\ell,
+  \label{eq:jeans_sgs}
+\end{equation}
+where $\sigma_{\rm turb}^2 = \frac{2}{3}e_{\rm sgs}$ is obtained
+from the locally evolved SGS energy.  This modification appears in
+the \code{jeans\_length\_refine} routine and affects only the
+refinement decision; the Riemann solver independently includes
+$P_{\rm turb}$ in the fluxes (Section~\ref{sec:sgs_riemann}).
+
+The combined effect is self-consistent: the SGS model provides
+turbulent pressure that (i) physically supports the gas against
+gravitational fragmentation, (ii) increases the effective Jeans
+length so that the AMR refinement criterion is satisfied at coarser
+levels, and (iii) reduces the number of fine time-steps through
+subcycling, improving computational efficiency.
+
+\paragraph{Comparison with the polytropic floor.}
+The polytropic equation of state
+$T = T_\star(n_{\rm H}/\nstar)^{\gstar - 1}$
+serves a similar purpose --- preventing unresolved fragmentation
+--- but acts uniformly across all scales.  Setting $\gstar = 2$
+makes $\lJ \propto \rho^0$ (constant), which prevents the cascade
+but imposes a CFL penalty proportional to $(n_{\rm H}/\nstar)^{1/2}$,
+reducing the time-step by a factor of $\sim$300 at densities
+$n_{\rm H} \sim 10^4\,{\rm cm^{-3}}$.  The SGS model avoids this
+penalty because $\sigma_{\rm eq} \propto \dx$ scales with the local
+grid spacing: fine cells have small $\sigma_{\rm turb}$ and therefore
+no CFL overhead, while coarse cells have large $\sigma_{\rm turb}$
+that prevents unnecessary refinement.
+
+
+\subsubsection{Namelist Parameters}
+\label{sec:sgs_params}
+
+The SGS model is activated by setting \code{use\_sgs=.true.}\ in
+\code{\&RUN\_PARAMS} and requires \code{NVAR=12} at compile time
+(the standard value is 11).  The model parameters are set in the
+\code{\&SGS\_PARAMS} namelist block:
+
+\begin{table}
+\centering
+\caption{SGS turbulence model parameters and their default values.}
+\label{tab:sgs_params}
+\begin{tabular}{llll}
+\toprule
+Parameter & Symbol & Default & Description \\
+\midrule
+\code{sgs\_C\_prod}  & $C_{\rm prod}$ & 1.0 &
+  Gravitational production coefficient \\
+\code{sgs\_C\_diss}  & $C_{\rm diss}$ & 0.5 &
+  Dissipation coefficient \\
+\code{sgs\_C\_smag}  & $C_{\rm smag}$ & 0.18 &
+  Smagorinsky coefficient (reserved) \\
+\code{sgs\_floor}    & --- & $10^{-30}$ &
+  Minimum $e_{\rm sgs}$ (positivity floor) \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The ratio $C_{\rm prod}/C_{\rm diss}$ controls the equilibrium level
+of turbulent support (equation~\ref{eq:sigma_eq}).  The default
+values $C_{\rm prod}=1.0$, $C_{\rm diss}=0.5$ yield
+$N_{J,\rm eff} \approx 3.5$ cells per Jeans length, close to the
+\citet{Truelove1997} minimum of~4.  Increasing $C_{\rm prod}$ or
+decreasing $C_{\rm diss}$ provides stronger turbulent support and
+shallower refinement, at the cost of suppressing small-scale
+gravitational fragmentation.  The Smagorinsky coefficient
+$C_{\rm smag}$ is reserved for future implementation of
+resolved-strain production \citep{Smagorinsky1963,Schmidt2006}.
+
+
+\subsubsection{Implementation Notes}
+\label{sec:sgs_impl}
+
+\paragraph{Variable infrastructure.}
+The SGS energy density is stored as the $N_{\rm var}$-th hydro
+variable (index \code{isgs}), appended after the chemical species
+index \code{ichem} in the passive scalar chain:
+\begin{equation*}
+  \code{imetal} \to \code{idelay} \to \code{ivirial}
+  \to \code{ixion} \to \code{ichem} \to \code{isgs}.
+\end{equation*}
+The code verifies at startup that $\code{isgs} \le \code{NVAR}$
+and exits with a diagnostic message if the binary was compiled with
+insufficient variables.
+
+\paragraph{Source term ordering.}
+The SGS source terms are applied after cooling
+(\code{cooling\_fine}) and before the next Poisson solve in the
+\code{amr\_step} loop.  This ordering ensures that the thermal
+state is updated before the SGS PdV coupling accesses the divergence
+field, and that the gravitational production uses the current
+density field.
+
+\paragraph{Divergence field.}
+The pressure--dilatation term requires $\nabla\cdot\mathbf{v}$.
+Rather than computing velocity gradients from scratch (which would
+require careful treatment of AMR level boundaries), we reuse the
+\code{divu} array already computed by the Godunov solver when
+\code{pressure\_fix=.true.}.  This array stores
+$-\nabla\cdot\mathbf{v}\,\Delta t$ and is available at every
+leaf cell, ensuring consistency with the resolved-scale dynamics.
+
+\paragraph{Restart compatibility.}
+When restarting from a checkpoint written with $\code{NVAR}=11$
+(no SGS), the restore routine reads 11 variables per cell and
+initialises the 12th (\code{isgs}) to zero.  The SGS floor ensures
+positivity, and the production term rapidly builds up
+$e_{\rm sgs}$ from zero to its equilibrium value within a few
+free-fall times.
 
 
 %======================================================================
@@ -881,47 +1298,64 @@ accurately.  In practice, however, three issues remain:
     the wrong side of the equilibrium.
 \end{enumerate}
 
-Thus, while subcycling mitigates the most extreme overcooling events, it
+Thus, while subcycling mitigates the most extreme errors, it
 does not eliminate the systematic biases discussed below.
 
-\subsubsection{Overshooting Near Thermal Equilibrium}
+\subsubsection{Time-Step Dependence and Spurious Temperature
+  Discontinuities}
 \label{sec:overshoot}
 
-The Newton--Raphson scheme (equation~\ref{eq:NR_update}) is designed
-for monotonic cooling (or heating).  However, near the thermal
-equilibrium temperature $T_{\rm eq}$ where
-$\Lambda_{\rm net}(T_{\rm eq}) = 0$, the net rate changes sign and the
-update can overshoot.  Specifically:
+The most damaging property of the N-R subcycling solver in an AMR
+context is that the computed final temperature depends on the
+hydrodynamic time-step~$\Delta t$.
+Fig.~\ref{fig:cool_dtindep} demonstrates this directly: for the ISM
+and Dense ISM conditions ($n_{\rm H} = 1$--$10\,{\rm cm}^{-3}$,
+$T_0 = 3 \times 10^4\,$K), the N-R solver with
+$\Delta_{\rm var} = 4$ returns systematically different temperatures
+as $\Delta t / t_{\rm cool}$ varies from $10^{-2}$ to $10^3$.
+The Townsend exact integrator, by contrast, is genuinely
+$\Delta t$-independent across the entire range.
 
-\textbf{Sign reversal.}
-Consider a cell at temperature $T > T_{\rm eq}$ that is cooling
-($\Lambda_{\rm net} > 0$).  A Newton--Raphson step decreases $T_2$.
-If the step is large enough to cross $T_{\rm eq}$, the cell enters the
-heating regime ($\Lambda_{\rm net} < 0$).  On the next iteration, the
-solver increases $T_2$, potentially overshooting back above $T_{\rm eq}$.
-The result is an oscillation around $T_{\rm eq}$ that converges only
-after many sub-steps, or in the worst case does not converge within the
-500-iteration limit.
+In an AMR simulation with subcycling ($\code{nsubcycle} = 1,\,1,\,2$),
+adjacent cells at different refinement levels receive time-steps
+differing by factors of~2.  Cells at the same physical conditions
+but on different levels therefore receive \emph{different} final
+temperatures from the N-R solver.  This creates artificial temperature
+discontinuities at level boundaries.  Through the Jeans length
+$\lJ \propto T^{1/2}\,\rho^{-1/2}$, these temperature jumps translate
+directly into spurious refinement triggers: a cell on the coarser
+level may remain above the Jeans threshold while its neighbour on
+the finer level falls below it, solely due to the time-step difference.
 
-\textbf{Steep cooling function.}
-The problem is exacerbated where the cooling function has a steep slope
---- in particular, near the hydrogen Lyman-$\alpha$ peak at
-$T \sim 10^4\,{\rm K}$ and the metal cooling peak at
-$T \sim 10^{4.5}$--$10^{5.5}\,{\rm K}$.  In these temperature ranges,
-$|\Lambda'|$ is large and the linearised N-R step can dramatically
-overshoot.  The adaptive step control $w_{\rm cool}$ mitigates this by
-limiting $\Delta T_2 / T_2 \le \Delta_{\rm var}$, but for cells
-undergoing rapid cooling (large $|\Lambda|/T_2$), the effective
-sub-step can still be too large to track the equilibrium accurately.
+\textbf{Undercooling bias.}
+As shown in Fig.~\ref{fig:cool_traj}, the N-R solver with
+$\Delta_{\rm var} = 4$ systematically \emph{undercools} in the ISM
+regime --- the computed temperature remains above the RK4 reference
+trajectory.  This is a consequence of the semi-implicit (backward
+Euler) nature of the scheme: the implicit linearisation evaluates the
+cooling rate at the \emph{updated} temperature, which is lower and
+closer to equilibrium, where $|\Lambda_{\rm net}|$ is smaller.  The
+result is a systematic underestimate of the integrated cooling.  The
+bias increases with the time-step size, creating a correlation between
+AMR level and temperature error.
+
+\textbf{Level-dependent temperature gradient.}
+Consider a uniform-density region being photoionisation-heated.  With
+exact cooling, all cells converge to the same $T_{\rm eq}$ regardless
+of their AMR level.  With the N-R solver, cells on coarser levels
+(larger $\Delta t$) systematically undercool more than cells on finer
+levels, creating an artificial temperature gradient across the level
+boundary.  This gradient can trigger the Jeans criterion where no
+physical density enhancement exists, initiating a spurious refinement
+cascade.
 
 \textbf{Cumulative error.}
 Because $T_2$ enters the next hydrodynamic time-step as the updated
-thermal energy, any overshoot at step $n$ feeds back into the pressure
-and hence the Jeans length at step $n{+}1$.  A cell that overshoots to
-$T < T_{\rm eq}$ will have an artificially low Jeans length, potentially
-triggering spurious refinement.  Conversely, a cell that undershoots
-(remains at $T > T_{\rm eq}$) may fail to trigger the Jeans criterion
-when it should.
+thermal energy, any bias at step $n$ feeds back into the pressure
+and hence the Jeans length at step $n{+}1$.  Over many time-steps,
+the level-dependent temperature bias accumulates, creating persistent
+artefacts in the temperature field that drive sustained spurious
+refinement.
 
 \textbf{Time-step coupling.}
 The maximum sub-step size within \code{solve\_cooling} is determined by
@@ -1318,9 +1752,67 @@ equation~(\ref{eq:jeans_crit}):
   \sqrt{\rho^{\gstar-1}/\rho} = \rho^{(\gstar-2)/2}.
   \label{eq:jeans_poly}
 \end{equation}
-For $\gstar = 5/3$: $\lJ \propto \rho^{-1/6}$.  The Jeans length
-\emph{decreases very slowly} with density --- one or two additional
-levels of refinement are typically sufficient to resolve it.
+The behaviour of $\lJ$ in the polytropic regime depends critically
+on the value of $\gstar$:
+
+\begin{itemize}
+  \item $\gstar < 2$: $\lJ$ decreases with density.  For the
+    standard value $\gstar = 5/3$, $\lJ \propto \rho^{-1/6}$ ---
+    the decrease is slow, but unbounded.  Given enough levels, a
+    cascade can still develop.
+  \item $\gstar = 2$: $\lJ \propto \rho^{0} = \mathrm{const}$.
+    The Jeans length is \emph{independent of density} in the
+    polytropic regime, so refinement converges at a fixed level
+    regardless of how much the gas compresses.  This is the
+    \emph{critical polytropic index} for Jeans stability.
+  \item $\gstar > 2$: $\lJ$ increases with density, providing an
+    even stronger self-regulation.
+\end{itemize}
+
+Table~\ref{tab:gstar} quantifies the temperature floor at
+the star-formation threshold $n = \code{del\_star}\times\nstar
+= 55\,\nstar$ for different values of $\gstar$, keeping
+$\Tstar = 750\,$K.
+
+\begin{table}
+\centering
+\caption{Polytropic temperature floor and Jeans length behaviour
+for different values of $\gstar$, evaluated at the star-formation
+threshold $n = 55\,\nstar$.}
+\label{tab:gstar}
+\begin{tabular}{lccc}
+\toprule
+$\gstar$ & $T_{\rm floor}$ (K) & $\lJ$ scaling & Cascade safe? \\
+\midrule
+$5/3$  & $\sim$10\,900 & $\rho^{-1/6}$ (decreasing) & No \\
+$2$    & $\sim$41\,300 & const & Yes \\
+$7/3$  & $\sim$157\,000 & $\rho^{+1/6}$ (increasing) & Yes \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The $\gstar = 2$ case is appealing because it eliminates the
+cascade problem entirely without any additional mechanisms (no
+holdback, no \code{d\_jeans\_thre}, no level limits).  However,
+it comes at a significant physical cost: the temperature floor
+at the star-formation threshold rises from $\sim$10\,900\,K to
+$\sim$41\,300\,K --- nearly a factor of 4.  This dramatically
+increases the pressure support in star-forming gas, suppressing
+the peak densities and reducing the star formation rate.  Since
+$\dot{\rho}_* \propto \rho / t_{\rm ff} \propto \rho^{3/2}$, even
+modest changes in the density PDF propagate into order-of-magnitude
+SFR differences.  Adopting $\gstar = 2$ therefore requires a full
+recalibration of the star-formation parameters ($\epsilon_*$,
+$\code{del\_star}$, $\Tstar$, $\nstar$) against observational
+constraints, which is non-trivial for production simulations that
+have already been calibrated with $\gstar = 5/3$.
+
+In practice, the standard choice $\gstar = 5/3$ combined with
+\code{d\_jeans\_thre}~$\approx \nstar$ provides an effective
+compromise: the Jeans criterion is restricted to the polytropic
+regime where $\lJ$ varies slowly ($\propto \rho^{-1/6}$), limiting
+the cascade to 1--2 extra levels, while preserving the calibrated
+star-formation physics.
 
 In contrast, for gas below $\nstar$ (no polytropic floor), radiative
 cooling can drive $T$ to very low values while $\rho$ remains moderate.
@@ -1578,9 +2070,14 @@ standard \ramses.
 
 \textbf{Layer 2: \code{d\_jeans\_thre} (physics-based regulation).}
 Restricts the Jeans check to dense gas where the polytropic floor
-operates.  In this regime, $\lJ \propto \rho^{-1/6}$ varies slowly,
-and 1--2 extra refinement levels suffice to resolve it.  Provides
-self-consistent, physics-driven cascade termination.
+operates.  In this regime, $\lJ \propto \rho^{(\gstar-2)/2}$ varies
+slowly (for $\gstar = 5/3$, $\propto \rho^{-1/6}$), and 1--2 extra
+refinement levels suffice to resolve it.  As shown in
+Section~\ref{sec:polytropic}, adopting $\gstar \ge 2$ would eliminate
+the cascade entirely, but at the cost of a significantly stiffer
+pressure floor that requires SFR recalibration
+(Table~\ref{tab:gstar}).  Provides self-consistent, physics-driven
+cascade termination.
 
 \textbf{Layer 3: \code{n\_jeans\_bypass\_levels} (hard safety limit).}
 Absolute cap on the number of extra levels.  Prevents OOM regardless
@@ -1646,13 +2143,14 @@ between numerical and physical effects.
 The pressure floor removes the consequences of cooling inaccuracies
 (Section~\ref{sec:overshoot}) by overriding the computed temperature
 whenever it falls below $T_{\rm floor}$.  While this prevents the
-most extreme manifestation of cooling overshoot (spurious
+most extreme manifestation of cooling artefacts (spurious
 fragmentation), it also prevents the diagnosis of the underlying
-problem.  A cell that overshoots to $T \ll T_{\rm eq}$ due to the N-R
-integration error is silently corrected by the floor, but the energy
-error remains in the hydrodynamic variables.  Over many time-steps,
-these hidden energy errors can accumulate and affect the large-scale
-thermodynamic state.
+problem.  The $\Delta t$-dependent temperature biases of the N-R
+solver create artificial temperature discontinuities at AMR level
+boundaries that the floor cannot address, since the erroneous
+temperatures typically remain above $T_{\rm floor}$.  Over many
+time-steps, these hidden biases accumulate and affect the refinement
+pattern and the large-scale thermodynamic state.
 
 \textbf{(v) Incompatibility with turbulent Jeans analysis.}
 If the Jeans criterion is to be extended to include turbulent pressure
@@ -1711,23 +2209,14 @@ supernova feedback dominates in star-forming regions, while
 gravitational infall and accretion shocks drive turbulence in the CGM
 and IGM \citep{Iapichino2011}.
 
-Incorporating equation~(\ref{eq:jeans_turb_disc}) into the AMR
-refinement criterion requires:
-\begin{enumerate}
-  \item A local estimator of $\sigma_{\rm turb}$ --- either from
-    resolved velocity gradients \citep{Federrath2012} or from a
-    dedicated SGS model \citep{Schmidt2006, Rennehan2021}.
-  \item Modification of \code{jeans\_length\_refine()} to use the
-    effective sound speed $c_{\rm eff}^2 = c_s^2 + \sigma_{\rm turb}^2$
-    in place of $c_s^2$.
-  \item Re-evaluation of the cascade analysis
-    (Section~\ref{sec:cascade}), since turbulent pressure
-    \emph{increases} $\lJ^{\rm turb}$ and may naturally prevent the
-    cascade without a hard level limit.
-\end{enumerate}
-This turbulence-dependent Jeans criterion is a natural extension of
-the framework presented here, and will be the subject of a future
-paper.
+All three requirements are now implemented in the SGS turbulence
+model described in Section~\ref{sec:sgs}: the SGS energy provides a
+local estimator of $\sigma_{\rm turb}$
+(equation~\ref{eq:sigma_turb}), the Jeans criterion uses
+$c_{\rm eff}^2 = c_s^2 + \sigma_{\rm turb}^2$
+(equation~\ref{eq:jeans_sgs}), and the equilibrium analysis
+(Section~\ref{sec:sgs_equilib}) shows that the cascade terminates
+naturally at $N_{J,\rm eff} \approx 3.5$ cells per Jeans length.
 
 
 \subsection{Can Turbulence Replace the Holdback?}
@@ -1788,9 +2277,20 @@ dispersion scales as $\sigma_{\rm turb}(\ell) \propto \Delta
 x^{1/3}$ for Kolmogorov turbulence, so turbulent support weakens
 at finer levels, exacerbating the mismatch.
 
-We therefore conclude that \emph{turbulence alone cannot replace
-the holdback}; the two mechanisms address different physical
-regimes and are complementary rather than interchangeable.
+We therefore conclude that \emph{resolved turbulence alone cannot
+replace the holdback}; the resolved velocity dispersion is too
+weak in the IGM where the holdback is most needed.  However, the
+SGS turbulence model (Section~\ref{sec:sgs}) circumvents this
+limitation by construction: the equilibrium SGS dispersion
+$\sigma_{\rm eq}^2 \propto \dx^2$ (equation~\ref{eq:sigma_eq})
+provides support at every scale, including coarse cells in the
+IGM, because the gravitational production term injects energy
+wherever the local free-fall time is short compared to the
+dissipation time.  The SGS model and the holdback are therefore
+complementary: the SGS provides physically motivated cascade
+termination, while the holdback remains available as a safety
+net for regimes where the SGS model has not yet reached
+equilibrium.
 
 \subsection{Holdback as a Workaround for Cooling Errors}
 \label{sec:holdback_cooling}
@@ -1798,24 +2298,31 @@ regimes and are complementary rather than interchangeable.
 The analysis above assumes that all Jeans-triggered refinements at
 high redshift are physically motivated.  However, as demonstrated
 in Section~\ref{sec:overshoot}, the standard Newton--Raphson
-cooling solver can overshoot $T_{\rm eq}$, producing transiently
-low temperatures that shrink $\lJ$ by up to an order of magnitude.
+cooling solver produces \emph{time-step-dependent} temperatures:
+cells at different AMR levels receive different $\Delta t$ and
+therefore converge to different temperatures even under identical
+physical conditions.  These artificial temperature discontinuities
+at level boundaries create spurious Jeans-length gradients that
+trigger refinement where no physical density enhancement exists.
 Similarly, a single-redshift cooling table applied at the wrong
 epoch can shift $T_{\rm eq}$ by factors of $\sim$2
-(Section~\ref{sec:multi_z}).  These numerical artefacts generate
-\emph{spurious} Jeans triggers that dominate the refinement budget
-at high~$z$.
+(Section~\ref{sec:multi_z}).  Together, these numerical artefacts
+generate \emph{spurious} Jeans triggers that dominate the
+refinement budget at high~$z$.
 
 With a correct cooling implementation --- the Townsend exact
-integrator eliminating N-R overshooting, and multi-redshift
-table interpolation providing the appropriate UV background at
-each epoch --- most diffuse gas at high redshift remains in
-photoionisation equilibrium at $T \approx 10^4$\,K.  The Jeans
-length in this gas is large ($\lJ \sim 80$\,kpc at $n_{\rm H} =
-0.01\,{\rm cm}^{-3}$), well above the refinement threshold, and
-the Jeans criterion does not trigger.  Only genuinely
-self-shielded, collapsing gas triggers refinement --- which is the
-physically correct behaviour.
+integrator providing $\Delta t$-independent temperatures, and
+multi-redshift table interpolation providing the appropriate UV
+background at each epoch --- all cells at the same physical
+conditions converge to the same temperature regardless of their
+AMR level.  The artificial temperature discontinuities at level
+boundaries vanish, eliminating spurious Jeans triggers.  Most
+diffuse gas at high redshift remains in photoionisation equilibrium
+at $T \approx 10^4$\,K.  The Jeans length in this gas is large
+($\lJ \sim 80$\,kpc at $n_{\rm H} = 0.01\,{\rm cm}^{-3}$), well
+above the refinement threshold, and the Jeans criterion does not
+trigger.  Only genuinely self-shielded, collapsing gas triggers
+refinement --- which is the physically correct behaviour.
 
 \textbf{Numerical test.}
 We test this hypothesis directly by running two cosmological
@@ -1866,11 +2373,14 @@ physically appropriate resolution for the densest, self-shielded
 gas.
 
 These results support the interpretation that the cosmological
-holdback mechanism has historically been compensating for cooling
-solver artefacts rather than preventing physically motivated
-refinement.  With an accurate cooling implementation, the holdback
-is no longer necessary for \emph{stability}; its remaining role is
-purely one of \emph{computational cost control}.
+holdback mechanism has historically been compensating for the
+$\Delta t$-dependent temperature artefacts of the N-R solver
+(Section~\ref{sec:overshoot}) rather than preventing physically
+motivated refinement.  With a $\Delta t$-independent cooling
+implementation, the artificial temperature discontinuities at level
+boundaries vanish, and the holdback is no longer necessary for
+\emph{stability}; its remaining role is purely one of
+\emph{computational cost control}.
 
 
 %======================================================================
@@ -1886,9 +2396,12 @@ criterion in cosmological AMR simulations, implemented in the
   \item \textbf{Improved cooling module.}  The Eunha cooling module
     replaces the standard \ramses\ Newton--Raphson solver with the
     \citet{Townsend2009} exact integration scheme applied to 3D Grackle
-    equilibrium cooling tables \citep{Smith2017}.  This eliminates
-    temperature overshooting near thermal equilibrium, removes
-    stochastic noise from the Jeans length evaluation, and provides
+    equilibrium cooling tables \citep{Smith2017}.  The exact integrator
+    is genuinely time-step independent
+    (Section~\ref{sec:exact_cooling}), eliminating the artificial
+    temperature discontinuities at AMR level boundaries that arise from
+    the $\Delta t$-dependent N-R solver
+    (Section~\ref{sec:overshoot}).  It also provides
     density-dependent metallicity and non-LTE molecular weights.
     Multi-redshift table interpolation tracks the evolving UV
     background \citep{HM2012} across cosmic time, eliminating the
@@ -1906,18 +2419,33 @@ criterion in cosmological AMR simulations, implemented in the
   \item \textbf{Quantitative analysis.}  We have shown that differences
     between the \ramses\ and Grackle cooling rates propagate into
     40--80\,per\,cent errors in the Jeans length at low densities, and
-    that the N-R temperature overshoot introduces transient refinement
-    noise that the exact integrator eliminates entirely.
+    that the $\Delta t$-dependent N-R solver introduces level-dependent
+    temperature biases that drive spurious refinement at AMR level
+    boundaries.  The exact integrator eliminates this entirely.
+
+  \item \textbf{Critical polytropic index.}  The Jeans length in the
+    polytropic regime scales as $\lJ \propto \rho^{(\gstar-2)/2}$.
+    For $\gstar \ge 2$, $\lJ$ is non-decreasing with density and the
+    Jeans criterion self-terminates without any auxiliary mechanisms.
+    However, increasing $\gstar$ from $5/3$ to $2$ raises the
+    temperature floor at the star-formation threshold by a factor
+    of $\sim$4 (Table~\ref{tab:gstar}), necessitating a full
+    recalibration of the star-formation parameters.  The combination
+    of $\gstar = 5/3$ with \code{d\_jeans\_thre}$\,\approx\nstar$
+    provides an effective alternative that preserves the existing
+    calibration while limiting the cascade to 1--2 extra levels
+    (Section~\ref{sec:polytropic}).
 
   \item \textbf{Holdback diagnosis.}  A direct numerical test at
-    $z \approx 9$ demonstrates that with accurate cooling, the
-    cosmological holdback can be disabled without triggering a
-    refinement cascade (Section~\ref{sec:holdback_cooling}).  The
-    holdback has historically compensated for cooling artefacts; with
-    the exact integrator and multi-$z$ tables, its role reduces to
-    computational cost control.  Turbulent pressure support, while
-    physically important, cannot replace the holdback in the diffuse
-    regime where it is most needed
+    $z \approx 9$ demonstrates that with accurate,
+    $\Delta t$-independent cooling, the cosmological holdback can be
+    disabled without triggering a refinement cascade
+    (Section~\ref{sec:holdback_cooling}).  The holdback has
+    historically been compensating for the level-dependent temperature
+    artefacts of the N-R solver; with the exact integrator and
+    multi-$z$ tables, its role reduces to computational cost control.
+    Turbulent pressure support, while physically important, cannot
+    replace the holdback in the diffuse regime where it is most needed
     (Section~\ref{sec:turb_vs_holdback}).
 \end{enumerate}
 

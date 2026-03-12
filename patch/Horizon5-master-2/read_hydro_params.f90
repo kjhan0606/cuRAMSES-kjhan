@@ -338,6 +338,8 @@ subroutine read_hydro_params(nml_ok)
   if(sf_virial)ixion=ivirial+1
   ichem=ixion
   if(aton)ichem=ixion+1
+  isgs=ichem
+  if(use_sgs)isgs=ichem+1
   if(myid==1) then
      write(*,*) 'Hydro var indices:'
 #if NENER>0
@@ -348,8 +350,17 @@ subroutine read_hydro_params(nml_ok)
      if(sf_virial)       write(*,*) '   ivirial = ',ivirial
      if(aton)            write(*,*) '   ixion   = ',ixion
      write(*,*) '   ichem   = ',ichem
+     if(use_sgs)         write(*,*) '   isgs    = ',isgs
   endif
-  ! Last variable is ichem
+  ! Last variable is isgs (or ichem if use_sgs=.false.)
+  ! Runtime check: make sure NVAR is large enough
+  if(use_sgs .and. isgs > nvar) then
+     if(myid==1) then
+        write(*,*) 'ERROR: use_sgs=T requires NVAR >= ', isgs
+        write(*,*) '  Current NVAR=', nvar, '. Recompile with NVAR=', isgs
+     end if
+     call clean_stop
+  end if
 
 end subroutine read_hydro_params
 

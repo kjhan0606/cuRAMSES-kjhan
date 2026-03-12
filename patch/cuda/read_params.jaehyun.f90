@@ -25,7 +25,7 @@ subroutine read_params
   !--------------------------------------------------
 !jhshin1
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
-       & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,ordering &
+       & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,remap_thresh,ordering &
        & ,bisec_tol,static,geom,overload,cost_weighting,aton &
        & ,memory_balance,mem_weight_grid,mem_weight_part,mem_weight_sink &
        & ,jobcontrolfile &
@@ -43,7 +43,8 @@ subroutine read_params
        & ,use_dilaton &
        & ,use_galileon &
        & ,use_coupled_de &
-       & ,use_ede
+       & ,use_ede &
+       & ,use_sgs
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
@@ -57,6 +58,7 @@ subroutine read_params
        & n_iter_galileon,galileon_eps
   namelist/coupled_de_params/beta_cde
   namelist/ede_params/omega_ede,z_ede,w_ede
+  namelist/sgs_params/sgs_C_prod,sgs_C_diss,sgs_C_smag,sgs_floor
   namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
@@ -261,6 +263,12 @@ subroutine read_params
      rewind(1)
      read(1,NML=ede_params,END=68)
 68   continue
+  end if
+  ! SGS turbulence parameters
+  if(use_sgs) then
+     rewind(1)
+     read(1,NML=sgs_params,END=67)
+67   continue
   end if
 
   !-------------------------------------------------
@@ -665,6 +673,27 @@ subroutine read_params
         write(*,'(A)') ' Early Dark Energy (Doran-Robbers) enabled'
         write(*,'(A,F8.4,A,F10.1,A,F6.3)') &
              '   omega_ede=', omega_ede, '  z_ede=', z_ede, '  w_ede=', w_ede
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! SGS (Sub-Grid Scale) Turbulence model
+  !-------------------------------------------------
+  if(use_sgs) then
+     if(.not. hydro) then
+        if(myid==1) write(*,*) 'ERROR: use_sgs=T requires hydro=T'
+        call clean_stop
+     end if
+     if(sgs_C_diss <= 0d0) then
+        if(myid==1) write(*,*) 'ERROR: sgs_C_diss must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' SGS turbulence model enabled'
+        write(*,'(A,F6.3,A,F6.3,A,F6.3)') &
+             '   C_prod=', sgs_C_prod, '  C_diss=', sgs_C_diss, '  C_smag=', sgs_C_smag
+        write(*,'(A,ES10.3)') '   floor=', sgs_floor
+        write(*,'(A,I3,A,I3)') '   isgs=', isgs, '  nvar=', nvar
      end if
   end if
 

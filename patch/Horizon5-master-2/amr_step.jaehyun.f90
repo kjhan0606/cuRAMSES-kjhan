@@ -178,6 +178,9 @@ recursive subroutine amr_step(ilevel,icount)
                  ok_defrag=.true.
               endif
            end if
+        else if(remap_thresh>0d0)then
+           ! Auto remap: check weight inhomogeneity every coarse step
+           call check_load_imbalance(ok_defrag)
         end if
      endif
   end if
@@ -786,7 +789,9 @@ recursive subroutine amr_step(ilevel,icount)
                                call timer('cooling','start')
   if(neq_chem.or.cooling.or.T2_star>0.0)call cooling_fine(ilevel)
 #endif
-  
+  ! SGS turbulence source terms (production, dissipation, PdV coupling)
+  if(use_sgs)call sgs_fine(ilevel)
+
   !---------------
   ! Move particles
   !---------------
@@ -1046,3 +1051,58 @@ subroutine rt_step(ilevel)
   
 end subroutine rt_step
 #endif
+!###########################################################
+!###########################################################
+subroutine check_load_imbalance(did_remap)
+  ! Check weight inhomogeneity and trigger load_balance if
+  ! max/avg - 1 > remap_thresh.
+  ! Called every coarse step when nremap==0 and remap_thresh>0.
+  use amr_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  logical,intent(out)::did_remap
+
+  real(dp)::my_cost,max_cost,sum_cost,imbalance
+  integer::ilevel,info,nsub
+#ifndef WITHOUTMPI
+  real(dp)::buf(2),gbuf(2)
+#endif
+
+  did_remap=.false.
+
+  ! Compute local cost: weighted grid count (subcycle-aware)
+  my_cost=0d0
+  nsub=1
+  do ilevel=levelmin,nlevelmax
+     my_cost=my_cost+dble(numbl(myid,ilevel))*dble(nsub)
+     nsub=nsub*nsubcycle(ilevel)
+  end do
+
+#ifndef WITHOUTMPI
+  buf(1)=my_cost
+  buf(2)=my_cost
+  call MPI_ALLREDUCE(buf(1),max_cost,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(buf(2),sum_cost,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+#else
+  max_cost=my_cost
+  sum_cost=my_cost
+#endif
+
+  if(sum_cost>0d0)then
+     imbalance=(max_cost-sum_cost/dble(ncpu))/(sum_cost/dble(ncpu))
+  else
+     imbalance=0d0
+  end if
+
+  if(imbalance>remap_thresh)then
+     if(myid==1) write(*,'(A,F6.2,A,F6.2,A)') &
+          ' Load imbalance ',imbalance*100d0,'% > threshold ', &
+          remap_thresh*100d0,'% -> rebalancing'
+     call load_balance
+     call defrag
+     did_remap=.true.
+  end if
+
+end subroutine check_load_imbalance

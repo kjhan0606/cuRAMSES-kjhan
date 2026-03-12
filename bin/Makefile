@@ -125,7 +125,7 @@ SIDM_OBJ = sidm_scatter.o
 
 AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loop.jaehyun.o amr_step.jaehyun.o update_time.o \
          output_amr.kjhan.o flag_utils.kjhan.o physical_boundaries.kjhan.o virtual_boundaries.kjhan.o refine_utils.o nbors_utils.kjhan.o \
-         hilbert.o load_balance.kjhan.o title.o sort.o cooling_fine.kjhan.o units.o light_cone.part.o light_cone.hydro2.o light_cone.sink2.o movie_mod.yonghwi_org.o kjhan.o\
+         hilbert.o load_balance.kjhan.o title.o sort.o cooling_fine.kjhan.o sgs_fine.o units.o light_cone.part.o light_cone.hydro2.o light_cone.sink2.o movie_mod.yonghwi_org.o kjhan.o\
 		 output_sphere_hydro.o output_sphere_part.o output_sphere_sink.o \
          morton_init.o $(HDF5_OBJS)
 # Particle-Mesh objects

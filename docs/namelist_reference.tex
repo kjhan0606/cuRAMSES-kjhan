@@ -291,12 +291,27 @@ from the snapshot directory.
 Load-balancing frequency: perform domain decomposition every
 \texttt{nremap} coarse time steps.  Recommended value: \textbf{5}
 (balances redistribution overhead against growing load imbalance).
-Set to \texttt{0} to disable load balancing entirely.
+Set to \texttt{0} to disable periodic load balancing and use
+the adaptive threshold-based trigger instead (see
+\texttt{remap\_thresh}).
 
 \apinote{Benchmarks (200\,M particles, 12~ranks, 10~steps) show that
 \texttt{nremap=5} reduces total runtime by 18\%\ compared to
 \texttt{nremap=1}, with load-balance overhead at 6.3\%\ of wall time.
 Larger values (e.g.\ 10) save overhead but allow imbalance to grow.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{remap\_thresh}{real(dp)}{0.01}
+\label{param:remap_thresh}
+
+\begin{quote}
+Weight inhomogeneity threshold for adaptive load rebalancing.
+When \texttt{nremap=0}, the code checks the load imbalance
+(max/mean $-1$) every coarse step and triggers \texttt{load\_balance}
+when it exceeds this threshold.
+Default: \texttt{0.01} (1\%).
+Has no effect when \texttt{nremap>0} (periodic mode takes precedence).
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -757,6 +772,25 @@ active).
 Cells with fewer than \paramref{sidm_npart_min} dark matter particles
 are skipped.  See Section~\ref{sec:sidm_params} for the full set of
 SIDM parameters.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{use\_mond}{logical}{.false.}
+\label{param:use_mond}
+
+\begin{quote}
+Enable Modified Newtonian Dynamics (MOND).  When \texttt{.true.}, the
+gravitational force is modified according to the MOND prescription set
+by \paramref{mond_type} in \texttt{\&MOND\_PARAMS}.  Three modes are
+available: algebraic QUMOND (Phase~0), full QUMOND with phantom density
+(Phase~1), and AQUAL iterative solver (Phase~2).
+
+\textbf{Requires} \paramref{poisson}\texttt{=.true.}.
+
+\apinote{A warning is issued if \paramref{pic}\texttt{=.true.}\ (dark
+matter particles present), since MOND is designed to replace dark
+matter.  See Section~\ref{sec:mond_params} for the full set of MOND
+parameters.}
 \end{quote}
 
 % ------------------------------------------------------------------
@@ -2253,6 +2287,130 @@ For inelastic events, $\Delta E_k$ reflects the intentional $\pm 2\delta c^2$ tr
 
 
 %======================================================================
+\section{\texttt{\&MOND\_PARAMS} -- Modified Newtonian Dynamics}
+\label{sec:mond_params}
+%======================================================================
+
+Parameters for MOND (Modified Newtonian Dynamics).  Three modes
+are available: algebraic QUMOND (Phase~0), full QUMOND with phantom
+density (Phase~1), and AQUAL iterative solver (Phase~2).
+An external field effect (EFE) is supported in all modes.
+Requires \paramref{use_mond}\texttt{=.true.}\ and
+\paramref{poisson}\texttt{=.true.}\ in \texttt{\&RUN\_PARAMS}.
+
+% ------------------------------------------------------------------
+\paramheader{a0\_mond}{real(dp)}{$1.2\times10^{-8}$}
+\label{param:a0_mond}
+
+\begin{quote}
+MOND critical acceleration $a_0$ in cm\,s$^{-2}$.  Converted to code
+units internally via $a_0^{\rm code} = a_0 / (L_{\rm box}/t_{\rm code}^2)$.
+Must be $> 0$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mond\_mu\_type}{integer}{1}
+\label{param:mond_mu_type}
+
+\begin{quote}
+Interpolation function family:
+\begin{description}[style=nextline,leftmargin=2cm,font=\ttfamily]
+  \item[1] \textbf{Simple}: $\mu(x) = x/(1+x)$, \;
+    $\nu(y) = \tfrac{1}{2} + \tfrac{1}{2}\sqrt{1 + 4/y}$.
+  \item[2] \textbf{Standard}: $\mu(x) = x/\sqrt{1+x^2}$, \;
+    $\nu(y) = \sqrt{\tfrac{1}{2} + \tfrac{1}{2}\sqrt{1 + 4/y^2}}$.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mond\_type}{integer}{0}
+\label{param:mond_type}
+
+\begin{quote}
+MOND implementation mode:
+\begin{description}[style=nextline,leftmargin=2cm,font=\ttfamily]
+  \item[0] \textbf{Algebraic QUMOND (Phase~0)}: cell-by-cell
+    multiplication $\mathbf{f}^{\rm MOND} = \nu\,\mathbf{f}$.
+    Fast but not curl-free for asymmetric mass distributions.
+  \item[1] \textbf{Full QUMOND (Phase~1)}: compute phantom density
+    $\rho_{\rm ph} = -\nabla\cdot[(\nu-1)\mathbf{f}]/(4\pi G)$
+    and re-solve Poisson.  Guarantees curl-free MOND field.
+    Cost: $\sim 2\times$ baseline Poisson.
+  \item[2] \textbf{AQUAL iterative (Phase~2)}: self-consistent
+    nonlinear Poisson solver via fixed-point iteration with
+    $\mu$-function.  Most physically fundamental (derived from action).
+    Cost: $(N_{\rm iter}+1)\times$ baseline Poisson.
+    Controlled by \paramref{n_iter_mond} and \paramref{mond_eps}.
+\end{description}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{n\_iter\_mond}{integer}{10}
+\label{param:n_iter_mond}
+
+\begin{quote}
+Maximum number of AQUAL fixed-point iterations per level
+(\texttt{mond\_type=2} only).  The iteration exits early if convergence
+is reached (see \paramref{mond_eps}).  Must be $\geq 1$.
+
+\apinote{Typical convergence requires 3--10 iterations depending on
+the MOND regime.  The iteration count is printed at each step.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{mond\_eps}{real(dp)}{$10^{-6}$}
+\label{param:mond_eps}
+
+\begin{quote}
+Convergence threshold for the AQUAL iteration
+(\texttt{mond\_type=2} only).  The iteration converges when
+$\max|\mathbf{f}^{(n+1)} - \mathbf{f}^{(n)}| /
+\max|\mathbf{f}^{(n+1)}| < \epsilon$.
+Must be $> 0$.
+
+\apinote{A warning is printed if the iteration does not converge
+within \paramref{n_iter_mond} steps.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{g\_ext\_mond}{real(dp)(1:3)}{0, 0, 0}
+\label{param:g_ext_mond}
+
+\begin{quote}
+External gravitational field $\mathbf{g}_{\rm ext}$ in cm\,s$^{-2}$
+for the external field effect (EFE).  Applies to all MOND modes.
+When non-zero, the interpolation function argument becomes
+$|\mathbf{f} + \mathbf{g}_{\rm ext}|/a_0$ instead of
+$|\mathbf{f}|/a_0$.
+
+\begin{itemize}
+\item Phase~0: $f_d^{\rm MOND} = \nu\,f_d + (\nu-1)\,g_{{\rm ext},d}$.
+\item Phase~1: divergence uses $(\nu-1)(f_d + g_{{\rm ext},d})$.
+\item Phase~2: divergence uses $(\mu-1)(f_d + g_{{\rm ext},d})$.
+\end{itemize}
+
+Set to $(0,0,0)$ for cosmological periodic boxes (no EFE).
+Relevant for isolated galaxy or zoom-in simulations.
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_mond = .true.
+/
+
+&MOND_PARAMS
+a0_mond      = 1.2d-8   ! MOND critical acceleration
+mond_mu_type = 1         ! simple interpolation function
+mond_type    = 2         ! AQUAL iterative
+n_iter_mond  = 10        ! max iterations
+mond_eps     = 1d-6      ! convergence threshold
+g_ext_mond   = 0d0, 0d0, 1d-9  ! external field (optional)
+/
+\end{lstlisting}
+
+
+%======================================================================
 \section{Complete Example: Cosmological Zoom-In}
 \label{sec:example}
 %======================================================================
@@ -2350,6 +2508,14 @@ Mseed          = 1.0e5
 ! sidm_npart_min     = 2
 ! /
 ! (also set sidm = .true. in &RUN_PARAMS)
+
+! --- Optional: MOND ---
+! &MOND_PARAMS
+! a0_mond      = 1.2d-8
+! mond_mu_type = 1
+! mond_type    = 1        ! 0=algebraic, 1=QUMOND, 2=AQUAL
+! /
+! (also set use_mond = .true. in &RUN_PARAMS)
 \end{lstlisting}
 
 
@@ -2453,6 +2619,10 @@ should be set consistently.
 \texttt{sidm}
   & \texttt{sidm\_cross\_section}, \texttt{sidm\_npart\_min}
   & SIDM requires \texttt{pic=.true.}; parameters in \texttt{\&SIDM\_PARAMS} \\
+\addlinespace
+\texttt{use\_mond}
+  & \texttt{a0\_mond}, \texttt{mond\_type}, \texttt{n\_iter\_mond}, \texttt{mond\_eps}, \texttt{g\_ext\_mond}
+  & MOND requires \texttt{poisson=.true.}; parameters in \texttt{\&MOND\_PARAMS} \\
 \end{longtable}
 
 

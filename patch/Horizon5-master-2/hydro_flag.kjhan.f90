@@ -253,12 +253,16 @@ subroutine jeans_length_refine(ind_cell,ok,ncell,ilevel)
         etherm=etherm-uold(indi,ndim+2+irad)
      end do
 #endif
-     ! the temperature
+     ! the temperature (c_s^2 = gamma*P/rho = (gamma-1)*etherm/rho)
      tempe =  etherm / dens * (gamma -1.0)
+     ! SGS turbulence: c_eff^2 = c_s^2 + (2/3)*e_sgs
+     if(use_sgs .and. isgs>0) then
+        tempe = tempe + (2d0/3d0)*max(uold(indi,isgs)/dens, 0d0)
+     end if
      ! prevent numerical crash due to negative temperature
      tempe = max(tempe,smallc**2)
      ! compute the Jeans length (remember G=1)
-     lamb_jeans = sqrt( tempe * pi / dens / factG )  
+     lamb_jeans = sqrt( tempe * pi / dens / factG )
      ! the Jeans length must be smaller
      ! than n_jeans times the size of the pixel
      ok(i) = ok(i) .or. ( n_jeans*tail_pix >= lamb_jeans )

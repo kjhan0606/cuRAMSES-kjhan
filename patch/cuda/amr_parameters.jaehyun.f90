@@ -133,6 +133,7 @@ module amr_parameters
   integer::ncontrol=1         ! Write control variables
   integer::fbackup=1000000    ! Backup data to disk
   integer::nremap=5           ! Load balancing frequency (0: never, 5: optimal)
+  real(dp)::remap_thresh=0.05d0 ! Weight inhomogeneity threshold for auto remap (5%)
 
   ! Output parameters
   integer::iout=1             ! Increment for output times
@@ -370,6 +371,14 @@ module amr_parameters
   real(dp)::omega_ede=0.04d0            ! EDE energy density fraction
   real(dp)::z_ede=3000.0d0              ! EDE injection redshift
   real(dp)::w_ede=0.333d0               ! EDE equation of state
+
+  ! SGS (Sub-Grid Scale) Turbulence model parameters
+  logical ::use_sgs=.false.              ! Enable SGS turbulence model
+  integer ::isgs=0                       ! Variable index for ρ·e_sgs (set at runtime)
+  real(dp)::sgs_C_prod =1.0d0           ! Production coefficient (PdV compression)
+  real(dp)::sgs_C_diss =0.5d0           ! Dissipation coefficient
+  real(dp)::sgs_C_smag =0.18d0          ! Smagorinsky coefficient (optional shear production)
+  real(dp)::sgs_floor  =1.0d-30         ! Floor value for e_sgs (positivity)
 
 !chemo flags and variables
   real(dp)::rcell  =2.0D0     ! Supernovae superbubble radius in cells
