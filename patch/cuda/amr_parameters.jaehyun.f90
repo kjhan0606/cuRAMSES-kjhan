@@ -379,6 +379,9 @@ module amr_parameters
   real(dp)::sgs_C_diss =0.5d0           ! Dissipation coefficient
   real(dp)::sgs_C_smag =0.18d0          ! Smagorinsky coefficient (optional shear production)
   real(dp)::sgs_floor  =1.0d-30         ! Floor value for e_sgs (positivity)
+  real(dp)::sgs_cap    =1.0d0           ! Max ratio P_turb/P_thermal (cap)
+  real(dp)::sgs_e_init =0.01d0          ! Initial e_sgs/e_thermal at restart from non-SGS
+  logical ::sgs_hydro =.false.           ! Add P_turb to Riemann solver (T=full coupling, F=source-only)
 
 !chemo flags and variables
   real(dp)::rcell  =2.0D0     ! Supernovae superbubble radius in cells

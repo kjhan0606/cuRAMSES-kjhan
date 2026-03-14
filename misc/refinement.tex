@@ -79,10 +79,13 @@ quantify how cooling rate differences between the standard
 40--80\,per\,cent errors in the Jeans length at low densities,
 and demonstrate that the exact integrator removes the stochastic
 refinement noise caused by temperature overshooting.
-We further present a \emph{sub-grid scale turbulence model} that
-evolves the unresolved turbulent kinetic energy self-consistently
-within the Riemann solver, providing turbulent pressure support that
-naturally limits the refinement depth without requiring the holdback.
+We further present a \emph{refinement-only sub-grid scale turbulence
+model} that evolves the unresolved turbulent kinetic energy as a
+dynamical variable alongside the hydrodynamic quantities but restricts
+its role to the Jeans refinement criterion, providing a physically
+motivated, scale-dependent turbulent pressure floor that naturally
+limits the refinement depth without modifying the hydrodynamic solver
+or incurring any CFL penalty.
 \end{abstract}
 
 \begin{keywords}
@@ -190,21 +193,134 @@ Jeans length
 In the interstellar medium (ISM), turbulence is driven by supernova
 feedback, gravitational infall, magnetorotational instability, and
 galactic shear \citep{Robertson2008, Kim2017, Hopkins2018}.
-Subgrid-scale (SGS) turbulence models
-\citep{Schmidt2006, Schmidt2011, Rennehan2021} can estimate the
-unresolved turbulent energy on the grid scale, providing an in-situ
-value of $\sigma_{\rm turb}$ that can be fed into the refinement
-criterion.  In the context of star formation,
+In the context of star formation,
 \citet{Federrath2012} showed that turbulence
 simultaneously \emph{supports} gas on large scales (raising the
 effective Jeans mass) and \emph{compresses} gas locally (triggering
 collapse in overdense regions), so the net effect on refinement is
-scale-dependent.  \citet{Semenov2016} demonstrated that a
-turbulence-dependent star formation model produces more realistic
-star formation histories than density-threshold prescriptions.
-Incorporating turbulent pressure support into the AMR Jeans criterion
---- using either resolved velocity gradients or SGS models --- is a
-natural extension that we plan to address in future work.
+scale-dependent.
+
+Three broad strategies have been proposed to prevent artificial
+fragmentation when the thermal Jeans length falls below the grid
+scale:
+
+\paragraph{(A) Polytropic pressure floor.}
+The most widely adopted approach imposes a stiff equation of state
+$T = T_\star\,(n_{\rm H}/\nstar)^{\gstar-1}$ above the
+star-formation threshold $\nstar$, typically with $\gstar = 2$ so
+that the Jeans length becomes independent of density
+\citep{Truelove1997, Robertson2008, Schaye2015, Teyssier2015,
+Hopkins2018}.  This prevents runaway refinement and ensures that the
+\citet{Truelove1997} criterion is automatically satisfied at all
+densities.  However, the polytropic floor replaces the true
+thermodynamic state of the gas, artificially raising temperatures by
+orders of magnitude in dense star-forming regions.  When $\gstar = 2$
+the CFL time-step at density $n_{\rm H}$ is reduced by a factor
+$\sim(n_{\rm H}/\nstar)^{1/2}$, imposing a $\sim$300$\times$ penalty
+at $n_{\rm H} \sim 10^4\,{\rm cm^{-3}}$.  More fundamentally, the
+polytropic floor acts uniformly across all environments and scales:
+gas in cold streams, the circumgalactic medium (CGM), and the
+low-density ISM are all subject to the same prescription, even though
+the physical turbulent support varies enormously between these
+regimes.
+
+\paragraph{(B) Full sub-grid scale (SGS) dynamical models.}
+A physically motivated alternative is to evolve the unresolved
+turbulent kinetic energy $e_{\rm sgs}$ as an additional conserved
+variable alongside the hydrodynamic quantities
+\citep{Schmidt2006, Schmidt2011, Scannapieco2008}.  In this
+framework, a turbulent pressure $P_{\rm turb} = \frac{2}{3}\rho
+e_{\rm sgs}$ is included in the Riemann solver alongside the thermal
+pressure, the effective sound speed becomes $c_{\rm eff}^2 =
+\gamma P/\rho + \sigma_{\rm turb}^2$, and the SGS energy evolves
+through pressure--dilatation ($PdV$) work, production by resolved
+shear, and dissipation at the grid scale.  The appealing feature of
+this approach is its self-consistency: turbulent pressure enters the
+momentum and energy fluxes, participates in wave propagation, and
+modifies the Jeans criterion simultaneously.
+
+\citet{Schmidt2006} developed the compressible SGS energy equation
+and calibrated the dissipation coefficient against driven turbulence
+box simulations, finding $C_\varepsilon \approx 1.5$.
+\citet{Schmidt2011} extended the model with a mixed closure combining
+eddy-viscosity and nonlinear terms, and
+\citet{SchmidtBruckner2025} provided a comprehensive review of
+large-eddy simulation (LES) techniques for astrophysical flows.
+\citet{Scannapieco2008} implemented a similar buoyancy--drag SGS
+model in the SPH code \textsc{Gadget} and showed that it suppresses
+artificial fragmentation in galaxy mergers.
+\citet{Rennehan2021} applied SGS modelling to cosmological
+simulations, demonstrating that it can suppress artificial
+fragmentation in the CGM.  \citet{Semenov2016} used the locally
+evolved $\sigma_{\rm turb}$ to construct a turbulence-regulated
+star formation prescription that produces more realistic star
+formation histories than simple density-threshold models.
+
+Despite these successes, the full SGS approach faces significant
+practical challenges in large-volume cosmological AMR simulations.
+First, the turbulent pressure increases the effective wave speed,
+which tightens the CFL condition by a factor
+$(1 + \sigma_{\rm turb}^2/c_s^2)^{1/2}$.  In practice, this can
+reduce the time-step at fine AMR levels by a factor of 9--31$\times$
+(Section~\ref{sec:sgs}), rendering the simulation prohibitively
+expensive.  Second, the $PdV$ coupling --- in which compression does
+work on the turbulent pressure and vice versa --- transfers energy
+between the resolved and SGS components at every time-step.  When
+the SGS energy is subsequently dissipated and deposited as heat, the
+resulting non-physical gas heating further increases $c_s$ and
+tightens the CFL condition, creating a positive feedback loop.
+Third, the energy cap (requiring $P_{\rm turb} \le P_{\rm therm}$)
+that is often imposed to prevent runaway SGS amplification is
+rendered ineffective by the $\gamma$-factor asymmetry: transferring
+SGS energy to thermal energy increases the effective sound speed
+because $\gamma(\gamma-1) = 10/9 > 2/3$ for $\gamma = 5/3$, so
+capping the SGS energy and redirecting it to thermal energy
+\emph{increases} $c_{\rm eff}$ rather than decreasing it.
+Finally, the equilibrium between production and dissipation depends
+sensitively on the production mechanism: the gravitational production
+term $\mathcal{P}_{\rm grav} \propto \rho e_{\rm sgs}\sqrt{G\rho}$,
+which appears in some formulations
+\citep[e.g.][]{Scannapieco2008}, couples the equilibrium SGS
+dispersion directly to the Jeans scale ($\sigma_{\rm eq}^2 \propto
+G\rho\,\Delta x^2$), leading to excessive refinement suppression,
+while the Smagorinsky shear production
+\citep{Smagorinsky1963, Schmidt2006} provides turbulent support only
+in regions with strong resolved velocity gradients.
+
+\paragraph{(C) Refinement-only SGS turbulent pressure floor.}
+We propose a hybrid approach that retains the physical evolution of
+the SGS energy (production, advection, dissipation) but restricts
+its dynamical role to the refinement criterion alone.  The turbulent
+pressure $P_{\rm turb}$ is \emph{not} included in the Riemann solver
+and does not enter the CFL computation, the momentum flux, or the
+energy flux.  It enters only the Jeans criterion
+(equation~\ref{eq:jeans_turb}), where it raises the effective Jeans
+length and prevents unnecessary refinement.  This decoupling
+eliminates the CFL penalty entirely --- the hydrodynamic time-step
+is identical to a simulation without SGS --- while still providing
+a physically motivated, scale-dependent turbulent pressure floor.
+
+The key insight is that the \emph{refinement criterion} and the
+\emph{hydrodynamic solver} serve fundamentally different purposes.
+The refinement criterion decides where spatial resolution is needed;
+it should account for all sources of pressure support, including
+turbulence.  The hydrodynamic solver advances the resolved-scale
+equations, where the sub-grid turbulent stress is by definition
+below the resolution limit and its back-reaction on the resolved
+flow is inherently uncertain.  By keeping these two roles separate,
+we avoid the CFL penalty and the energy-transfer complications of
+the full SGS approach while providing refinement control that
+responds to the local dynamical state.
+
+This approach is conceptually analogous to the polytropic floor
+(approach A), but with a crucial difference: the turbulent pressure
+is not a prescribed function of density but a \emph{dynamically
+evolved} quantity that responds to the local shear, density, and
+flow history.  The SGS energy is advected with the flow, produced
+by resolved strain, and dissipated on the grid-crossing time-scale,
+so it self-consistently adapts to different environments --- from
+quiescent filaments to violently star-forming galaxies --- without
+any environment-specific tuning.
 
 Large-volume cosmological simulations such as Horizon-AGN
 \citep{Dubois2014}, EAGLE \citep{Schaye2015}, IllustrisTNG
@@ -216,7 +332,7 @@ whether from the holdback, cooling inaccuracies, or the neglect of
 turbulent pressure --- propagates into the predicted stellar masses,
 morphologies, and feedback histories.
 
-In this paper we present three improvements to the handling of the
+In this paper we present four improvements to the handling of the
 Jeans criterion in cosmological AMR simulations, implemented in
 \curamses:
 \begin{enumerate}
@@ -232,14 +348,18 @@ Jeans criterion in cosmological AMR simulations, implemented in
   \item Analysis of the \emph{polytropic temperature floor} and its
     role in self-regulating the bypass cascade through physics-based
     density thresholds (Section~\ref{sec:polytropic}).
+  \item A \emph{refinement-only SGS turbulence model} that evolves
+    the unresolved turbulent kinetic energy as a passive dynamical
+    variable and uses it to compute an effective Jeans length,
+    providing a physically motivated, scale-dependent refinement
+    criterion without modifying the hydrodynamic solver or incurring
+    any CFL penalty (Section~\ref{sec:sgs}).
 \end{enumerate}
-We also outline future directions for incorporating turbulent
-pressure support into the Jeans criterion
-(Section~\ref{sec:turbulence}).
 
 The paper is organised as follows.
 Section~\ref{sec:amr_refine} reviews AMR refinement in \ramses,
-including the holdback mechanism.
+including the holdback mechanism and the refinement-only SGS
+turbulence model.
 Section~\ref{sec:exact_cooling} describes the exact cooling integrator
 and multi-redshift tables.
 Section~\ref{sec:cooling} analyses the cooling rates and their impact
@@ -430,14 +550,16 @@ $7\times$.  The \emph{cosmological holdback}
 workaround, but it blocks all refinement criteria indiscriminately and
 introduces artificial starbursts when levels are released.
 
-We address this root cause by implementing a \emph{sub-grid scale}
-(SGS) turbulence model that evolves the unresolved turbulent kinetic
-energy alongside the hydrodynamic variables, following the
-compressible SGS framework of
+We address this root cause by implementing a \emph{refinement-only
+sub-grid scale} (SGS) turbulence model that evolves the unresolved
+turbulent kinetic energy alongside the hydrodynamic variables,
+following the compressible SGS framework of
 \citet{Schmidt2006,Schmidt2011,Scannapieco2008}.  The turbulent
-pressure enters both the Riemann solver and the Jeans criterion,
-providing self-consistent pressure support that naturally limits
-refinement depth without the holdback.
+pressure enters the Jeans refinement criterion but is \emph{not}
+included in the Riemann solver, providing a physically motivated
+turbulent pressure floor that naturally limits refinement depth
+without modifying the hydrodynamic solver or incurring any CFL
+penalty (see Section~\ref{sec:intro} for motivation).
 
 
 \subsubsection{Governing Equations}
@@ -483,10 +605,14 @@ $-P_{\rm turb}\,\nabla\cdot\mathbf{v}$, represents the work done by
 turbulent pressure during compression ($\nabla\cdot\mathbf{v} < 0$)
 or expansion ($\nabla\cdot\mathbf{v} > 0$).  In compression,
 $e_{\rm sgs}$ increases at the expense of the resolved kinetic energy,
-while in expansion it decreases.  This term conserves total energy
-exactly: the corresponding work is removed from the thermal/kinetic
-budget by the $P_{\rm turb}$ contribution to the Riemann solver
-fluxes (Section~\ref{sec:sgs_riemann}).
+while in expansion it decreases.  This term is active only when
+\code{sgs\_hydro=.true.}, where the corresponding work is removed
+from the thermal/kinetic budget by the $P_{\rm turb}$ contribution to
+the Riemann solver fluxes (Section~\ref{sec:sgs_riemann}).  In the
+default refinement-only mode (\code{sgs\_hydro=.false.}), the PdV
+term is disabled because $P_{\rm turb}$ does not enter the Riemann
+flux, and applying PdV without the corresponding flux would create
+energy from nothing.
 
 \paragraph{Gravitational production.}
 In self-gravitating systems, gravitational contraction stirs turbulent
@@ -538,8 +664,13 @@ $t_{\rm diss} = e_{\rm sgs}/\varepsilon_{\rm diss}
 can be much shorter than the hydrodynamic time-step, demanding an
 implicit treatment (Section~\ref{sec:sgs_implicit}).
 
-Crucially, the dissipated SGS energy is not lost: it is deposited
-as thermal energy, maintaining total energy conservation:
+In the refinement-only mode (\code{sgs\_hydro=.false.}, the default),
+dissipated SGS energy is simply removed rather than deposited as heat.
+This avoids non-physical gas heating that would otherwise tighten
+the CFL condition (see Section~\ref{sec:intro}).  When the full
+hydrodynamic coupling is enabled (\code{sgs\_hydro=.true.}), the
+dissipated energy is deposited as thermal energy, maintaining total
+energy conservation:
 \begin{equation}
   \left.\frac{\partial E_{\rm therm}}{\partial t}\right|_{\rm sgs}
   = +\varepsilon_{\rm diss}.
@@ -605,11 +736,17 @@ precisely the behaviour desired.
 \subsubsection{Riemann Solver Modifications}
 \label{sec:sgs_riemann}
 
-The turbulent pressure $P_{\rm turb}$ must enter the Riemann solver
-to maintain consistency between the SGS source terms and the
-resolved-scale fluxes.  We modify all five Riemann solvers available
-in \ramses\ (HLLC, HLL, Lax--Friedrichs, acoustic, and
-Roe-approximate).
+When the full hydrodynamic coupling is enabled
+(\code{sgs\_hydro=.true.}), the turbulent pressure $P_{\rm turb}$
+enters the Riemann solver to maintain consistency between the SGS
+source terms and the resolved-scale fluxes.  All five Riemann solvers
+available in \ramses\ (HLLC, HLL, Lax--Friedrichs, acoustic, and
+Roe-approximate) are modified accordingly.  In the default
+refinement-only mode (\code{sgs\_hydro=.false.}), these modifications
+are inactive and the Riemann solver operates identically to the
+standard code; the SGS energy is advected as a passive scalar and
+the turbulent pressure enters only the Jeans criterion
+(Section~\ref{sec:sgs_jeans}).
 
 \paragraph{Effective pressure and wave speeds.}
 In each solver, the total pressure driving the momentum flux is
@@ -721,16 +858,19 @@ generalised to include turbulent pressure support:
 \end{equation}
 where $\sigma_{\rm turb}^2 = \frac{2}{3}e_{\rm sgs}$ is obtained
 from the locally evolved SGS energy.  This modification appears in
-the \code{jeans\_length\_refine} routine and affects only the
-refinement decision; the Riemann solver independently includes
-$P_{\rm turb}$ in the fluxes (Section~\ref{sec:sgs_riemann}).
+the \code{jeans\_length\_refine} routine and is active regardless of
+the \code{sgs\_hydro} setting.  In the default refinement-only mode,
+this is the \emph{sole} dynamical role of the SGS energy: the
+Riemann solver, CFL computation, and primitive variable reconstruction
+operate identically to the standard code without SGS.
 
-The combined effect is self-consistent: the SGS model provides
-turbulent pressure that (i) physically supports the gas against
-gravitational fragmentation, (ii) increases the effective Jeans
-length so that the AMR refinement criterion is satisfied at coarser
-levels, and (iii) reduces the number of fine time-steps through
-subcycling, improving computational efficiency.
+The combined effect provides a physically motivated turbulent
+pressure floor: the SGS model evolves the unresolved turbulent energy
+in response to the local flow, and the Jeans criterion uses this
+energy to (i) increase the effective Jeans length so that the AMR
+refinement criterion is satisfied at coarser levels, and (ii) reduce
+the number of fine time-steps through subcycling, improving
+computational efficiency --- all without any time-step penalty.
 
 \paragraph{Comparison with the polytropic floor.}
 The polytropic equation of state
@@ -763,28 +903,39 @@ The SGS model is activated by setting \code{use\_sgs=.true.}\ in
 \toprule
 Parameter & Symbol & Default & Description \\
 \midrule
-\code{sgs\_C\_prod}  & $C_{\rm prod}$ & 1.0 &
+\code{sgs\_C\_prod}  & $C_{\rm prod}$ & 0.0 &
   Gravitational production coefficient \\
-\code{sgs\_C\_diss}  & $C_{\rm diss}$ & 0.5 &
+\code{sgs\_C\_diss}  & $C_{\rm diss}$ & 2.76 &
   Dissipation coefficient \\
-\code{sgs\_C\_smag}  & $C_{\rm smag}$ & 0.18 &
-  Smagorinsky coefficient (reserved) \\
+\code{sgs\_C\_smag}  & $C_{\rm smag}$ & 0.10 &
+  Smagorinsky shear production coefficient \\
 \code{sgs\_floor}    & --- & $10^{-30}$ &
   Minimum $e_{\rm sgs}$ (positivity floor) \\
+\code{sgs\_cap}      & --- & 1.0 &
+  Max ratio $P_{\rm turb}/P_{\rm therm}$ \\
+\code{sgs\_e\_init}  & --- & 0.01 &
+  Initial $e_{\rm sgs}/e_{\rm therm}$ at restart \\
+\code{sgs\_hydro}    & --- & \code{.false.} &
+  Include $P_{\rm turb}$ in Riemann solver \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The ratio $C_{\rm prod}/C_{\rm diss}$ controls the equilibrium level
-of turbulent support (equation~\ref{eq:sigma_eq}).  The default
-values $C_{\rm prod}=1.0$, $C_{\rm diss}=0.5$ yield
-$N_{J,\rm eff} \approx 3.5$ cells per Jeans length, close to the
-\citet{Truelove1997} minimum of~4.  Increasing $C_{\rm prod}$ or
-decreasing $C_{\rm diss}$ provides stronger turbulent support and
-shallower refinement, at the cost of suppressing small-scale
-gravitational fragmentation.  The Smagorinsky coefficient
-$C_{\rm smag}$ is reserved for future implementation of
-resolved-strain production \citep{Smagorinsky1963,Schmidt2006}.
+The default configuration uses Smagorinsky shear production
+($C_{\rm smag} = 0.10$, corresponding to an eddy-viscosity
+coefficient $C_\nu = C_{\rm smag}\sqrt{2/3} \approx 0.082$,
+consistent with \citealt{Schmidt2006}) as the sole source of SGS
+energy, with $C_{\rm prod} = 0$ (gravitational production disabled).
+The dissipation coefficient $C_{\rm diss} = 2.76$ corresponds to
+$C_\varepsilon = C_{\rm diss} \times (2/3)^{3/2} \approx 1.5$
+in the notation of \citet{Schmidt2006}, calibrated against driven
+turbulence simulations.  When \code{sgs\_hydro=.false.} (the
+default), the turbulent pressure enters only the Jeans criterion;
+the Riemann solver, CFL computation, and primitive variable
+reconstruction are unaffected.  Setting \code{sgs\_hydro=.true.}
+enables the full hydrodynamic coupling described in
+Section~\ref{sec:sgs_riemann}, at the cost of a significant CFL
+penalty (see discussion in Section~\ref{sec:intro}).
 
 
 \subsubsection{Implementation Notes}
@@ -810,14 +961,17 @@ state is updated before the SGS PdV coupling accesses the divergence
 field, and that the gravitational production uses the current
 density field.
 
-\paragraph{Divergence field.}
-The pressure--dilatation term requires $\nabla\cdot\mathbf{v}$.
-Rather than computing velocity gradients from scratch (which would
-require careful treatment of AMR level boundaries), we reuse the
-\code{divu} array already computed by the Godunov solver when
-\code{pressure\_fix=.true.}.  This array stores
-$-\nabla\cdot\mathbf{v}\,\Delta t$ and is available at every
-leaf cell, ensuring consistency with the resolved-scale dynamics.
+\paragraph{Velocity gradients.}
+The shear production and PdV terms require the velocity gradient
+tensor $\partial v_i / \partial x_j$.  These are computed from
+face-neighbour central differences at each leaf cell, independently
+of the Godunov solver's \code{divu} array.  This ensures that the
+SGS source terms are available regardless of the
+\code{pressure\_fix} setting.  From the full gradient tensor, the
+traceless strain-rate magnitude $|S^\ast|^2 = S_{ij}S_{ij} -
+\frac{1}{3}(\nabla\cdot\mathbf{v})^2$ and the divergence
+$\nabla\cdot\mathbf{v}$ are computed for shear production and PdV
+coupling, respectively.
 
 \paragraph{Restart compatibility.}
 When restarting from a checkpoint written with $\code{NVAR}=11$
@@ -2279,16 +2433,17 @@ at finer levels, exacerbating the mismatch.
 
 We therefore conclude that \emph{resolved turbulence alone cannot
 replace the holdback}; the resolved velocity dispersion is too
-weak in the IGM where the holdback is most needed.  However, the
-SGS turbulence model (Section~\ref{sec:sgs}) circumvents this
-limitation by construction: the equilibrium SGS dispersion
-$\sigma_{\rm eq}^2 \propto \dx^2$ (equation~\ref{eq:sigma_eq})
-provides support at every scale, including coarse cells in the
-IGM, because the gravitational production term injects energy
-wherever the local free-fall time is short compared to the
-dissipation time.  The SGS model and the holdback are therefore
-complementary: the SGS provides physically motivated cascade
-termination, while the holdback remains available as a safety
+weak in the IGM where the holdback is most needed.  The
+refinement-only SGS turbulence model (Section~\ref{sec:sgs})
+provides an alternative approach: it evolves the unresolved turbulent
+energy dynamically and uses it in the Jeans criterion, providing
+a scale-dependent pressure floor that adapts to the local flow
+conditions.  Crucially, because the SGS energy does not enter
+the Riemann solver (in the default \code{sgs\_hydro=.false.}
+mode), it imposes no CFL penalty on the hydrodynamic time-step.
+The SGS model and the holdback are therefore
+complementary: the SGS provides physically motivated refinement
+control, while the holdback remains available as a safety
 net for regimes where the SGS model has not yet reached
 equilibrium.
 
@@ -2560,14 +2715,23 @@ Robertson B.~E., Kravtsov A.~V., 2008, ApJ, 680, 1083
 \bibitem[\protect\citeauthoryear{Schaye et al.}{2015}]{Schaye2015}
 Schaye J., et al., 2015, MNRAS, 446, 521
 
+\bibitem[\protect\citeauthoryear{Scannapieco \& Br\"uggen}{2008}]{Scannapieco2008}
+Scannapieco E., Br\"uggen M., 2008, ApJ, 686, 927
+
 \bibitem[\protect\citeauthoryear{Schmidt \& Federrath}{2011}]{Schmidt2011}
 Schmidt W., Federrath C., 2011, A\&A, 528, A106
+
+\bibitem[\protect\citeauthoryear{Schmidt \& Br\"uckner}{2025}]{SchmidtBruckner2025}
+Schmidt W., Br\"uckner E., 2025, Living Reviews in Computational Astrophysics, 1, 2
 
 \bibitem[\protect\citeauthoryear{Schmidt, Niemeyer \& Hillebrandt}{2006}]{Schmidt2006}
 Schmidt W., Niemeyer J.~C., Hillebrandt W., 2006, A\&A, 450, 265
 
 \bibitem[\protect\citeauthoryear{Semenov, Kravtsov \& Gnedin}{2016}]{Semenov2016}
 Semenov V.~A., Kravtsov A.~V., Gnedin N.~Y., 2016, ApJ, 826, 200
+
+\bibitem[\protect\citeauthoryear{Smagorinsky}{1963}]{Smagorinsky1963}
+Smagorinsky J., 1963, Mon.\ Weather Rev., 91, 99
 
 \bibitem[\protect\citeauthoryear{Smith et al.}{2017}]{Smith2017}
 Smith B.~D., Bryan G.~L., Glover S.~C.~O., et al., 2017, MNRAS, 466, 2217
@@ -2583,6 +2747,9 @@ Sutherland R.~S., Dopita M.~A., 1993, ApJS, 88, 253
 
 \bibitem[\protect\citeauthoryear{Teyssier}{2002}]{Teyssier2002}
 Teyssier R., 2002, A\&A, 385, 337
+
+\bibitem[\protect\citeauthoryear{Teyssier}{2015}]{Teyssier2015}
+Teyssier R., 2015, ARA\&A, 53, 325
 
 \bibitem[\protect\citeauthoryear{Townsend}{2009}]{Townsend2009}
 Townsend R.~H.~D., 2009, ApJS, 181, 391

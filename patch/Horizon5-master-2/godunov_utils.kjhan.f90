@@ -79,11 +79,11 @@ subroutine cmpdt(uu,gg,dx,dt,ncell)
      end do
   end do
 #endif
-  ! SGS turbulent pressure: c²_eff = gamma*P/rho + P_turb/rho
-  ! uu(k,isgs) is still rho*e_sgs (conservative), so P_turb = (2/3)*rho*e_sgs = (2/3)*uu(k,isgs)
-  if(use_sgs .and. isgs>0) then
+  ! SGS turbulent pressure: rho*c_eff^2 = gamma*P + (2/3)*rho*e_sgs
+  ! At this point uu(k,ndim+2) = gamma*P, uu(k,isgs) = rho*e_sgs
+  if(use_sgs .and. sgs_hydro) then
      do k = 1, ncell
-        uu(k,ndim+2) = uu(k,ndim+2) + (2d0/3d0)*max(uu(k,isgs),0d0)
+        uu(k,ndim+2) = uu(k,ndim+2) + (two/three)*max(uu(k,isgs),zero)
      end do
   end if
   do k = 1, ncell
@@ -95,7 +95,7 @@ subroutine cmpdt(uu,gg,dx,dt,ncell)
      uu(k,ndim+2)=dble(ndim)*uu(k,ndim+2)
   end do
   do idim = 1,ndim
-     do k = 1, ncell 
+     do k = 1, ncell
         uu(k,ndim+2)=uu(k,ndim+2)+abs(uu(k,idim+1))
      end do
   end do
@@ -105,7 +105,7 @@ subroutine cmpdt(uu,gg,dx,dt,ncell)
      uu(k,1)=zero
   end do
   do idim = 1,ndim
-     do k = 1, ncell 
+     do k = 1, ncell
         uu(k,1)=uu(k,1)+abs(gg(k,idim))
      end do
   end do
@@ -329,10 +329,12 @@ subroutine riemann_approx(qleft,qright,fgdnv,ngrid)
      cl(i) = gamma*pl(i)*rl(i)
      cr(i) = gamma*pr(i)*rr(i)
   end do
-  if(use_sgs .and. isgs>0) then
+  ! SGS turbulent pressure in Lagrangian wave speed: rho^2*c_eff^2
+  ! qleft/qright(isgs) = e_sgs (specific), P_turb = (2/3)*rho*e_sgs
+  if(use_sgs .and. sgs_hydro) then
      do i=1,ngrid
-        cl(i)=cl(i)+(2d0/3d0)*rl(i)**2*max(qleft (i,isgs),0d0)
-        cr(i)=cr(i)+(2d0/3d0)*rr(i)**2*max(qright(i,isgs),0d0)
+        cl(i) = cl(i) + (two/three)*max(qleft (i,isgs),zero)*rl(i)*rl(i)
+        cr(i) = cr(i) + (two/three)*max(qright(i,isgs),zero)*rr(i)*rr(i)
      end do
   end if
 
@@ -506,10 +508,10 @@ subroutine riemann_approx(qleft,qright,fgdnv,ngrid)
      etot = etot + half*qgdnv(i,1)*qgdnv(i,5)**2
 #endif
      fgdnv(i,3) = qgdnv(i,2)*(etot+qgdnv(i,3))     ! Total energy
-     ! SGS turbulent pressure in momentum and energy fluxes
-     if(use_sgs .and. isgs>0) then
-        fgdnv(i,2) = fgdnv(i,2) + (2d0/3d0)*qgdnv(i,1)*max(qgdnv(i,isgs),0d0)
-        fgdnv(i,3) = fgdnv(i,3) + qgdnv(i,2)*(2d0/3d0)*qgdnv(i,1)*max(qgdnv(i,isgs),0d0)
+     ! SGS P_turb in Riemann flux
+     if(use_sgs .and. sgs_hydro) then
+        fgdnv(i,2) = fgdnv(i,2) + (two/three)*qgdnv(i,1)*max(qgdnv(i,isgs),zero)
+        fgdnv(i,3) = fgdnv(i,3) + qgdnv(i,2)*(two/three)*qgdnv(i,1)*max(qgdnv(i,isgs),zero)
      end if
   end do
   ! Other advected quantities
@@ -575,15 +577,16 @@ subroutine riemann_acoustic(qleft,qright,fgdnv,ngrid)
      pr(i)=max(qright(i,3),rr(i)*smallp)
   end do
 
-  ! Acoustic star state (c_eff includes SGS turbulent pressure)
+  ! Acoustic star state
   do i=1,ngrid
      cl(i) = gamma*pl(i)/rl(i)
      cr(i) = gamma*pr(i)/rr(i)
   end do
-  if(use_sgs .and. isgs>0) then
+  ! SGS turbulent pressure in wave speed: c_eff^2 = gamma*P/rho + (2/3)*e_sgs
+  if(use_sgs .and. sgs_hydro) then
      do i=1,ngrid
-        cl(i)=cl(i)+(2d0/3d0)*max(qleft (i,isgs),0d0)
-        cr(i)=cr(i)+(2d0/3d0)*max(qright(i,isgs),0d0)
+        cl(i) = cl(i) + (two/three)*max(qleft (i,isgs),zero)
+        cr(i) = cr(i) + (two/three)*max(qright(i,isgs),zero)
      end do
   end if
   do i=1,ngrid
@@ -693,10 +696,10 @@ subroutine riemann_acoustic(qleft,qright,fgdnv,ngrid)
      etot = etot             + half*qgdnv(i,1)*qgdnv(i,5)**2
 #endif
      fgdnv(i,3) = qgdnv(i,2)*(etot+qgdnv(i,3))     ! Total energy
-     ! SGS turbulent pressure in momentum and energy fluxes
-     if(use_sgs .and. isgs>0) then
-        fgdnv(i,2) = fgdnv(i,2) + (2d0/3d0)*qgdnv(i,1)*max(qgdnv(i,isgs),0d0)
-        fgdnv(i,3) = fgdnv(i,3) + qgdnv(i,2)*(2d0/3d0)*qgdnv(i,1)*max(qgdnv(i,isgs),0d0)
+     ! SGS P_turb in Riemann flux
+     if(use_sgs .and. sgs_hydro) then
+        fgdnv(i,2) = fgdnv(i,2) + (two/three)*qgdnv(i,1)*max(qgdnv(i,isgs),zero)
+        fgdnv(i,3) = fgdnv(i,3) + qgdnv(i,2)*(two/three)*qgdnv(i,1)*max(qgdnv(i,isgs),zero)
      end if
   end do
   ! Other advected quantities
@@ -758,7 +761,8 @@ subroutine riemann_llf(qleft,qright,fgdnv,ngrid)
         cl = cl + gamma_rad(n)*qleft(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) cl=cl+(2d0/3d0)*rl*max(qleft(i,isgs),0d0)
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cl = cl + (two/three)*rl*max(qleft(i,isgs),zero)
      cl = sqrt(cl/rl)
      ! Right states
      rr = max(qright(i,1),smallr)
@@ -770,7 +774,8 @@ subroutine riemann_llf(qleft,qright,fgdnv,ngrid)
         cr = cr + gamma_rad(n)*qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) cr=cr+(2d0/3d0)*rr*max(qright(i,isgs),0d0)
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cr = cr + (two/three)*rr*max(qright(i,isgs),zero)
      cr = sqrt(cr/rr)
      ! Local max. wave speed
      cmax(i) = max(abs(ul)+cl,abs(ur)+cr)
@@ -853,11 +858,12 @@ subroutine riemann_llf(qleft,qright,fgdnv,ngrid)
         fright(i,2) = fright(i,2) + qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) then
-        fleft (i,2)=fleft (i,2)+(2d0/3d0)*qleft (i,1)*max(qleft (i,isgs),0d0)
-        fright(i,2)=fright(i,2)+(2d0/3d0)*qright(i,1)*max(qright(i,isgs),0d0)
+     ! SGS P_turb in momentum flux
+     if(use_sgs .and. sgs_hydro) then
+        fleft (i,2) = fleft (i,2) + (two/three)*qleft (i,1)*max(qleft (i,isgs),zero)
+        fright(i,2) = fright(i,2) + (two/three)*qright(i,1)*max(qright(i,isgs),zero)
      end if
-     ! Total energy (P_turb*u work term included via Ptot)
+     ! Total energy
      fleft (i,3) = qleft (i,2)*(uleft (i,3)+qleft (i,3))
      fright(i,3) = qright(i,2)*(uright(i,3)+qright(i,3))
 #if NENER>0
@@ -866,9 +872,10 @@ subroutine riemann_llf(qleft,qright,fgdnv,ngrid)
         fright(i,3) = fright(i,3) + qright(i,2)*qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) then
-        fleft (i,3)=fleft (i,3)+qleft (i,2)*(2d0/3d0)*qleft (i,1)*max(qleft (i,isgs),0d0)
-        fright(i,3)=fright(i,3)+qright(i,2)*(2d0/3d0)*qright(i,1)*max(qright(i,isgs),0d0)
+     ! SGS P_turb in energy flux: u*P_turb work
+     if(use_sgs .and. sgs_hydro) then
+        fleft (i,3) = fleft (i,3) + qleft (i,2)*(two/three)*qleft (i,1)*max(qleft (i,isgs),zero)
+        fright(i,3) = fright(i,3) + qright(i,2)*(two/three)*qright(i,1)*max(qright(i,isgs),zero)
      end if
   end do
   ! Other passively advected quantities
@@ -935,7 +942,8 @@ subroutine riemann_hll(qleft,qright,fgdnv,ngrid)
         cl = cl + gamma_rad(n)*qleft(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) cl=cl+(2d0/3d0)*rl*max(qleft(i,isgs),0d0)
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cl = cl + (two/three)*rl*max(qleft(i,isgs),zero)
      cl = sqrt(cl/rl)
      ! Right states
      rr = max(qright(i,1),smallr)
@@ -947,7 +955,8 @@ subroutine riemann_hll(qleft,qright,fgdnv,ngrid)
         cr = cr + gamma_rad(n)*qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) cr=cr+(2d0/3d0)*rr*max(qright(i,isgs),0d0)
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cr = cr + (two/three)*rr*max(qright(i,isgs),zero)
      cr = sqrt(cr/rr)
      ! Left and right max. wave speed
      SL(i)=min(min(ul,ur)-max(cl,cr),zero)
@@ -1031,11 +1040,12 @@ subroutine riemann_hll(qleft,qright,fgdnv,ngrid)
         fright(i,2) = fright(i,2) + qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) then
-        fleft (i,2)=fleft (i,2)+(2d0/3d0)*qleft (i,1)*max(qleft (i,isgs),0d0)
-        fright(i,2)=fright(i,2)+(2d0/3d0)*qright(i,1)*max(qright(i,isgs),0d0)
+     ! SGS P_turb in momentum flux
+     if(use_sgs .and. sgs_hydro) then
+        fleft (i,2) = fleft (i,2) + (two/three)*qleft (i,1)*max(qleft (i,isgs),zero)
+        fright(i,2) = fright(i,2) + (two/three)*qright(i,1)*max(qright(i,isgs),zero)
      end if
-     ! Total energy (P_turb*u work term included via Ptot)
+     ! Total energy
      fleft (i,3) = qleft (i,2)*(uleft (i,3)+qleft (i,3))
      fright(i,3) = qright(i,2)*(uright(i,3)+qright(i,3))
 #if NENER>0
@@ -1044,9 +1054,10 @@ subroutine riemann_hll(qleft,qright,fgdnv,ngrid)
         fright(i,3) = fright(i,3) + qright(i,2)*qright(i,ndim+2+n)
      end do
 #endif
-     if(use_sgs .and. isgs>0) then
-        fleft (i,3)=fleft (i,3)+qleft (i,2)*(2d0/3d0)*qleft (i,1)*max(qleft (i,isgs),0d0)
-        fright(i,3)=fright(i,3)+qright(i,2)*(2d0/3d0)*qright(i,1)*max(qright(i,isgs),0d0)
+     ! SGS P_turb in energy flux: u*P_turb work
+     if(use_sgs .and. sgs_hydro) then
+        fleft (i,3) = fleft (i,3) + qleft (i,2)*(two/three)*qleft (i,1)*max(qleft (i,isgs),zero)
+        fright(i,3) = fright(i,3) + qright(i,2)*(two/three)*qright(i,1)*max(qright(i,isgs),zero)
      end if
   end do
   ! Other advected quantities
@@ -1097,7 +1108,7 @@ subroutine riemann_hllc(qleft,qright,fgdnv,ngrid)
   REAL(dp),dimension(1:nener)::eradl,eradr,erado
   REAL(dp),dimension(1:nener)::eradstarl,eradstarr
 #endif
-  REAL(dp)::psgsl,psgsr  ! SGS turbulent pressure (left/right)
+  REAL(dp)::pturbl, pturbr  ! SGS turbulent pressure
   INTEGER ::irad, ivar, i
 
   ! constants
@@ -1126,15 +1137,16 @@ subroutine riemann_hllc(qleft,qright,fgdnv,ngrid)
         etotl=etotl+eradl(irad)
      end do
 #endif
-     ! SGS turbulent pressure: P_turb = (2/3)*rho*e_sgs
-     psgsl=0d0
-     if(use_sgs .and. isgs>0) psgsl=(2d0/3d0)*rl*max(qleft(i,isgs),0d0)
-     Ptotl = Pl + psgsl
+     Ptotl = Pl
 #if NENER>0
      do irad=1,nener
         Ptotl=Ptotl+qleft(i,2+ndim+irad)
      end do
 #endif
+     ! SGS turbulent pressure
+     pturbl = zero
+     if(use_sgs .and. sgs_hydro) pturbl = (two/three)*rl*max(qleft(i,isgs),zero)
+     Ptotl = Ptotl + pturbl
 
      ! Right variables
      rr=max(qright(i,1),smallr)
@@ -1156,31 +1168,36 @@ subroutine riemann_hllc(qleft,qright,fgdnv,ngrid)
         etotr=etotr+eradr(irad)
      end do
 #endif
-     psgsr=0d0
-     if(use_sgs .and. isgs>0) psgsr=(2d0/3d0)*rr*max(qright(i,isgs),0d0)
-     Ptotr = Pr + psgsr
+     Ptotr = Pr
 #if NENER>0
      do irad=1,nener
         Ptotr=Ptotr+qright(i,2+ndim+irad)
      end do
 #endif
+     ! SGS turbulent pressure
+     pturbr = zero
+     if(use_sgs .and. sgs_hydro) pturbr = (two/three)*rr*max(qright(i,isgs),zero)
+     Ptotr = Ptotr + pturbr
 
      ! Find the largest eigenvalues in the normal direction to the interface
-     ! Note: SGS contribution is P_turb (NOT gamma*P_turb) since c²_eff = gamma*P/rho + P_turb/rho
-     cfastl=gamma*Pl+psgsl
+     cfastl=gamma*Pl
 #if NENER>0
      do irad = 1,nener
         cfastl = cfastl + gamma_rad(irad)*qleft(i,ndim+2+irad)
      end do
 #endif
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cfastl = cfastl + pturbl
      cfastl=sqrt(max(cfastl/rl,smallc**2))
 
-     cfastr=gamma*Pr+psgsr
+     cfastr=gamma*Pr
 #if NENER>0
      do irad = 1,nener
         cfastr = cfastr + gamma_rad(irad)*qright(i,ndim+2+irad)
      end do
 #endif
+     ! SGS turbulent pressure in wave speed
+     if(use_sgs .and. sgs_hydro) cfastr = cfastr + pturbr
      cfastr=sqrt(max(cfastr/rr,smallc**2))
 
      ! Compute HLL wave speed

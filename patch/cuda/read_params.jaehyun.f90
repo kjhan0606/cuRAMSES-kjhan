@@ -58,7 +58,7 @@ subroutine read_params
        & n_iter_galileon,galileon_eps
   namelist/coupled_de_params/beta_cde
   namelist/ede_params/omega_ede,z_ede,w_ede
-  namelist/sgs_params/sgs_C_prod,sgs_C_diss,sgs_C_smag,sgs_floor
+  namelist/sgs_params/sgs_C_prod,sgs_C_diss,sgs_C_smag,sgs_floor,sgs_cap,sgs_e_init,sgs_hydro
   namelist/sidm_params/sidm_cross_section,sidm_npart_min, &
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
@@ -692,7 +692,8 @@ subroutine read_params
         write(*,'(A)') ' SGS turbulence model enabled'
         write(*,'(A,F6.3,A,F6.3,A,F6.3)') &
              '   C_prod=', sgs_C_prod, '  C_diss=', sgs_C_diss, '  C_smag=', sgs_C_smag
-        write(*,'(A,ES10.3)') '   floor=', sgs_floor
+        write(*,'(A,ES10.3,A,F6.2,A,ES10.3,A,L1)') '   floor=', sgs_floor, &
+             '  cap=', sgs_cap, '  e_init=', sgs_e_init, '  hydro=', sgs_hydro
         write(*,'(A,I3,A,I3)') '   isgs=', isgs, '  nvar=', nvar
      end if
   end if

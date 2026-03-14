@@ -929,8 +929,10 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
                  c(l,i,j,k)=c(l,i,j,k)+gamma_rad(irad)*q(l,i,j,k,ndim+2+irad)
               enddo
 #endif
-              if(use_sgs .and. isgs>0) then
-                 c(l,i,j,k)=c(l,i,j,k)+(2d0/3d0)*q(l,i,j,k,1)*max(q(l,i,j,k,isgs),0d0)
+              if(use_sgs .and. sgs_hydro .and. isgs>0) then
+                 ! BUG FIX: q(isgs) not yet set (passive scalars converted below)
+                 ! Use uin(isgs) directly: uin(isgs) = rho*e_sgs, c is rho*c^2
+                 c(l,i,j,k)=c(l,i,j,k)+(2d0/3d0)*max(uin(l,i,j,k,isgs),0d0)
               end if
               c(l,i,j,k)=sqrt(c(l,i,j,k)*oneoverrho)
 

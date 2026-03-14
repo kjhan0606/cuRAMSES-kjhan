@@ -42,6 +42,7 @@ subroutine init_hydro
      if(informat == 'hdf5') then
         call restore_hydro_hdf5()
         if(verbose)write(*,*)'HDF5 HYDRO backup files read completed'
+        call sgs_init_restart
         return
      end if
 #endif
@@ -51,6 +52,7 @@ subroutine init_hydro
         call MPI_BARRIER(MPI_COMM_WORLD,info)
 #endif
         if(verbose)write(*,*)'Binary varcpu HYDRO backup files read completed'
+        call sgs_init_restart
         return
      end if
      ilun=ncpu+myid+10

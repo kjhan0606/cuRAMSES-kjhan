@@ -168,6 +168,11 @@ subroutine newdt_fine(ilevel)
           sidm_courant / sidm_Pmax(ilevel) * dtold(ilevel))
   end if
 
+  ! SGS dt diagnostic: print per-level dt for first 20 coarse steps
+  if(myid==1 .and. nstep_coarse_old < 80) then
+     write(*,'(" SGS_DT: level=",I2," dt=",1PE10.3)') ilevel, dtnew(ilevel)
+  end if
+
 #ifdef _OPENMP
 111 format('  +Entering newdt_fine for level ',I2)
 #else

@@ -24,6 +24,10 @@ subroutine adaptive_loop
   real(dp)::scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s
   real(dp)::mstar_tot_glob,scale_m_sfr,V_box_sfr,sfr_inst
   real(dp),save::mstar_glob_old=0.0d0, t_sfr_old=-1.0d30
+  ! SGS diagnostics
+  real(dp)::sgs_loc(4),sgs_glob(4)
+  real(dp)::esgs_tot,pturb_max,pth_at_max,csgs_ratio_max
+  integer::icell,igrid_sgs,ind_sgs,iskip_sgs,ncell_sgs
 
 #ifndef WITHOUTMPI
   tt1=MPI_WTIME()
@@ -236,6 +240,39 @@ subroutine adaptive_loop
               t_sfr_old=t
            endif
         endif
+        ! SGS turbulence diagnostics
+        if(use_sgs .and. isgs>0) then
+           ! Collect local SGS statistics over leaf cells at levelmin
+           sgs_loc=0d0  ! (1)=sum(rho*esgs*vol), (2)=max(Pturb/Pth), (3)=ncells, (4)=sum(esgs)
+           do ilevel=levelmin,nlevelmax
+              do igrid_sgs=1,active(ilevel)%ngrid
+                 do ind_sgs=1,twotondim
+                    iskip_sgs=ncoarse+(ind_sgs-1)*ngridmax
+                    icell=iskip_sgs+active(ilevel)%igrid(igrid_sgs)
+                    if(son(icell)/=0) cycle
+                    sgs_loc(3)=sgs_loc(3)+1d0
+                    sgs_loc(1)=sgs_loc(1)+uold(icell,isgs)  ! sum(rho*esgs)
+                    ! P_turb/P_th ratio
+                    if(uold(icell,1)>0d0) then
+                       esgs_tot=max(uold(icell,isgs)/uold(icell,1),0d0)
+                       pturb_max=(2d0/3d0)*uold(icell,1)*esgs_tot
+                       ! thermal pressure
+                       pth_at_max=(gamma-1d0)*max(uold(icell,ndim+2) &
+                            -0.5d0*(uold(icell,2)**2+uold(icell,3)**2+uold(icell,4)**2)/uold(icell,1),smallr*smallc**2)
+                       if(pth_at_max>0d0) sgs_loc(2)=max(sgs_loc(2),pturb_max/pth_at_max)
+                       sgs_loc(4)=sgs_loc(4)+esgs_tot
+                    end if
+                 end do
+              end do
+           end do
+           call MPI_ALLREDUCE(sgs_loc,sgs_glob,4,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+           ! Fix max: use MPI_MAX for element 2
+           call MPI_ALLREDUCE(sgs_loc(2),sgs_glob(2),1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
+           if(myid==1 .and. sgs_glob(3)>0d0) then
+              write(*,'(" SGS: E_sgs=",1PE10.3," <e_sgs>=",1PE10.3," max(Pt/Pth)=",1PE10.3)') &
+                   sgs_glob(1), sgs_glob(4)/sgs_glob(3), sgs_glob(2)
+           end if
+        end if
         if(walltime_hrs.gt.0d0) then
            wallsec = walltime_hrs*3600.     ! Convert from hours to seconds
            dumpsec = minutes_dump*60.       ! Convert minutes before end to seconds
