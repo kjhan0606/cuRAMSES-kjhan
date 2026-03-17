@@ -877,7 +877,7 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
   real(dp),dimension(1:nvector,iu1:iu2,ju1:ju2,ku1:ku2)::c  
 
   integer ::i, j, k, l, n, idim, irad
-  real(dp)::eint, smalle, dtxhalf, oneoverrho
+  real(dp)::eint, smalle, smalle_poly, dtxhalf, oneoverrho
   real(dp)::eken, erad
 
   smalle = smallc**2/gamma/(gamma-one)
@@ -918,8 +918,14 @@ subroutine ctoprim(uin,q,c,gravin,dt,ngrid)
                  erad = erad+uin(l,i,j,k,ndim+2+irad)*oneoverrho
               enddo
 #endif
-              ! Compute thermal pressure
-              eint = MAX(uin(l,i,j,k,ndim+2)*oneoverrho-eken-erad,smalle)
+              ! Compute thermal pressure with polytropic floor (eEOS)
+              smalle_poly = smalle
+              if(eeos_poly_coeff > 0d0) then
+                 smalle_poly = max(smalle, eeos_poly_coeff * q(l,i,j,k,1)**(eeos_poly_alpha-1d0))
+              end if
+              eint = MAX(uin(l,i,j,k,ndim+2)*oneoverrho-eken-erad, smalle_poly)
+              ! Write back floored energy to conserved variable for consistency
+              uin(l,i,j,k,ndim+2) = q(l,i,j,k,1)*(eint+eken+erad)
               q(l,i,j,k,ndim+2) = (gamma-one)*q(l,i,j,k,1)*eint
 
               ! Compute sound speed (c_eff includes SGS turbulent pressure)

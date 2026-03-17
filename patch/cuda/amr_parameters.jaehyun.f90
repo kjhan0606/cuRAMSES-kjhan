@@ -215,6 +215,8 @@ module amr_parameters
   real(dp)::T2_star=0.0D0     ! Typical ISM polytropic temperature
   real(dp)::g_star =1.6D0     ! Typical ISM polytropic index
   real(dp)::jeans_ncells=-1   ! Jeans polytropic EOS
+  real(dp)::eeos_poly_coeff=0d0 ! Polytropic floor: e_floor = coeff * rho^alpha (code units)
+  real(dp)::eeos_poly_alpha=0d0 ! Polytropic floor exponent (g_star or 2 for jeans_ncells)
   real(dp)::del_star=2.D2     ! Minimum overdensity to define ISM
   real(dp)::f_ek   =1.0D0     ! Supernovae kinetic energy fraction (only between 0 and 1)
   real(dp)::rbubble=0.0D0     ! Supernovae superbubble radius in pc
@@ -375,9 +377,9 @@ module amr_parameters
   ! SGS (Sub-Grid Scale) Turbulence model parameters
   logical ::use_sgs=.false.              ! Enable SGS turbulence model
   integer ::isgs=0                       ! Variable index for ρ·e_sgs (set at runtime)
-  real(dp)::sgs_C_prod =1.0d0           ! Production coefficient (PdV compression)
-  real(dp)::sgs_C_diss =0.5d0           ! Dissipation coefficient
-  real(dp)::sgs_C_smag =0.18d0          ! Smagorinsky coefficient (optional shear production)
+  real(dp)::sgs_C_prod =0.0d0           ! Production coefficient (gravitational)
+  real(dp)::sgs_C_diss =2.76d0          ! Dissipation coefficient (C_eps=1.5)
+  real(dp)::sgs_C_smag =0.10d0          ! Smagorinsky coefficient (shear production)
   real(dp)::sgs_floor  =1.0d-30         ! Floor value for e_sgs (positivity)
   real(dp)::sgs_cap    =1.0d0           ! Max ratio P_turb/P_thermal (cap)
   real(dp)::sgs_e_init =0.01d0          ! Initial e_sgs/e_thermal at restart from non-SGS

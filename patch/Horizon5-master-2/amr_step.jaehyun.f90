@@ -278,7 +278,8 @@ recursive subroutine amr_step(ilevel,icount)
         ! Kinetic feedback
         !----------------------------------------------------
      if(hydro.and.star.and.f_w>0.)call kinetic_feedback
-     
+     if(hydro.and.star.and.f_w>0.)call diag_check_eint('kinetic_fb',0)
+
      call timer('sinks','start')
 #ifdef HYDRO_CUDA
      ! --- GPU auto-tuning: set gpu_sink for this step ---
@@ -298,6 +299,7 @@ recursive subroutine amr_step(ilevel,icount)
 #endif
      call system_clock(sk_t1)
      if(sink .and. sink_AGN)call AGN_feedback
+     if(sink .and. sink_AGN)call diag_check_eint('AGN_fb',0)
      call system_clock(sk_t2)
      sk_agn_fb = sk_agn_fb + dble(sk_t2-sk_t1)/dble(pt_rate)
 #ifdef HYDRO_CUDA
@@ -349,8 +351,18 @@ recursive subroutine amr_step(ilevel,icount)
      !-----------------------------------------------------
      call system_clock(sk_t1)
      if(sink)call create_sink
+     if(sink)call diag_check_eint('create_sink',0)
      call system_clock(sk_t2)
      sk_create_sink = sk_create_sink + dble(sk_t2-sk_t1)/dble(pt_rate)
+
+     !-----------------------------------------------------
+     ! Enforce eEOS floor after sink/AGN operations
+     ! Prevents negative internal energy AND extreme velocity
+     ! from AGN jet momentum injection (energy-conservative)
+     !-----------------------------------------------------
+     if(hydro .and. eeos_poly_coeff > 0d0)then
+        call enforce_eeos_after_sink
+     endif
 
   endif
 
@@ -625,6 +637,7 @@ recursive subroutine amr_step(ilevel,icount)
            else
               call grow_jeans(ilevel)
            endif
+           call diag_check_eint('grow_bondi',ilevel)
         endif
         call system_clock(sk_t2)
         sk_grow = sk_grow + dble(sk_t2-sk_t1)/dble(pt_rate)
@@ -753,6 +766,7 @@ recursive subroutine amr_step(ilevel,icount)
 !    call MPI_BARRIER(MPI_COMM_WORLD,mpi_err)
                                call timer('poisson','start')
      if(poisson)call synchro_hydro_fine(ilevel,+0.5*dtnew(ilevel))
+     call diag_check_eint('godunov+sync',ilevel)
 
      ! Restriction operator
                                call timer('hydro upload fine','start')
@@ -788,6 +802,7 @@ recursive subroutine amr_step(ilevel,icount)
 #else
                                call timer('cooling','start')
   if(neq_chem.or.cooling.or.T2_star>0.0)call cooling_fine(ilevel)
+  call diag_check_eint('cooling',ilevel)
 #endif
   ! SGS turbulence source terms (production, dissipation, PdV coupling)
   if(use_sgs)call sgs_fine(ilevel)

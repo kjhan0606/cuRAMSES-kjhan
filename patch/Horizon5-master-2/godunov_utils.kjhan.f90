@@ -12,9 +12,9 @@ subroutine cmpdt(uu,gg,dx,dt,ncell)
   real(dp),dimension(1:nvector,1:nvar)::uu
   real(dp),dimension(1:nvector,1:ndim)::gg
   
-  real(dp)::dtcell,smallp
+  real(dp)::dtcell,smallp,smallp_poly
   integer::k,idim,irad
-  
+
   smallp = smallc**2/gamma
 
   ! Convert to primitive variables
@@ -53,6 +53,13 @@ subroutine cmpdt(uu,gg,dx,dt,ncell)
            write(*,*)'vel  =',uu(k,2:ndim+1)
            stop
         end if
+     end do
+  end if
+
+  ! Apply polytropic floor to internal energy density (eEOS)
+  if(eeos_poly_coeff > 0d0) then
+     do k = 1, ncell
+        uu(k,ndim+2) = max(uu(k,ndim+2), eeos_poly_coeff * uu(k,1)**eeos_poly_alpha)
      end do
   end if
 

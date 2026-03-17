@@ -84,7 +84,10 @@ subroutine adaptive_loop
 
   nstep_coarse_old=nstep_coarse
 
-  if(myid==1)write(*,*)'Starting time integration' 
+  ! Initialize polytropic floor coefficients for eEOS in hydro solver
+  call init_eeos_poly_coeff
+
+  if(myid==1)write(*,*)'Starting time integration'
 
   do ! Main time loop
                                call timer('coarse levels','start')

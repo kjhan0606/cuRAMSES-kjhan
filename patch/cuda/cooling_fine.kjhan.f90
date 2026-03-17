@@ -174,6 +174,18 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
           & (twopi)*6.67e-8*scale_d*(scale_t/scale_l)**2
   endif
 
+  ! Update polytropic floor coefficients for hydro solver (ctoprim/cmpdt)
+  ! Floor on energy density: rho*e >= coeff * rho^alpha
+  ! Floor on specific energy: e >= coeff * rho^(alpha-1)
+  if(jeans_ncells>0)then
+     eeos_poly_coeff = polytropic_constant * scale_nH / (gamma-1.0)
+     eeos_poly_alpha = 2.0d0
+  else if(T2_star > 0d0)then
+     eeos_poly_coeff = T2_star * scale_nH**(g_star-1.0) / &
+          & (nISM**(g_star-1.0) * scale_T2 * (gamma-1.0))
+     eeos_poly_alpha = g_star
+  endif
+
   ! Loop over cells
   do ind=1,twotondim
      iskip=ncoarse+(ind-1)*ngridmax
@@ -449,3 +461,179 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
   ! End loop over cells
 
 end subroutine coolfine1
+
+!###########################################################
+!###########################################################
+!###########################################################
+!###########################################################
+subroutine init_eeos_poly_coeff
+  ! Compute polytropic floor coefficients for eEOS enforcement
+  ! in the hydro solver (ctoprim/cmpdt). Called once at startup.
+  use amr_commons
+  use hydro_commons
+  use cooling_module
+  implicit none
+  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
+  real(dp)::polytropic_constant
+  real(dp)::nISM,nCOM
+
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+  nISM = n_star; nCOM=0d0
+  if(cosmo)then
+     nCOM = del_star*omega_b*rhoc*(h0/100.)**2/aexp**3*X/mH
+  endif
+  nISM = MAX(nCOM,nISM)
+
+  if(jeans_ncells>0)then
+     polytropic_constant=2d0*(boxlen*jeans_ncells*0.5d0**dble(nlevelmax)*scale_l/aexp)**2/ &
+          & (twopi)*6.67e-8*scale_d*(scale_t/scale_l)**2
+     eeos_poly_coeff = polytropic_constant * scale_nH / (gamma-1.0)
+     eeos_poly_alpha = 2.0d0
+  else if(T2_star > 0d0)then
+     eeos_poly_coeff = T2_star * scale_nH**(g_star-1.0) / &
+          & (nISM**(g_star-1.0) * scale_T2 * (gamma-1.0))
+     eeos_poly_alpha = g_star
+  endif
+
+  if(myid==1 .and. eeos_poly_coeff > 0d0)then
+     write(*,'(A,ES10.3,A,F5.2)') ' eEOS polytropic floor: coeff=', eeos_poly_coeff, &
+          & ' alpha=', eeos_poly_alpha
+  endif
+end subroutine init_eeos_poly_coeff
+
+!###########################################################
+!###########################################################
+subroutine enforce_eeos_after_sink
+  ! Enforce TWO protections after sink/AGN operations (TOTAL ENERGY CONSERVED):
+  !
+  ! 1. eEOS polytropic floor: if eint < floor, reduce momentum to maintain floor
+  ! 2. Mach cap: if |v|/c_s > Mach_max, reduce momentum, convert excess Ekin to Eth
+  !
+  ! The Mach cap prevents CFL dt collapse from AGN jet momentum injection into
+  ! fine cells. Excess kinetic energy is thermalised (instant shock approximation)
+  ! which is valid when the jet cooling length << cell size.
+  use amr_commons
+  use hydro_commons
+  implicit none
+  integer::ilevel,igrid,ngrid,ncache,ind,iskip,i,idim
+  integer,dimension(1:nvector)::ind_grid,ind_cell
+  logical,dimension(1:nvector)::ok
+  real(dp)::d,e_kin,e_kin_pure,e_total,e_int,e_floor
+  real(dp)::e_kin_cap,c2,v2,v2_max,factor
+  integer::irad
+  integer::n_floor,n_mach
+  real(dp)::e_floor_inj,e_mach_inj
+  real(dp),parameter::mach_cap=100d0  ! Max Mach number after AGN injection
+
+  n_floor = 0; n_mach = 0
+  e_floor_inj = 0d0; e_mach_inj = 0d0
+
+  do ilevel=levelmin,nlevelmax
+     ncache=active(ilevel)%ngrid
+     do igrid=1,ncache,nvector
+        ngrid=MIN(nvector,ncache-igrid+1)
+        do i=1,ngrid
+           ind_grid(i)=active(ilevel)%igrid(igrid+i-1)
+        end do
+        do ind=1,twotondim
+           iskip=ncoarse+(ind-1)*ngridmax
+           do i=1,ngrid
+              ind_cell(i)=ind_grid(i)+iskip
+           end do
+           do i=1,ngrid
+              ok(i)=son(ind_cell(i))==0
+           end do
+           do i=1,ngrid
+              if(.not.ok(i))cycle
+
+              d=max(uold(ind_cell(i),1),smallr)
+              e_total=uold(ind_cell(i),ndim+2)
+
+              ! Compute pure kinetic energy (0.5*|mom|^2/rho)
+              e_kin_pure=0d0
+              do idim=1,ndim
+                 e_kin_pure=e_kin_pure+0.5d0*uold(ind_cell(i),idim+1)**2/d
+              end do
+              ! Total "non-thermal kinetic" including NENER
+              e_kin=e_kin_pure
+#if NENER>0
+              do irad=1,nener
+                 e_kin=e_kin+uold(ind_cell(i),ndim+2+irad)
+              end do
+#endif
+              e_int=e_total-e_kin
+
+              ! === Protection 1: eEOS floor ===
+              e_floor=eeos_poly_coeff*d**eeos_poly_alpha
+              if(e_int < e_floor)then
+                 n_floor = n_floor + 1
+                 e_floor_inj = e_floor_inj + (e_floor - e_int)
+                 ! Convert kinetic → thermal to satisfy floor
+                 e_kin_cap = max(e_total - e_floor, 0d0)
+#if NENER>0
+                 do irad=1,nener
+                    e_kin_cap = e_kin_cap - uold(ind_cell(i),ndim+2+irad)
+                 end do
+#endif
+                 if(e_kin_cap > 0d0 .and. e_kin_pure > 0d0)then
+                    factor = sqrt(e_kin_cap / e_kin_pure)
+                    do idim=1,ndim
+                       uold(ind_cell(i),idim+1) = uold(ind_cell(i),idim+1) * factor
+                    end do
+                 else
+                    do idim=1,ndim
+                       uold(ind_cell(i),idim+1) = 0d0
+                    end do
+                    uold(ind_cell(i),ndim+2) = e_floor
+#if NENER>0
+                    do irad=1,nener
+                       uold(ind_cell(i),ndim+2) = uold(ind_cell(i),ndim+2) + &
+                            & uold(ind_cell(i),ndim+2+irad)
+                    end do
+#endif
+                 endif
+                 ! Recompute after floor fix
+                 e_kin_pure=0d0
+                 do idim=1,ndim
+                    e_kin_pure=e_kin_pure+0.5d0*uold(ind_cell(i),idim+1)**2/d
+                 end do
+                 e_int=e_total-e_kin_pure
+#if NENER>0
+                 do irad=1,nener
+                    e_int=e_int-uold(ind_cell(i),ndim+2+irad)
+                 end do
+#endif
+              endif
+
+              ! === Protection 2: Mach cap ===
+              ! c_s^2 = gamma*(gamma-1)*eint/rho
+              c2 = gamma*(gamma-1d0)*max(e_int,smallc**2*d)/d
+              ! v^2 = 2*e_kin_pure/rho  (specific kinetic = 0.5*v^2)
+              v2 = 2d0*e_kin_pure/d
+              v2_max = mach_cap**2 * c2
+              if(v2 > v2_max .and. v2 > 0d0)then
+                 n_mach = n_mach + 1
+                 ! Scale momentum: v_new = mach_cap * c_s
+                 ! e_kin_new = 0.5 * d * v2_max = e_kin_pure * (v2_max/v2)
+                 factor = sqrt(v2_max / v2)
+                 e_mach_inj = e_mach_inj + e_kin_pure*(1d0-factor**2)
+                 do idim=1,ndim
+                    uold(ind_cell(i),idim+1) = uold(ind_cell(i),idim+1) * factor
+                 end do
+                 ! Total energy conserved: excess kinetic → thermal
+                 ! uold(5) unchanged, momentum reduced → eint increases
+              endif
+           end do
+        end do
+     end do
+  end do
+
+  ! Report if any cells were fixed
+  if((n_floor > 0 .or. n_mach > 0) .and. myid==1 .and. nstep_coarse < 500)then
+     if(n_floor > 0) write(*,'(A,I8,A,ES10.3)') &
+          & ' eEOS post-sink floor: ', n_floor, ' cells, dE_th=', e_floor_inj
+     if(n_mach > 0) write(*,'(A,I8,A,ES10.3)') &
+          & ' eEOS post-sink Mach cap: ', n_mach, ' cells, dE_kin→th=', e_mach_inj
+  endif
+
+end subroutine enforce_eeos_after_sink

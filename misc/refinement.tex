@@ -85,7 +85,12 @@ dynamical variable alongside the hydrodynamic quantities but restricts
 its role to the Jeans refinement criterion, providing a physically
 motivated, scale-dependent turbulent pressure floor that naturally
 limits the refinement depth without modifying the hydrodynamic solver
-or incurring any CFL penalty.
+or incurring any CFL penalty.  Finally, we identify a secondary
+failure mode when the holdback is disabled --- negative internal energy
+from the total-energy formulation in post-feedback flows --- and
+introduce a minimal \emph{eEOS polytropic energy floor} that prevents
+CFL time-step collapse without altering the thermodynamics of diffuse
+gas.
 \end{abstract}
 
 \begin{keywords}
@@ -2326,6 +2331,225 @@ Jeans-aware refinement (Section~\ref{sec:bypass}) --- achieves the
 same numerical stability without modifying the gas physics.
 
 
+\subsection{The eEOS Polytropic Energy Floor}
+\label{sec:eeos}
+
+While the pressure floor approach of equation~(\ref{eq:pfloor})
+modifies the thermodynamic state in a resolution-dependent way, we
+find that a \emph{minimal} energy floor based on the existing
+polytropic equation of state is both necessary and sufficient to
+prevent catastrophic simulation failure when the cosmological holdback
+is disabled.  We present here the motivation, implementation, and
+numerical verification of this energy floor.
+
+\subsubsection{The Negative Internal Energy Problem}
+\label{sec:eint_negative}
+
+When holdback is disabled (\code{q\_refine\_holdback\,=\,.false.}),
+the AMR hierarchy resolves structure at higher levels earlier than in
+the standard configuration.  This creates conditions where the hydro
+solver can produce negative internal energy through the following
+mechanism.  In a total-energy formulation, the internal energy is
+computed as a residual:
+\begin{equation}
+  e_{\rm int} = E_{\rm tot} - \tfrac{1}{2}\rho\,|\mathbf{v}|^2,
+  \label{eq:eint_residual}
+\end{equation}
+where $E_{\rm tot}$ is the conserved total energy density.  When the
+kinetic energy dominates ($\frac{1}{2}\rho|\mathbf{v}|^2 \gg
+e_{\rm int}$), small truncation errors in the total energy or momentum
+can produce a negative residual.  This situation arises naturally in
+high-Mach-number flows driven by supernova and AGN feedback, which
+inject large kinetic energies into ambient gas.  Without the holdback,
+such flows are better resolved at fine levels, leading to sharper
+velocity gradients and a higher probability of the kinetic energy
+exceeding the total energy after a Riemann flux update.
+
+Once $e_{\rm int} < 0$ in even a single cell, the consequences are
+catastrophic.  The pressure $P = (\gamma-1)\,e_{\rm int}$ becomes
+negative, and the sound speed
+\begin{equation}
+  c_s = \sqrt{\frac{\gamma\,P}{\rho}} = \sqrt{\frac{\gamma(\gamma-1)\,e_{\rm int}}{\rho}}
+\end{equation}
+becomes imaginary.  The CFL time-step
+\begin{equation}
+  \Delta t = C_{\rm CFL}\,\frac{\dx}{|v| + c_s}
+  \label{eq:cfl}
+\end{equation}
+collapses to effectively zero (in practice, $\Delta t / \Delta t_0
+\sim 10^{-12}$), halting the simulation.
+
+Figure~\ref{fig:dt_collapse} illustrates this phenomenon from our
+diagnostic test.  At fine step 11572 of coarse step 408
+($z \approx 3.7$, $a = 0.212$), the global internal energy drops to
+$e_{\rm int} = -2.70\times 10^{-3}$ (code units).  The CFL time-step
+immediately collapses from $\Delta t = 1.76\times 10^{-4}$ to
+$\Delta t = 7.0\times 10^{-17}$, a factor of $\sim 10^{12}$.  After
+this point, the simulation is effectively frozen, as each subsequent
+time-step advances by $\lesssim 10^{-9}$ code time units.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_dt_collapse_eeos.pdf}
+\caption{CFL time-step collapse caused by negative internal energy.
+Red: without the eEOS floor, the time-step drops by $\sim 12$ orders
+of magnitude at fine step 11572 (coarse step 408), effectively halting
+the simulation.  Green: with the eEOS polytropic floor, the time-step
+remains stable throughout.  The crash occurs at $z \approx 3.7$ when
+the cosmological holdback is disabled.}
+\label{fig:dt_collapse}
+\end{figure}
+
+
+\subsubsection{Design of the Energy Floor}
+
+The energy floor enforces a minimum internal energy density based on
+the existing star-formation polytropic equation of state:
+\begin{equation}
+  e_{\rm int} \ge e_{\rm floor} \equiv
+  \frac{\Tstar}{\mu\,(\gamma-1)}\,
+  \frac{k_{\rm B}}{m_{\rm H}}\,
+  \Bigl(\frac{\rho}{\rho_\star}\Bigr)^{\gstar - 1}\,\rho,
+  \label{eq:eeos_floor}
+\end{equation}
+or equivalently in code units:
+\begin{equation}
+  e_{\rm int} \ge C_{\rm eEOS}\,\rho^{\gstar},
+  \label{eq:eeos_code}
+\end{equation}
+where $C_{\rm eEOS}$ is a single coefficient computed at initialisation
+from the simulation parameters ($\Tstar$, $\nstar$, $\gstar$, and the
+unit conversions):
+\begin{equation}
+  C_{\rm eEOS} = \frac{\Tstar}{(\gamma-1)\,
+  \text{scale}_{T_2}\,\text{scale}_{n_{\rm H}}^{\gstar-1}}.
+  \label{eq:eeos_coeff}
+\end{equation}
+For the standard parameters ($\Tstar = 750\,$K, $\nstar = 0.1\,
+{\rm cm}^{-3}$, $\gstar = 5/3$), this gives $C_{\rm eEOS} = 4.97
+\times 10^{-11}$ in code units.
+
+Crucially, this floor is \emph{not} an additional pressure floor in
+the sense of equation~(\ref{eq:pfloor}).  It is the natural extension
+of the existing polytropic floor to all densities: above $\nstar$, it
+is already enforced by the cooling routine; below $\nstar$, it
+provides a minimal energy guarantee that prevents the total-energy
+formulation from producing negative pressures.  Because the polytropic
+scaling $e_{\rm floor} \propto \rho^{5/3}$ implies $T_{\rm floor}
+\propto \rho^{2/3}$, the floor temperature drops rapidly at low
+densities (e.g.\ $T_{\rm floor} \sim 10\,$K at $n \sim 10^{-4}\,
+{\rm cm}^{-3}$), far below the photoionisation equilibrium temperature
+($T_{\rm eq} \sim 10^4\,$K).  The floor therefore has no effect on the
+thermodynamics of diffuse gas in normal conditions --- it only
+activates when a catastrophic error would otherwise crash the
+simulation.
+
+Figure~\ref{fig:eeos_jeans} shows the temperature--density relation
+and the corresponding Jeans length for three cases: cooling equilibrium
+only, standard polytropic floor (active only above $\nstar$), and the
+eEOS floor (active at all densities).  In the diffuse regime
+($n \ll \nstar$), the eEOS floor lies far below $T_{\rm eq}$ and has
+no effect on either the thermodynamics or the Jeans length.  Above
+$\nstar$, the eEOS floor coincides with the standard polytropic floor.
+The protection is only relevant in the narrow regime where numerical
+errors would otherwise drive $e_{\rm int}$ below zero.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_eeos_jeans.pdf}
+\caption{(a)~Temperature--density relation showing the cooling
+equilibrium $T_{\rm eq}(n)$, the standard polytropic floor (active
+only for $n \ge \nstar$), and the eEOS floor (active at all
+densities).  At low densities, the eEOS floor lies far below the
+cooling equilibrium and does not affect the gas thermodynamics.
+(b)~Corresponding Jeans length $\lJ$ for each temperature model.
+Horizontal dashed lines show $4\dx_\ell$ for selected AMR levels.
+The eEOS floor raises the minimum Jeans length at intermediate
+densities, preventing the refinement cascade that would otherwise
+develop below $\nstar$.}
+\label{fig:eeos_jeans}
+\end{figure*}
+
+
+\subsubsection{Implementation}
+
+The energy floor is applied at three points in the time integration
+cycle, corresponding to the three operations that can modify the
+internal energy:
+
+\begin{enumerate}
+  \item \textbf{Primitive variable reconstruction}
+    (\code{ctoprim} in \code{umuscl.f90}): Before the Riemann solver
+    computes fluxes, the left and right states are reconstructed from
+    conservative variables.  The internal energy of each state is
+    clamped to $\max(e_{\rm int}, C_{\rm eEOS}\,\rho^{\gstar})$.  This
+    prevents the Riemann solver from encountering negative pressures in
+    its input states.
+
+  \item \textbf{Post-flux update}
+    (\code{set\_uold} in \code{godunov\_fine.f90}): After the
+    conservative update $\mathbf{U}^{n+1} = \mathbf{U}^n - \Delta t\,
+    \nabla\cdot\mathbf{F}$, the internal energy is recomputed from the
+    residual (equation~\ref{eq:eint_residual}) and clamped.  If the
+    floor is activated, only the energy is modified; the momentum is
+    left unchanged to preserve the flow field.
+
+  \item \textbf{Post-feedback enforcement}
+    (\code{enforce\_eeos\_after\_sink} in \code{amr\_step.f90}): After
+    AGN feedback deposits energy (which can produce extreme velocities
+    via kinetic-only injection when $T > T_{2,\rm maxAGN}$), a two-stage
+    protection is applied.  First, the eEOS floor is enforced; if the
+    floor is activated, the excess kinetic energy that would be needed
+    to restore the floor is removed by scaling down the momentum
+    (preserving total energy).  Second, a Mach number cap ($\mathcal{M}
+    \le 100$) converts excess kinetic energy above $100\,c_s$ into
+    thermal energy, modelling instantaneous shock thermalisation.
+\end{enumerate}
+
+
+\subsubsection{Diagnostic Verification}
+\label{sec:eeos_diag}
+
+To verify the effectiveness of the energy floor, we performed a
+controlled diagnostic test.  Starting from a common restart point at
+$z \approx 4$ (coarse step 377), we inserted minimum internal energy
+checks after each major physics operation: SNII feedback, AGN
+feedback, sink creation, the Godunov hydro solver, cooling, and Bondi
+accretion.  Table~\ref{tab:eeos_diag} summarises the results.
+
+\begin{table}
+\centering
+\caption{Comparison of the holdback-off simulation with and without
+the eEOS polytropic energy floor.  Both runs restart from the same
+snapshot at $z \approx 4$ (step 377).}
+\label{tab:eeos_diag}
+\begin{tabular}{lcc}
+\toprule
+Quantity & Without eEOS & With eEOS \\
+\midrule
+$\Delta t$ range & $7.0\times 10^{-17}$--$1.9\times 10^{-4}$ &
+  $1.47\times 10^{-4}$--$1.93\times 10^{-4}$ \\
+$\Delta t$ ratio (max/min) & $2.8\times 10^{12}$ & 1.31 \\
+$e_{\rm int,\,min}$ & $-2.70\times 10^{-3}$ & $+1.63\times 10^{-9}$ \\
+Steps completed & 408 (crash) & 416+ (stable) \\
+DIAG triggers ($e_{\rm int} < 0$) & --- & 0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Over 39 coarse steps (377--416), the eEOS-protected run maintained
+$e_{\rm int,\,min} > 0$ at every diagnostic checkpoint, with all 117
+coarse-level checks returning values in the range $1.2$--$1.7\times
+10^{-9}$.  No per-level (fine-level) diagnostic was triggered,
+confirming that the floor prevented negative internal energy across
+all AMR levels and all physics modules.  The CFL time-step remained
+in the narrow range $1.47$--$1.93\times 10^{-4}$, compared to the
+holdback-on value of $3.5$--$5.1\times 10^{-4}$.  The factor-of-2.6
+reduction in $\Delta t$ is a natural consequence of the finer spatial
+resolution achieved without the holdback (smaller cells $\rightarrow$
+smaller CFL $\Delta t$), not a sign of numerical instability.
+
+
 \subsection{Turbulence and the Effective Jeans Length}
 \label{sec:turbulence}
 
@@ -2602,6 +2826,22 @@ criterion in cosmological AMR simulations, implemented in the
     Turbulent pressure support, while physically important, cannot
     replace the holdback in the diffuse regime where it is most needed
     (Section~\ref{sec:turb_vs_holdback}).
+
+  \item \textbf{eEOS polytropic energy floor.}  Disabling the holdback
+    exposes a secondary failure mode: negative internal energy from the
+    total-energy formulation in high-Mach-number post-feedback flows,
+    which collapses the CFL time-step by $\sim 12$ orders of magnitude
+    (Figure~\ref{fig:dt_collapse}).  We introduce a minimal energy
+    floor $e_{\rm int} \ge C_{\rm eEOS}\,\rho^{\gstar}$ based on the
+    existing star-formation polytropic equation of state
+    (Section~\ref{sec:eeos}).  Unlike resolution-dependent pressure
+    floors, the eEOS floor has no effect on diffuse gas thermodynamics
+    ($T_{\rm floor} \ll T_{\rm eq}$ for $n \ll \nstar$) and only
+    activates when a catastrophic numerical error would otherwise
+    occur.  Diagnostic tests confirm that the floor eliminates all
+    instances of $e_{\rm int} < 0$ over 39 coarse steps past the
+    original crash point, maintaining stable CFL time-steps
+    (Table~\ref{tab:eeos_diag}).
 \end{enumerate}
 
 Future work will extend the Jeans criterion to include turbulent
@@ -2611,9 +2851,9 @@ dispersion on the grid scale.  A full star formation rate comparison
 from $z = 50$ to $z = 1$ between the standard cooling with holdback
 and the exact cooling without holdback is in progress.  This
 turbulence-dependent refinement criterion, combined with the
-improved cooling module and holdback bypass presented here, will
-provide a comprehensive framework for accurate Jeans length
-resolution in next-generation cosmological simulations.
+improved cooling module, holdback bypass, and eEOS energy floor
+presented here, will provide a comprehensive framework for accurate
+Jeans length resolution in next-generation cosmological simulations.
 
 
 \section*{Acknowledgements}

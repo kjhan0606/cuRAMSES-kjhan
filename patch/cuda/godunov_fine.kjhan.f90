@@ -348,6 +348,27 @@ subroutine set_uold(ilevel)
            end if
         end do
      end if
+     ! Apply eEOS polytropic floor to conserved energy after hydro update
+     if(eeos_poly_coeff > 0d0)then
+        do i=1,active(ilevel)%ngrid
+           ind_cell=active(ilevel)%igrid(i)+iskip
+           d=max(uold(ind_cell,1),smallr)
+           u=0.0; v=0.0; w=0.0
+           if(ndim>0)u=uold(ind_cell,2)/d
+           if(ndim>1)v=uold(ind_cell,3)/d
+           if(ndim>2)w=uold(ind_cell,4)/d
+           e_kin=0.5*d*(u**2+v**2+w**2)
+#if NENER>0
+           do irad=1,nener
+              e_kin=e_kin+uold(ind_cell,ndim+2+irad)
+           end do
+#endif
+           e_cons=uold(ind_cell,ndim+2)-e_kin
+           if(e_cons < eeos_poly_coeff * d**eeos_poly_alpha)then
+              uold(ind_cell,ndim+2) = eeos_poly_coeff * d**eeos_poly_alpha + e_kin
+           end if
+        end do
+     end if
   end do
 
 111 format('  +Entering set_uold for level ',i2)

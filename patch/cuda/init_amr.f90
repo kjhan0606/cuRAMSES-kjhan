@@ -327,7 +327,7 @@ subroutine init_amr
      end if
      call MPI_BCAST(ncpu2,1,MPI_INTEGER,0,MPI_COMM_WORLD,info2)
      call MPI_BCAST(nlevelmax2,1,MPI_INTEGER,0,MPI_COMM_WORLD,info2)
-     if(ncpu2.ne.ncpu .or. ordering=='ksection')then
+     if(ncpu2.ne.ncpu)then
         if(myid==1 .and. ncpu2.ne.ncpu) &
            write(*,'(A,I5,A,I5)') ' Variable-ncpu restart: ncpu_old=', ncpu2, ' ncpu_new=', ncpu
         call restore_amr_binary_varcpu(ncpu2,nlevelmax2)
