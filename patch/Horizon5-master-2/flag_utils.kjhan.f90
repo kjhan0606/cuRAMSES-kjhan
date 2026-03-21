@@ -394,7 +394,7 @@ subroutine sub_userflag_fine(ilevel,skip_loc,scale, igrid,ngrid,iflag)
      end do
 
      ! Apply purely local Lagrangian refinement criteria
-     if(m_refine(ilevel)>-1.0d0)then
+     if(m_refine_eff(ilevel)>-1.0d0)then
         call poisson_refine(ind_cell,ok,ngrid,ilevel)
         ! Apply sink particle refinement from pre-computed bitmask
         if(sink_refine .and. sink .and. pic)then
@@ -505,6 +505,9 @@ subroutine userflag_fine(ilevel)
 
   if(prevent_refine) return
 
+  ! Compute FPR-adjusted effective m_refine for this level
+  call compute_fpr_m_refine_eff(ilevel)
+
   ! Set position of cell centers relative to grid center
   do ind=1,twotondim
      iz=(ind-1)/4
@@ -571,11 +574,11 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
   if(poisson)then
 
      if(.not. init) then
-        if(ivar_refine < 0 .and. m_refine(ilevel) > 0.0d0)then
+        if(ivar_refine < 0 .and. m_refine_eff(ilevel) > 0.0d0)then
            ! Zoom-in: use density criterion (quasi-Lagrangian)
            d_scale=mass_sph/vol_loc
            do i=1,ncell
-              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine(ilevel)*d_scale)
+              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine_eff(ilevel)*d_scale)
            end do
         else
            do i=1,ncell
@@ -593,7 +596,7 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
                    & (uold(ind_cell(i),ivar_refine)/uold(ind_cell(i),1) &
                    & > var_cut_refine)
            end do
-        else if(m_refine(ilevel)==0.0)then
+        else if(m_refine_eff(ilevel)==0.0)then
            do i=1,ncell
               ok(i)=.true.
            end do
@@ -601,7 +604,7 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
            ! ivar_refine<0, m_refine>0: density-based (zoom-in init)
            d_scale=mass_sph/vol_loc
            do i=1,ncell
-              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine(ilevel)*d_scale)
+              ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine_eff(ilevel)*d_scale)
            end do
         endif
      endif
@@ -611,7 +614,7 @@ subroutine poisson_refine(ind_cell,ok,ncell,ilevel)
      if(hydro)then
         d_scale=mass_sph/vol_loc
         do i=1,ncell
-           ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine(ilevel)*d_scale)
+           ok(i)=ok(i).or.(uold(ind_cell(i),1)>=m_refine_eff(ilevel)*d_scale)
         end do
      endif
 
@@ -1235,3 +1238,42 @@ subroutine cleanup_nbor_active()
   implicit none
   if(allocated(nbor_active_cache)) deallocate(nbor_active_cache)
 end subroutine cleanup_nbor_active
+!##############################################################
+!##############################################################
+!##############################################################
+!##############################################################
+subroutine compute_fpr_m_refine_eff(ilevel)
+  !-----------------------------------------------------------------
+  ! Compute FPR-adjusted effective m_refine for level ilevel.
+  ! If dx_phys < dr_proper, increase threshold by (dr_proper/dx_phys)^3
+  ! so that refinement is naturally suppressed when physical resolution
+  ! exceeds the target (Gnedin 2016, ApJ 821, 50, Appendix A).
+  ! When FPR is disabled (dr_proper=0), m_refine_eff = m_refine.
+  !-----------------------------------------------------------------
+  use amr_commons
+  implicit none
+  integer,intent(in)::ilevel
+  real(dp)::dx,dx_loc,scale,dx_phys_kpc,fpr_factor
+  integer::nx_loc
+
+  ! Default: no modification
+  m_refine_eff(ilevel) = m_refine(ilevel)
+
+  ! FPR only active for cosmo runs with dr_proper > 0
+  if(.not. cosmo .or. dr_proper <= 0.0d0) return
+  if(m_refine(ilevel) <= 0.0d0) return
+
+  ! Compute physical cell size in kpc
+  dx = 0.5d0**ilevel
+  nx_loc = icoarse_max - icoarse_min + 1
+  scale = boxlen / dble(nx_loc)
+  dx_loc = dx * scale
+  ! dx_phys [kpc] = dx_code * aexp * boxlen_ini [h^-1 Mpc] * 1000 / (h0/100)
+  dx_phys_kpc = dx_loc * aexp * boxlen_ini * 1000.0d0 / (h0 / 100.0d0)
+
+  if(dx_phys_kpc < dr_proper) then
+     fpr_factor = (dr_proper / dx_phys_kpc)**3
+     m_refine_eff(ilevel) = m_refine(ilevel) * fpr_factor
+  end if
+
+end subroutine compute_fpr_m_refine_eff

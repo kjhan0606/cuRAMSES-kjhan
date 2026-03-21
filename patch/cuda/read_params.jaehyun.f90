@@ -781,6 +781,27 @@ subroutine read_params
 
   close(1)
 
+  !-------------------------------------------------
+  ! FPR (Fixed Proper Resolution, Gnedin 2016)
+  ! Must be after read_hydro_params (reads dr_proper)
+  !-------------------------------------------------
+  if(dr_proper > 0.0d0) then
+     if(.not. cosmo) then
+        if(myid==1) write(*,*) 'WARNING: dr_proper>0 but not cosmo run, disabling FPR'
+        dr_proper = 0.0d0
+     else
+        if(myid==1) then
+           write(*,'(A)') ' FPR (Fixed Proper Resolution, Gnedin 2016) enabled'
+           write(*,'(A,F8.3,A)') '   dr_proper = ', dr_proper, ' kpc'
+           if(q_refine_holdback) then
+              write(*,'(A)') '   mode: FPR + binary holdback'
+           else
+              write(*,'(A)') '   mode: FPR only (no holdback)'
+           end if
+        end if
+     end if
+  end if
+
   ! Send the token
 #ifndef WITHOUTMPI
   if(IOGROUPSIZE>0) then
@@ -836,7 +857,9 @@ subroutine read_params
      exp_refine(i)= 2.0
      initfile  (i)= ' '
   end do
-     
+  ! Initialize m_refine_eff from m_refine (FPR adjusts at runtime)
+  m_refine_eff = m_refine
+
   if(.not. nml_ok)then
      if(myid==1)write(*,*)'Too many errors in the namelist'
      if(myid==1)write(*,*)'Aborting...'

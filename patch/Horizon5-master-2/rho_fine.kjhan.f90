@@ -43,6 +43,9 @@ subroutine rho_fine(ilevel,icount)
   dx_loc=dx*scale
   if(ilevel==levelmin)multipole=0d0
 
+  ! Compute FPR-adjusted effective m_refine for this level
+  call compute_fpr_m_refine_eff(ilevel)
+
   !-------------------------------------------------------
   ! Initialize rho to analytical and baryon density field
   !-------------------------------------------------------
@@ -98,7 +101,7 @@ subroutine rho_fine(ilevel,icount)
   !-------------------------------------------------------------------------
   ! Initialize "number density" field to baryon number density in array phi.
   !-------------------------------------------------------------------------
-  if(m_refine(ilevel)>-1.0d0)then
+  if(m_refine_eff(ilevel)>-1.0d0)then
      d_scale=max(mass_sph/dx_loc**ndim,smallr)
 !$omp parallel do private(ind,iskip,i, scalar)
      do ind=1,twotondim
@@ -158,10 +161,15 @@ subroutine rho_fine(ilevel,icount)
   if(cic_levelmax>0.and.ilevel>=cic_levelmax)then
      call make_virtual_fine_dp   (rho_top(1),ilevel)
   endif
-  if(m_refine(ilevel)>-1.0d0)then
+  if(m_refine_eff(ilevel)>-1.0d0)then
      call make_virtual_reverse_dp(phi(1),ilevel)
      call make_virtual_fine_dp   (phi(1),ilevel)
   endif
+
+  ! FPR Poisson source smoothing (Gnedin 2016)
+  if(cosmo .and. dr_proper > 0.0d0 .and. ilevel > levelmin) then
+     call fpr_smooth_rho(ilevel)
+  end if
 
   !--------------------------------------------------------------
   ! Compute multipole contribution from all cpus and set rho_tot
@@ -196,12 +204,12 @@ subroutine rho_fine(ilevel,icount)
   !-----------------------------------------
   ! Compute quasi Lagrangian refinement map
   !-----------------------------------------
-  if(m_refine(ilevel)>-1.0d0)then
+  if(m_refine_eff(ilevel)>-1.0d0)then
 !$omp parallel do private(ind,iskip,i)
      do ind=1,twotondim
         iskip=ncoarse+(ind-1)*ngridmax
         do i=1,active(ilevel)%ngrid
-           if(phi(active(ilevel)%igrid(i)+iskip)>=m_refine(ilevel))then
+           if(phi(active(ilevel)%igrid(i)+iskip)>=m_refine_eff(ilevel))then
               cpu_map2(active(ilevel)%igrid(i)+iskip)=1
            else
               cpu_map2(active(ilevel)%igrid(i)+iskip)=0
@@ -861,11 +869,11 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      endif
 
      ! Always refine sinks to the maximum level
-     ! by setting particle number density above m_refine(ilevel)
+     ! by setting particle number density above m_refine_eff(ilevel)
      if(sink_refine)then
         do j=1,np
            if(ttt(j).eq.0d0.and.iii(j).lt.0)then
-              phi(indp(j,ind))=phi(indp(j,ind))+m_refine(ilevel)
+              phi(indp(j,ind))=phi(indp(j,ind))+m_refine_eff(ilevel)
            end if
         end do
      end if
@@ -2270,3 +2278,59 @@ end subroutine tsc_cell
 !###########################################################
 !###########################################################
 !###########################################################
+subroutine fpr_smooth_rho(ilevel)
+  !-----------------------------------------------------------------
+  ! FPR Poisson source smoothing (Gnedin 2016, Appendix A).
+  ! In the transition level where dx_phys < dr_proper < 2*dx_phys,
+  ! smooth rho by mixing with sibling cell average:
+  !   w = log2(dr_proper / dx_phys),  0 < w < 1
+  !   rho_new = (1-w)*rho + w*rho_siblings_avg
+  ! The 8 sibling cells share the same parent grid, so their
+  ! average approximates the parent-level density.
+  !-----------------------------------------------------------------
+  use amr_commons
+  use poisson_commons
+  implicit none
+  integer,intent(in)::ilevel
+
+  integer::i,ind,iskip,jnd,jskip,nx_loc
+  real(dp)::dx,dx_loc,scale,dx_phys_kpc,w_fpr,rho_avg
+  real(dp)::rho_siblings(8)
+  integer::igrid_amr
+
+  ! Compute physical cell size in kpc
+  dx = 0.5d0**ilevel
+  nx_loc = icoarse_max - icoarse_min + 1
+  scale = boxlen / dble(nx_loc)
+  dx_loc = dx * scale
+  dx_phys_kpc = dx_loc * aexp * boxlen_ini * 1000.0d0 / (h0 / 100.0d0)
+
+  ! Only smooth in transition band: dx_phys < dr_proper < 2*dx_phys
+  if(dx_phys_kpc >= dr_proper) return     ! no FPR needed at this level
+  if(2.0d0*dx_phys_kpc <= dr_proper) return  ! fully suppressed, no smoothing
+
+  ! Smoothing weight: w = log2(dr_proper / dx_phys)
+  w_fpr = log(dr_proper / dx_phys_kpc) / log(2.0d0)
+  w_fpr = max(0.0d0, min(1.0d0, w_fpr))
+
+  ! Loop over active grids and smooth rho using sibling average
+!$omp parallel do private(i,igrid_amr,rho_siblings,jnd,jskip,rho_avg,ind,iskip)
+  do i=1,active(ilevel)%ngrid
+     igrid_amr = active(ilevel)%igrid(i)
+     ! Gather 8 sibling cell densities
+     do jnd=1,twotondim
+        jskip = ncoarse + (jnd-1)*ngridmax
+        rho_siblings(jnd) = rho(igrid_amr + jskip)
+     end do
+     rho_avg = sum(rho_siblings) / dble(twotondim)
+     ! Apply smoothing to each cell
+     do ind=1,twotondim
+        iskip = ncoarse + (ind-1)*ngridmax
+        rho(igrid_amr + iskip) = (1.0d0-w_fpr)*rho(igrid_amr + iskip) + w_fpr*rho_avg
+     end do
+  end do
+
+  ! Update boundaries after smoothing
+  call make_virtual_fine_dp(rho(1),ilevel)
+
+end subroutine fpr_smooth_rho

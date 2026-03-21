@@ -41,7 +41,8 @@ subroutine read_hydro_params(nml_ok)
        & ,m_refine,mass_sph,err_grad_d,err_grad_p,err_grad_u &
        & ,floor_d,floor_u,floor_p,ivar_refine,var_cut_refine &
        & ,interpol_var,interpol_type,sink_refine,d_jeans_thre &
-       & ,q_refine_holdback,m_refine_effective,ref_fall_rate !(ONS)
+       & ,q_refine_holdback,m_refine_effective,ref_fall_rate & !(ONS)
+       & ,dr_proper
   namelist/boundary_params/nboundary,bound_type &
        & ,ibound_min,ibound_max,jbound_min,jbound_max &
        & ,kbound_min,kbound_max &

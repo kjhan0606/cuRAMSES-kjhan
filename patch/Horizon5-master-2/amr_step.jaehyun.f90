@@ -180,7 +180,12 @@ recursive subroutine amr_step(ilevel,icount)
            end if
         else if(remap_thresh>0d0)then
            ! Auto remap: check weight inhomogeneity every coarse step
-           call check_load_imbalance(ok_defrag)
+           ! Skip first step on restart (already balanced before dump)
+           if(nrestart>0.and.first_step)then
+              first_step=.false.
+           else
+              call check_load_imbalance(ok_defrag)
+           end if
         end if
      endif
   end if

@@ -242,6 +242,21 @@ subroutine adaptive_loop
               mstar_glob_old=mstar_tot_glob
               t_sfr_old=t
            endif
+           ! FPR diagnostic: per-level dx_phys and m_refine_eff/m_refine ratio
+           if(dr_proper > 0.0d0 .and. cosmo) then
+              call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)
+              write(*,'(A)') ' FPR (Gnedin 2016):'
+              do ilevel=levelmin,nlevelmax
+                 call compute_fpr_m_refine_eff(ilevel)
+                 if(m_refine(ilevel)>0.0d0) then
+                    write(*,'(A,I2,A,F8.3,A,F8.2)') &
+                         '   lv',ilevel,' dx_phys=', &
+                         (0.5d0**ilevel)*boxlen/dble(icoarse_max-icoarse_min+1) &
+                         *aexp*boxlen_ini*1000d0/(h0/100d0), &
+                         ' kpc  m_eff/m=', m_refine_eff(ilevel)/m_refine(ilevel)
+                 end if
+              end do
+           end if
         endif
         ! SGS turbulence diagnostics
         if(use_sgs .and. isgs>0) then

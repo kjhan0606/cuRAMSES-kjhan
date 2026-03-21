@@ -1212,15 +1212,15 @@ subroutine build_comm(ilevel)
       ! Reset old communicators
       if(emission(icpu,ilevel)%ngrid>0)then
          emission(icpu,ilevel)%ngrid=0
-         deallocate(emission(icpu,ilevel)%igrid)
-         deallocate(emission(icpu,ilevel)%u)
-         deallocate(emission(icpu,ilevel)%f)
+         if(associated(emission(icpu,ilevel)%igrid)) deallocate(emission(icpu,ilevel)%igrid)
+         if(associated(emission(icpu,ilevel)%u))     deallocate(emission(icpu,ilevel)%u)
+         if(associated(emission(icpu,ilevel)%f))     deallocate(emission(icpu,ilevel)%f)
       end if
       if(reception(icpu,ilevel)%ngrid>0)then
          reception(icpu,ilevel)%ngrid=0
-         deallocate(reception(icpu,ilevel)%igrid)
-         deallocate(reception(icpu,ilevel)%u)
-         deallocate(reception(icpu,ilevel)%f)
+         if(associated(reception(icpu,ilevel)%igrid)) deallocate(reception(icpu,ilevel)%igrid)
+         if(associated(reception(icpu,ilevel)%u))     deallocate(reception(icpu,ilevel)%u)
+         if(associated(reception(icpu,ilevel)%f))     deallocate(reception(icpu,ilevel)%f)
       end if
       if(ncache>0)then
          ! Allocate grid index to new communicator

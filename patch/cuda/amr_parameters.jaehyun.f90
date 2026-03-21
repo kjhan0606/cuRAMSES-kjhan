@@ -468,6 +468,8 @@ module amr_parameters
   real(dp)::m_refine_effective = 10000 ! (ONS)
   logical::q_refine_holdback=.true. !(ONS) ! default to the original form
   real(dp)::ref_fall_rate = 60.
+  real(dp)::dr_proper=0.0d0           ! FPR target proper resolution [kpc]. 0=disabled.
+  real(dp),dimension(1:MAXLEVEL)::m_refine_eff=-1.0  ! FPR-adjusted effective m_refine
 
   ! Initial condition files for each level
   logical::multiple=.false.

@@ -239,8 +239,18 @@ subroutine init_amr
      do i=1,ncpu
         emission (i,ilevel)%ngrid=0
         emission (i,ilevel)%npart=0
+        nullify(emission(i,ilevel)%igrid)
+        nullify(emission(i,ilevel)%u)
+        nullify(emission(i,ilevel)%f)
+        nullify(emission(i,ilevel)%fp)
+        nullify(emission(i,ilevel)%up)
         reception(i,ilevel)%ngrid=0
         reception(i,ilevel)%npart=0
+        nullify(reception(i,ilevel)%igrid)
+        nullify(reception(i,ilevel)%u)
+        nullify(reception(i,ilevel)%f)
+        nullify(reception(i,ilevel)%fp)
+        nullify(reception(i,ilevel)%up)
      end do
   end do
   ! Allocate lookup array for multigrid fine
