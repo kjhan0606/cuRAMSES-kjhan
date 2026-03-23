@@ -840,6 +840,119 @@ contains
 
 
    !================================================================
+   ! Initialize ksection communication tree for non-ksection orderings.
+   ! Builds a balanced k-ary tree topology (no spatial decomposition)
+   ! so that ksection_exchange_dp can be used for all orderings.
+   ! No-op if tree already initialized (ordering=='ksection').
+   !================================================================
+   subroutine init_ksection_comm_tree()
+      implicit none
+      integer :: lvl, nc, i, j, k, child, cur_cell, cur_levelstart
+      integer :: lncpu, base_ncpu, rem_ncpu, cum_ncpu, ncpu_j
+      integer, allocatable :: tmp_imin(:), tmp_imax(:)
+
+      ! Skip if already initialized (ordering=='ksection')
+      if(ksec_root > 0) return
+
+      ! Compute prime factorization and split sequence
+      call compute_ksection_factorization(ncpu)
+
+      ! Compute tree node count
+      ksec_nbinodes = compute_ksec_nbinodes()
+
+      if(myid==1) then
+         write(*,'(A)')      ' K-section comm tree (non-ksection ordering):'
+         write(*,'(A,I3)')   '   nksec_levels  =', nksec_levels
+         write(*,'(A,I3)')   '   ksec_kmax     =', ksec_kmax
+         write(*,'(A,I6)')   '   ksec_nbinodes =', ksec_nbinodes
+      end if
+
+      ! Allocate tree arrays (no ksec_wall needed for comm-only)
+      if(.not.allocated(ksec_next))   allocate(ksec_next  (1:ksec_nbinodes, 1:ksec_kmax))
+      if(.not.allocated(ksec_indx))   allocate(ksec_indx  (1:ksec_nbinodes))
+      if(.not.allocated(ksec_cpumin)) allocate(ksec_cpumin(1:ksec_nbinodes))
+      if(.not.allocated(ksec_cpumax)) allocate(ksec_cpumax(1:ksec_nbinodes))
+      ksec_next = 0; ksec_indx = 0
+      ksec_cpumin = 0; ksec_cpumax = 0
+      ksec_root = 1
+
+      ! Build balanced k-ary tree
+      allocate(tmp_imin(1:ksec_nbinodes))
+      allocate(tmp_imax(1:ksec_nbinodes))
+      tmp_imin = 0; tmp_imax = 0
+      tmp_imin(1) = 1; tmp_imax(1) = ncpu
+
+      cur_levelstart = 1
+      nc = 1
+
+      do lvl = 1, nksec_levels
+         k = ksec_factor(lvl)
+
+         do i = 1, nc
+            cur_cell = cur_levelstart + (i - 1)
+            if(tmp_imax(cur_cell) == 0) cycle
+
+            ! Leaf: single CPU
+            if(tmp_imin(cur_cell) == tmp_imax(cur_cell)) then
+               ksec_indx(cur_cell) = tmp_imin(cur_cell)
+               ksec_next(cur_cell, :) = 0
+               cycle
+            end if
+
+            ! Create k children with balanced CPU distribution
+            lncpu = tmp_imax(cur_cell) - tmp_imin(cur_cell) + 1
+            base_ncpu = lncpu / k
+            rem_ncpu = mod(lncpu, k)
+            cum_ncpu = 0
+
+            do j = 1, k
+               child = cur_levelstart + nc + (i - 1) * k + (j - 1)
+               ksec_next(cur_cell, j) = child
+
+               ! Balanced distribution: first rem_ncpu children get base+1
+               if(j <= rem_ncpu) then
+                  ncpu_j = base_ncpu + 1
+               else
+                  ncpu_j = base_ncpu
+               end if
+
+               if(j == 1) then
+                  tmp_imin(child) = tmp_imin(cur_cell)
+               else
+                  tmp_imin(child) = tmp_imin(cur_cell) + cum_ncpu
+               end if
+               cum_ncpu = cum_ncpu + ncpu_j
+               tmp_imax(child) = tmp_imin(cur_cell) + cum_ncpu - 1
+            end do
+         end do
+
+         cur_levelstart = cur_levelstart + nc
+         nc = nc * k
+      end do
+
+      ! Process final-level leaves
+      do i = 1, nc
+         cur_cell = cur_levelstart + (i - 1)
+         if(tmp_imax(cur_cell) == 0) cycle
+         if(tmp_imin(cur_cell) == tmp_imax(cur_cell)) then
+            ksec_indx(cur_cell) = tmp_imin(cur_cell)
+            ksec_next(cur_cell, :) = 0
+         end if
+      end do
+
+      ! Store CPU ranges for all nodes
+      ksec_cpumin(1:ksec_nbinodes) = tmp_imin(1:ksec_nbinodes)
+      ksec_cpumax(1:ksec_nbinodes) = tmp_imax(1:ksec_nbinodes)
+
+      ! Build cpu_path navigation
+      call compute_ksec_cpu_path()
+
+      deallocate(tmp_imin, tmp_imax)
+
+   end subroutine init_ksection_comm_tree
+
+
+   !================================================================
    ! Hierarchical k-section exchange for double precision data
    ! Level-by-level correspondent exchange using k-section tree
    !================================================================

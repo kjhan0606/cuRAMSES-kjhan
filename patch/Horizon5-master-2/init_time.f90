@@ -7,8 +7,11 @@ subroutine init_time
   use rt_cooling_module
 #endif
   implicit none
-  integer::i,Nmodel
-  real(kind=8)::T2_sim  
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer::i,Nmodel,info_diag
+  real(kind=8)::T2_sim
 #ifdef grackle
   integer:: iresult, initialize_grackle, UVbackground
   real(kind=8)::density_units,length_units,time_units,velocity_units,temperature_units,a_units=1.0,a_value=1.0
@@ -112,6 +115,13 @@ subroutine init_time
 #else
   if(cooling.and..not.(neq_chem.or.rt))then
      if(myid==1)write(*,*)'Computing cooling model'
+     call flush(6)
+#ifndef WITHOUTMPI
+     ! Diagnostic: verify all ranks reach cooling model
+     call MPI_BARRIER(MPI_COMM_WORLD,info_diag)
+     if(myid==1)write(*,*)'Diagnostic: all ranks at cooling model barrier'
+     call flush(6)
+#endif
      Nmodel=-1
      if(.not. haardt_madau)then
         Nmodel=2

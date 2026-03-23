@@ -40,6 +40,20 @@ subroutine adaptive_loop
 #endif
 
   call init_amr                      ! Initialize AMR variables
+
+  ! Diagnostic: test MPI health after init_amr (build_comm may stress IB)
+#ifndef WITHOUTMPI
+  if(myid==1) write(*,*) 'Diagnostic: testing MPI after init_amr...'
+  call flush(6)
+  call MPI_BARRIER(MPI_COMM_WORLD, info)
+  tot_pt = myid
+  call MPI_ALLREDUCE(MPI_IN_PLACE, tot_pt, 1, MPI_INTEGER, &
+       & MPI_SUM, MPI_COMM_WORLD, info)
+  if(myid==1) write(*,'(A,I6)') &
+       & ' Diagnostic: ALLREDUCE OK, sum=', tot_pt
+  call flush(6)
+#endif
+
   call init_time                     ! Initialize time variables
   if(hydro)call init_hydro           ! Initialize hydro variables
 #ifdef RT

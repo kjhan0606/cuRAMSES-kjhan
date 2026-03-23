@@ -1204,7 +1204,7 @@ transfer at each V-cycle.
 Table~\ref{tab:gpu_perf} summarises the GPU performance on an NVIDIA
 H100~NVL system (93.1\,GB HBM3 per device, PCIe Gen5) using 2~MPI
 ranks $\times$ 4~OMP threads, running 2 coarse steps of the
-HR5-512 test (Section~\ref{sec:perf_config}).
+Cosmo512 test (Section~\ref{sec:perf_config}).
 
 \begin{table}
 \centering
@@ -1256,23 +1256,27 @@ optimizations (Section~\ref{sec:multigrid}) remain more effective.
 \subsection{Test Configuration}
 \label{sec:perf_config}
 
-We use two test configurations, referred to throughout as
-\textbf{Cosmo256} and \textbf{HR5-512}.
+We use three test configurations of increasing size, referred to
+throughout as \textbf{Cosmo256}, \textbf{Cosmo512}, and
+\textbf{Cosmo1024}.
 
-The \textbf{Cosmo256} test has
-$200\,\mathrm{M}$ dark matter particles in a periodic box of side
-256\,$h^{-1}$\,Mpc, initialised at $z = 29.5$ with \textsc{music}
-\citep{Hahn2011}. The base AMR grid is $256^3$ (\code{levelmin}=8)
-with adaptive refinement up to \code{levelmax}=10. The simulation is
-restarted from an HDF5 output at coarse step~5 and evolved to
-step~10 (5 coarse steps).
+The \textbf{Cosmo256} test is designed for code consistency
+verification.  It has $200\,\mathrm{M}$ dark matter particles in a
+periodic box of side 256\,$h^{-1}$\,Mpc, initialised at $z = 29.5$
+with \textsc{music} \citep{Hahn2011}. The base AMR grid is $256^3$
+(\code{levelmin}=8) with adaptive refinement up to
+\code{levelmax}=10. The simulation is restarted from an HDF5 output
+at coarse step~5 and evolved to step~10 (5 coarse steps).  This
+small problem fits comfortably in a single node and enables rapid
+regression testing of every optimization against a reference
+Hilbert-ordering run.
 
-The \textbf{HR5-512} test, used for strong scaling
-(Section~\ref{sec:perf_timing}), is drawn from an ongoing
-Horizon-5 production run.  It contains $135.7\,\mathrm{M}$ dark
-matter particles and $3.2 \times 10^4$ sink particles in the same
-256\,$h^{-1}$\,Mpc box with $\Lambda$CDM cosmology
-($\Omega_b = 0.04$).  The base grid is $512^3$
+The \textbf{Cosmo512} test, used for intra-node strong scaling
+(Section~\ref{sec:perf_timing}), is a cosmological zoom-in
+simulation sized to fit within a single compute node.  It contains
+$135.7\,\mathrm{M}$ dark matter particles and $3.2 \times 10^4$ sink
+particles in the same 256\,$h^{-1}$\,Mpc box with $\Lambda$CDM
+cosmology ($\Omega_b = 0.04$).  The base grid is $512^3$
 (\code{levelmin}=9) with \code{levelmax}=17; at the restart epoch
 (coarse step~241) levels 9--14 are active.  The physics suite
 includes radiative cooling \citep[Haardt \& Madau
@@ -1284,8 +1288,26 @@ allocates $\ngridmax = 5\,\mathrm{M}$ grids (88\,M total grids
 across all ranks), and the run is restarted from an HDF5 output at
 coarse step~241.
 
-Both tests are run on a dual-socket AMD EPYC
-7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4 memory.
+The \textbf{Cosmo1024} test, used for multi-node scaling
+(Section~\ref{sec:perf_multinode}), is a larger cosmological
+zoom-in simulation designed to evaluate parallel efficiency across
+multiple compute nodes.
+It contains $1024^3$ (${\approx}\,1.07\,\mathrm{B}$) dark matter
+particles in a 256\,$h^{-1}$\,Mpc periodic box with the same
+$\Lambda$CDM cosmology.  The base grid is $1024^3$
+(\code{levelmin}=10) with \code{levelmax}=18; at the restart epoch
+(coarse step~218, $z \approx 5.2$) levels 10--15 are active,
+comprising ${\sim}\,537\,\mathrm{M}$ AMR grids and
+${\sim}\,4.2\,\mathrm{M}$ stellar particles.  The full physics
+suite is identical to Cosmo512.  The run is restarted from an HDF5
+output at coarse step~218 using the variable-$\ncpu$ restart
+feature.
+
+The Cosmo256 and Cosmo512 tests are run on a dual-socket AMD EPYC
+7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4
+memory.  The Cosmo1024 test is run on the \textit{Grammar} cluster
+(8~nodes, dual Intel Xeon per node, 64~cores/node, 504\,Gb RAM per
+node, InfiniBand HDR interconnect).
 
 
 \subsection{Conservation Verification}
@@ -1333,7 +1355,7 @@ sparse P2P exchange patterns, is characterised independently through
 dedicated microbenchmarks on a 16-node cluster in
 Section~\ref{sec:bench_ghost}.
 
-We measure strong scaling by restarting the HR5-512 simulation
+We measure strong scaling by restarting the Cosmo512 simulation
 from an HDF5 output.  The test problem comprises
 $54\,\mathrm{M}$ AMR grids (levels~9--14) and $135.7\,\mathrm{M}$ particles
 including $3.2 \times 10^4$ sink particles, with full physics enabled
@@ -1410,7 +1432,7 @@ $33.9\times$ at 64 ranks ($53\%$ parallel efficiency).}
 \label{sec:perf_omp}
 
 To evaluate intra-rank parallelism we fix $\ncpu = 4$ and vary
-\code{OMP\_NUM\_THREADS} from 1 to 30, using the same HR5-512 problem as
+\code{OMP\_NUM\_THREADS} from 1 to 30, using the same Cosmo512 problem as
 Section~\ref{sec:perf_timing}.  The total core count ranges from 4 to
 120, and the physical core limit of the dual-socket node is 64.
 
@@ -1545,6 +1567,88 @@ Figure~\ref{fig:memory_balance} visualizes these trends.
   decouples memory balance from grid-count balance.}
 \label{fig:memory_balance}
 \end{figure*}
+
+\subsection{Multi-Node Scaling (Cosmo1024)}
+\label{sec:perf_multinode}
+
+The preceding single-node tests demonstrate intra-node scaling
+efficiency but cannot probe the inter-node communication overhead
+that dominates production runs.  We therefore perform a multi-node
+strong-scaling study using the Cosmo1024 configuration on the
+\textit{Grammar} cluster (8 nodes, 64~cores/node, 504\,Gb RAM/node,
+InfiniBand HDR).
+
+\subsubsection{MPI rank scaling}
+\label{sec:perf_mpi_scaling}
+
+We restart the Cosmo1024 simulation from its HDF5 output at
+coarse step~218 ($z \approx 5.2$) and run 5 additional coarse
+steps, discarding the first step (which includes the
+\code{load\_balance} remap) as warm-up.  The number of MPI ranks
+is varied as $\ncpu = 8$, 16, 32, 64, with
+\code{OMP\_NUM\_THREADS}=8 and $\ncpu/8$ ranks per node, so that
+the total core count doubles from 64 (1~node equivalent) to 512
+(8~nodes).  The variable-$\ncpu$ restart feature allows each rank
+count to read the same checkpoint.
+
+Figure~\ref{fig:cosmo1024_mpi} shows the elapsed time
+and speedup as a function of total cores.  Despite the inter-node
+communication overhead, the multi-node run achieves good parallel
+efficiency.  The hierarchical \ksec\ exchange
+(Section~\ref{sec:ksec_exchange}) keeps the number of
+communication partners bounded at $O(\log P)$, preventing the
+all-to-all scaling bottleneck that would otherwise appear at high
+rank counts with Hilbert ordering.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_cosmo1024_mpi_scaling.pdf}
+\caption{Multi-node strong scaling of \curamses\ (Cosmo1024) on
+  the Grammar cluster (8~nodes, 64~cores/node).
+  (a)~Wall-clock time per coarse step versus total cores
+  (64--512).  The dashed line shows ideal scaling from the
+  64-core baseline.
+  (b)~Speedup relative to 64 cores.  The upper axis shows
+  the equivalent number of nodes.}
+\label{fig:cosmo1024_mpi}
+\end{figure}
+
+\subsubsection{MPI/OpenMP hybrid scaling}
+\label{sec:perf_multinode_omp}
+
+To identify the optimal MPI/OpenMP balance, we fix the total
+resource at 8~nodes (512~cores) and vary the MPI/OMP split:
+$\ncpu \times N_{\rm omp} = 512$, with $N_{\rm omp}$ ranging from
+1 (pure MPI, 512 ranks) to 64 (8~ranks, 64~threads each).  Each
+configuration allocates $\ncpu/8$ ranks per node, so the per-node
+memory footprint varies inversely with $\ncpu$ while the total
+compute budget remains constant.
+
+Figure~\ref{fig:cosmo1024_omp} shows the per-step wall-clock
+time and relative speedup as a function of $N_{\rm omp}$.
+The vertical dotted line marks the physical core limit per rank
+(8~threads $\times$ 8~ranks/node = 64~cores/node).  The
+production configuration ($\ncpu = 64$, $N_{\rm omp} = 8$)
+is highlighted.  Configurations with fewer MPI ranks and more
+threads reduce communication overhead but sacrifice intra-rank
+parallelism due to serial sections in sink operations and load
+balancing.
+
+\begin{figure}
+\centering
+\includegraphics[width=\columnwidth]{fig_cosmo1024_omp_scaling.pdf}
+\caption{Hybrid MPI/OpenMP scaling of \curamses\ (Cosmo1024)
+  on 8~nodes (512~cores total), varying the MPI/OMP split
+  ($\ncpu \times N_{\rm omp} = 512$).
+  (a)~Per-step wall-clock time decomposed into solver components.
+  The vertical red line marks the production configuration
+  ($\ncpu = 64$, $N_{\rm omp} = 8$).
+  (b)~Speedup relative to the pure-MPI baseline ($N_{\rm omp} = 1$).
+  The vertical dotted line marks the physical core limit
+  (8~threads/rank).}
+\label{fig:cosmo1024_omp}
+\end{figure}
+
 
 \subsection{Communication Microbenchmarks}
 \label{sec:perf_bench}

@@ -1251,9 +1251,7 @@ subroutine build_comm(ilevel)
   !--------------------------------------------------------
   ! Communicate virtual grid number and index to parent cpu
   !--------------------------------------------------------
-  if(ordering=='ksection') then
-
-  ! Ksection version: exchange grid indices via tree routing
+  ! Hierarchical exchange via ksection tree routing (all orderings)
   ! Pack: (sender_id, reception_index, global_grid_address) for each reception grid
   ntotal_bc = 0
   do icpu = 1, ncpu
@@ -1300,48 +1298,6 @@ subroutine build_comm(ilevel)
      emission(sender_bc, ilevel)%igrid(j) = nint(recvbuf_bc(3, i))
   end do
   deallocate(recvbuf_bc)
-
-  else
-
-  ! Original MPI_ALLTOALL version
-  call MPI_ALLTOALL(sendbuf,1,MPI_INTEGER,recvbuf,1,MPI_INTEGER,MPI_COMM_WORLD,info)
-
-  ! Allocate grid index
-  do icpu=1,ncpu
-     emission(icpu,ilevel)%ngrid=recvbuf(icpu)
-     ncache=emission(icpu,ilevel)%ngrid
-     if(ncache>0)allocate(emission(icpu,ilevel)%igrid(1:ncache))
-  end do
-
-  ! Receive grid list
-  countrecv=0
-  do icpu=1,ncpu
-     ncache=emission(icpu,ilevel)%ngrid
-     if(ncache>0) then
-        countrecv=countrecv+1
-        call MPI_IRECV(emission(icpu,ilevel)%igrid,ncache, &
-             & MPI_INTEGER,icpu-1,tag,MPI_COMM_WORLD,reqrecv(countrecv),info)
-     end if
-  end do
-
-  ! Send global index
-  countsend=0
-  do icpu=1,ncpu
-     ncache=reception(icpu,ilevel)%ngrid
-     if(ncache>0) then
-        countsend=countsend+1
-        call MPI_ISEND(reception(icpu,ilevel)%f,ncache, &
-             & MPI_INTEGER,icpu-1,tag,MPI_COMM_WORLD,reqsend(countsend),info)
-     end if
-  end do
-
-  ! Wait for full completion of sends
-  call MPI_WAITALL(countsend,reqsend,statuses,info)
-
-  ! Wait for full completion of receives
-  call MPI_WAITALL(countrecv,reqrecv,statuses,info)
-
-  end if
 
   ! Deallocate temporary communication buffers
   do icpu=1,ncpu

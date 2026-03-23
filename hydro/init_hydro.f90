@@ -27,7 +27,9 @@ subroutine init_hydro
   ncell=ncoarse+twotondim*ngridmax
   allocate(uold(1:ncell,1:nvar))
   allocate(unew(1:ncell,1:nvar))
-  uold=0.0d0; unew=0.0d0
+  ! uold/unew: Active cells initialized by restart reader or init_flow_fine.
+  ! Free-list cells get zero from mmap(MAP_ANONYMOUS) lazy page allocation.
+  ! Skip full-array zeroing to avoid paging in 18 GB at startup.
   if(pressure_fix)then
      allocate(divu(1:ncell))
      allocate(enew(1:ncell))

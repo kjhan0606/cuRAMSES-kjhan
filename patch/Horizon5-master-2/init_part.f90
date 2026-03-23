@@ -96,13 +96,14 @@ subroutine init_part
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   allocate(ptcl_phi(npartmax))
 #endif
-  xp=0.0; vp=0.0; mp=0.0; levelp=0; idp=0
+  ! Particle arrays: active particles initialized by restart/IC reader.
+  ! Free-list particles get zero from mmap lazy page allocation.
+  ! Skip full-array zeroing to avoid paging in ~1.7 GB.
   if(star.or.sink)then
      allocate(tp(npartmax))
-     tp=0.0
+     ! tp/zp: set by restart/IC reader. Mmap provides zero pages.
      if(metal)then
         allocate(zp(npartmax))
-        zp=0.0
      end if
 
 

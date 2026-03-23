@@ -27,16 +27,17 @@ subroutine init_poisson
   allocate(phi (1:ncell))
   allocate(phi_old (1:ncell))
   allocate(f   (1:ncell,1:3))
-  rho=0.0D0; rho_star=0d0; phi=0.0D0; f=0.0D0
+  ! rho/phi/f: recomputed every timestep by rho_fine/Poisson solver.
+  ! Free-list cells get zero from mmap(MAP_ANONYMOUS) lazy page allocation.
+  ! Skip full-array zeroing to avoid paging in ~9 GB at startup.
   if(use_fR .or. use_nDGP .or. use_symmetron .or. use_dilaton .or. use_galileon) then
      allocate(scalar_gr    (1:ncell))
      allocate(scalar_gr_old(1:ncell))
-     scalar_gr    = 0d0
-     scalar_gr_old= 0d0
+     ! scalar_gr: recomputed by MG solver. Mmap provides zero pages.
   end if
   if(cic_levelmax>0)then
      allocate(rho_top(1:ncell))
-     rho_top=0d0
+     ! rho_top: set by rho_fine. Mmap provides zero pages.
   endif
 
   !------------------------------------------------------

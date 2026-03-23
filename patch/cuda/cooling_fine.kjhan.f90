@@ -123,7 +123,7 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
   integer::i,ind,iskip,idim,nleaf,nx_loc,ix,iy,iz
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
   real(kind=8)::dtcool,nISM,nCOM,damp_factor,cooling_switch,t_blast
-  real(dp)::polytropic_constant
+  real(dp)::polytropic_constant,dx_phys_cm
   real(dp),dimension(1:3)::skip_loc
   real(kind=8)::dx,dx_loc,scale,vol_loc
   integer::irad
@@ -170,7 +170,11 @@ subroutine coolfine1(ind_grid,ngrid,ilevel)
 
   ! Polytropic constant for Jeans length related polytropic EOS
   if(jeans_ncells>0)then
-     polytropic_constant=2d0*(boxlen*jeans_ncells*0.5d0**dble(nlevelmax)*scale_l/aexp)**2/ &
+     ! dx_phys [cm] at finest level
+     dx_phys_cm=boxlen*0.5d0**dble(nlevelmax)*scale_l/aexp
+     ! FPR: effective resolution = max(dx_phys, dr_proper)
+     if(dr_proper > 0d0) dx_phys_cm=max(dx_phys_cm, dr_proper*3.085678d21)
+     polytropic_constant=2d0*(jeans_ncells*dx_phys_cm)**2/ &
           & (twopi)*6.67e-8*scale_d*(scale_t/scale_l)**2
   endif
 
@@ -474,7 +478,7 @@ subroutine init_eeos_poly_coeff
   use cooling_module
   implicit none
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
-  real(dp)::polytropic_constant
+  real(dp)::polytropic_constant,dx_phys_cm
   real(dp)::nISM,nCOM
 
   call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
@@ -485,7 +489,11 @@ subroutine init_eeos_poly_coeff
   nISM = MAX(nCOM,nISM)
 
   if(jeans_ncells>0)then
-     polytropic_constant=2d0*(boxlen*jeans_ncells*0.5d0**dble(nlevelmax)*scale_l/aexp)**2/ &
+     ! dx_phys [cm] at finest level
+     dx_phys_cm=boxlen*0.5d0**dble(nlevelmax)*scale_l/aexp
+     ! FPR: effective resolution = max(dx_phys, dr_proper)
+     if(dr_proper > 0d0) dx_phys_cm=max(dx_phys_cm, dr_proper*3.085678d21)
+     polytropic_constant=2d0*(jeans_ncells*dx_phys_cm)**2/ &
           & (twopi)*6.67e-8*scale_d*(scale_t/scale_l)**2
      eeos_poly_coeff = polytropic_constant * scale_nH / (gamma-1.0)
      eeos_poly_alpha = 2.0d0

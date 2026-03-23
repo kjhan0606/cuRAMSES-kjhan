@@ -52,18 +52,24 @@ subroutine init_amr
   allocate(flag1(0:ncell)) ! Note: starting from 0
   allocate(flag2(0:ncell)) ! Note: starting from 0
   allocate(son  (1:ncell)) ! Son index
-  flag1=0; flag2=0; son=0
+  ! Only initialize sentinel and coarse cells.
+  ! Fine grid cells get zero from mmap(MAP_ANONYMOUS) lazy page allocation.
+  ! Explicit full-array zeroing would page in ~2.2 GB unnecessarily.
+  flag1(0)=0; flag2(0)=0  ! Sentinel for index-0 access
+  son(1:ncoarse)=0         ! Coarse cells: not refined initially
 
   ! Allocate MPI cell-based arrays
   allocate(cpu_map    (1:ncell)) ! Cpu map
   allocate(cpu_map2   (1:ncell)) ! New cpu map for load balance
-  cpu_map=0; cpu_map2=0
+  ! Only initialize coarse cells. Fine grid cells get zero from mmap lazy allocation.
+  cpu_map(1:ncoarse)=0; cpu_map2(1:ncoarse)=0
   if(ordering=='ksection') then
      allocate(hilbert_key(1:1))     ! Defrag uses local scratch
   else
      allocate(hilbert_key(1:ncell)) ! Ordering key
   end if
-  hilbert_key=0.0d0
+  ! Only initialize coarse portion. Fine grid keys set during ordering computation.
+  if(ordering/='ksection') hilbert_key(1:ncoarse)=0.0d0
 
   ! Bisection ordering: compute array boundaries and
   ! allocate arrays if needed
@@ -202,6 +208,10 @@ subroutine init_amr
 
   end if bisection_or_ordering
 
+  ! Initialize ksection communication tree for hierarchical exchange
+  ! (no-op if ordering=='ksection', tree already built above)
+  call init_ksection_comm_tree()
+
   ! Compute coarse cpu map
   do iz=kcoarse_min,kcoarse_max
   do iy=jcoarse_min,jcoarse_max
@@ -275,21 +285,25 @@ subroutine init_amr
 
   ! Allocate grid center coordinates
   allocate(xg(1:ngridmax,1:ndim))
-  xg=0.0D0
+  ! xg: Grid positions set during grid creation or restart read.
+  ! Skip full-array zeroing to avoid paging in 562 MB.
 
   ! Allocate tree arrays
   allocate(father(1:ngridmax))
   allocate(nbor  (1:ngridmax,1:twondim))  ! Full allocation for son(nbor) compatibility
   allocate(next  (1:ngridmax))
   allocate(prev  (1:ngridmax))
-  father=0; nbor=0; next=0; prev=0
+  ! father/nbor: set by restart read or grid creation. Free-list grids never accessed.
+  ! next/prev: immediately overwritten by free-list initialization below.
+  ! Skip full-array zeroing to avoid paging in 843 MB.
 
   ! Allocate pointer to particles linked lists
   if(pic)then
      allocate(headp(1:ngridmax))
      allocate(tailp(1:ngridmax))
      allocate(numbp(1:ngridmax))
-     headp=0; tailp=0; numbp=0
+     ! headp/tailp/numbp: set during restart particle linkage or IC distribution.
+     ! Skip zeroing to avoid paging in 281 MB (mmap provides zero pages).
   endif
 
   ! Initialize AMR grid linked list
