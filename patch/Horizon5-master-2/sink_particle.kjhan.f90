@@ -5360,9 +5360,11 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   logical ,dimension(1:nAGN)::ok_blast_agn
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy
   real(dp)::eint,ekk
-  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
-  real(dp) :: inv_bin_size
+  integer :: nbin, nbx, nby, nbz, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: inv_bin_size, bin_xmin, bin_ymin, bin_zmin
   integer, allocatable :: bin_head(:,:,:), agn_next(:)
+  integer :: nAGN_local
+  integer, allocatable :: agn_local(:)
 
   if(verbose)write(*,*)'  +Entering average_AGN'
 !$omp parallel shared(nthreads)
@@ -5411,17 +5413,50 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
   rmax2=rmax*rmax
 
   ! Build spatial bins for AGN
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
-  bin_head=0; agn_next=0
-  do iAGN=1,nAGN
-     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
-     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
-     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
-     agn_next(iAGN)=bin_head(ibx,iby,ibz)
-     bin_head(ibx,iby,ibz)=iAGN
-  end do
+  if(ordering=='ksection') then
+     ! Local domain binning: cover domain + rmax halo
+     bin_xmin = bisec_cpubox_min(myid,1) - rmax
+     bin_ymin = bisec_cpubox_min(myid,2) - rmax
+     bin_zmin = bisec_cpubox_min(myid,3) - rmax
+     inv_bin_size = 1.0d0 / (3.0d0 * rmax)  ! bin_size ~ 3*rmax
+     nbx = max(1, int((bisec_cpubox_max(myid,1) - bisec_cpubox_min(myid,1) + 2*rmax) * inv_bin_size) + 1)
+     nby = max(1, int((bisec_cpubox_max(myid,2) - bisec_cpubox_min(myid,2) + 2*rmax) * inv_bin_size) + 1)
+     nbz = max(1, int((bisec_cpubox_max(myid,3) - bisec_cpubox_min(myid,3) + 2*rmax) * inv_bin_size) + 1)
+     allocate(bin_head(nbx,nby,nbz), agn_next(max(1,nAGN)))
+     bin_head=0; agn_next=0
+     ! Only bin AGN within local domain + rmax halo
+     nAGN_local = 0
+     allocate(agn_local(max(1,nAGN)))
+     do iAGN=1,nAGN
+        if(xAGN(iAGN,1) >= bin_xmin .and. xAGN(iAGN,1) < bisec_cpubox_max(myid,1)+rmax .and. &
+           xAGN(iAGN,2) >= bin_ymin .and. xAGN(iAGN,2) < bisec_cpubox_max(myid,2)+rmax .and. &
+           xAGN(iAGN,3) >= bin_zmin .and. xAGN(iAGN,3) < bisec_cpubox_max(myid,3)+rmax) then
+           ibx = max(1, min(nbx, int((xAGN(iAGN,1)-bin_xmin)*inv_bin_size)+1))
+           iby = max(1, min(nby, int((xAGN(iAGN,2)-bin_ymin)*inv_bin_size)+1))
+           ibz = max(1, min(nbz, int((xAGN(iAGN,3)-bin_zmin)*inv_bin_size)+1))
+           agn_next(iAGN) = bin_head(ibx,iby,ibz)
+           bin_head(ibx,iby,ibz) = iAGN
+           nAGN_local = nAGN_local + 1
+        end if
+     end do
+     deallocate(agn_local)
+     nbin = max(nbx, nby, nbz)  ! for neighbor loop limits
+  else
+     ! Global binning (hilbert or other orderings)
+     bin_xmin = 0.0d0; bin_ymin = 0.0d0; bin_zmin = 0.0d0
+     nbin = max(1, min(128, int(boxlen/rmax)))
+     nbx = nbin; nby = nbin; nbz = nbin
+     inv_bin_size = dble(nbin) / boxlen
+     allocate(bin_head(nbin,nbin,nbin), agn_next(max(1,nAGN)))
+     bin_head=0; agn_next=0
+     do iAGN=1,nAGN
+        ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+        iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+        ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+        agn_next(iAGN)=bin_head(ibx,iby,ibz)
+        bin_head(ibx,iby,ibz)=iAGN
+     end do
+  end if
 
   ! Initialize the averaged variables
   vol_gas=0d0;mass_gas=0d0;vol_blast=0d0;mass_blast=0d0;ind_blast=-1;psy_norm=0d0;ZAGN=0d0
@@ -5479,13 +5514,13 @@ subroutine average_AGN(xAGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,vol_gas,mass_gas,ps
                y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
                ! Find cell's spatial bin
-               ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-               iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-               ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+               ibx=max(1,min(nbx,int((x-bin_xmin)*inv_bin_size)+1))
+               iby=max(1,min(nby,int((y-bin_ymin)*inv_bin_size)+1))
+               ibz=max(1,min(nbz,int((z-bin_zmin)*inv_bin_size)+1))
                ! Loop over 27 neighbor bins
-               do jbz=max(1,ibz-1),min(nbin,ibz+1)
-               do jby=max(1,iby-1),min(nbin,iby+1)
-               do jbx=max(1,ibx-1),min(nbin,ibx+1)
+               do jbz=max(1,ibz-1),min(nbz,ibz+1)
+               do jby=max(1,iby-1),min(nby,iby+1)
+               do jbx=max(1,ibx-1),min(nbx,ibx+1)
                   iAGN=bin_head(jbx,jby,jbz)
                   do while(iAGN > 0)
                   dxx=x-xAGN(iAGN,1)
@@ -5723,8 +5758,8 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   real(dp)::jtot,j_x,j_y,j_z,drjet,dzjet,psy,nCOM,T2_1,T2_2,ekk,eint,vm_,dr_cell,T2,etot
   real(dp)::eint1,ekkold,T2maxAGNz,epsilon_r,ZZ1,ZZ2,onethird,r_lso,eff_mad
   integer::idim,isink
-  integer :: nbin, ibx, iby, ibz, jbx, jby, jbz
-  real(dp) :: inv_bin_size
+  integer :: nbin, nbx, nby, nbz, ibx, iby, ibz, jbx, jby, jbz
+  real(dp) :: inv_bin_size, bin_xmin, bin_ymin, bin_zmin
   integer, allocatable :: bin_head(:,:,:), agn_next(:)
 #ifndef WITHOUTMPI
   real(dp),dimension(1:nsink)::EsaveAGN_mpi,EsaveAGN_all
@@ -5775,17 +5810,44 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
   rmax2=rmax*rmax
 
   ! Build spatial bins for AGN
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),agn_next(max(1,nAGN)))
-  bin_head=0; agn_next=0
-  do iAGN=1,nAGN
-     ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
-     iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
-     ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
-     agn_next(iAGN)=bin_head(ibx,iby,ibz)
-     bin_head(ibx,iby,ibz)=iAGN
-  end do
+  if(ordering=='ksection') then
+     ! Local domain binning: cover domain + rmax halo
+     bin_xmin = bisec_cpubox_min(myid,1) - rmax
+     bin_ymin = bisec_cpubox_min(myid,2) - rmax
+     bin_zmin = bisec_cpubox_min(myid,3) - rmax
+     inv_bin_size = 1.0d0 / (3.0d0 * rmax)  ! bin_size ~ 3*rmax
+     nbx = max(1, int((bisec_cpubox_max(myid,1) - bisec_cpubox_min(myid,1) + 2*rmax) * inv_bin_size) + 1)
+     nby = max(1, int((bisec_cpubox_max(myid,2) - bisec_cpubox_min(myid,2) + 2*rmax) * inv_bin_size) + 1)
+     nbz = max(1, int((bisec_cpubox_max(myid,3) - bisec_cpubox_min(myid,3) + 2*rmax) * inv_bin_size) + 1)
+     allocate(bin_head(nbx,nby,nbz), agn_next(max(1,nAGN)))
+     bin_head=0; agn_next=0
+     do iAGN=1,nAGN
+        if(xAGN(iAGN,1) >= bin_xmin .and. xAGN(iAGN,1) < bisec_cpubox_max(myid,1)+rmax .and. &
+           xAGN(iAGN,2) >= bin_ymin .and. xAGN(iAGN,2) < bisec_cpubox_max(myid,2)+rmax .and. &
+           xAGN(iAGN,3) >= bin_zmin .and. xAGN(iAGN,3) < bisec_cpubox_max(myid,3)+rmax) then
+           ibx = max(1, min(nbx, int((xAGN(iAGN,1)-bin_xmin)*inv_bin_size)+1))
+           iby = max(1, min(nby, int((xAGN(iAGN,2)-bin_ymin)*inv_bin_size)+1))
+           ibz = max(1, min(nbz, int((xAGN(iAGN,3)-bin_zmin)*inv_bin_size)+1))
+           agn_next(iAGN) = bin_head(ibx,iby,ibz)
+           bin_head(ibx,iby,ibz) = iAGN
+        end if
+     end do
+     nbin = max(nbx, nby, nbz)
+  else
+     bin_xmin = 0.0d0; bin_ymin = 0.0d0; bin_zmin = 0.0d0
+     nbin = max(1, min(128, int(boxlen/rmax)))
+     nbx = nbin; nby = nbin; nbz = nbin
+     inv_bin_size = dble(nbin) / boxlen
+     allocate(bin_head(nbin,nbin,nbin), agn_next(max(1,nAGN)))
+     bin_head=0; agn_next=0
+     do iAGN=1,nAGN
+        ibx=max(1,min(nbin,int(xAGN(iAGN,1)*inv_bin_size)+1))
+        iby=max(1,min(nbin,int(xAGN(iAGN,2)*inv_bin_size)+1))
+        ibz=max(1,min(nbin,int(xAGN(iAGN,3)*inv_bin_size)+1))
+        agn_next(iAGN)=bin_head(ibx,iby,ibz)
+        bin_head(ibx,iby,ibz)=iAGN
+     end do
+  end if
 
 !!$omp parallel do private(iAGN)
   do iAGN=1,nAGN
@@ -5880,13 +5942,13 @@ subroutine AGN_blast(xAGN,vAGN,dMsmbh_AGN,dMBH_AGN,dMEd_AGN,mAGN,ZAGN,jAGN,ind_b
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
 
                  ! Find cell's spatial bin
-                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ibx=max(1,min(nbx,int((x-bin_xmin)*inv_bin_size)+1))
+                 iby=max(1,min(nby,int((y-bin_ymin)*inv_bin_size)+1))
+                 ibz=max(1,min(nbz,int((z-bin_zmin)*inv_bin_size)+1))
                  ! Loop over 27 neighbor bins
-                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
-                 do jby=max(1,iby-1),min(nbin,iby+1)
-                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                 do jbz=max(1,ibz-1),min(nbz,ibz+1)
+                 do jby=max(1,iby-1),min(nby,iby+1)
+                 do jbx=max(1,ibx-1),min(nbx,ibx+1)
                     iAGN=bin_head(jbx,jby,jbz)
                     do while(iAGN > 0)
 

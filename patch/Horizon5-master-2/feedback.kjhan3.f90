@@ -2283,8 +2283,8 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
   !------------------------------------------------------------------------
   integer::ilevel,ncache,nSN,iSN,ind,ix,iy,iz,ngrid,iskip,ielt
   integer::i,nx_loc,igrid
-  integer::nbin,ibx,iby,ibz,jbx,jby,jbz
-  real(dp)::bin_size,inv_bin_size
+  integer::nbin,nbx,nby,nbz,ibx,iby,ibz,jbx,jby,jbz
+  real(dp)::bin_size,inv_bin_size,bin_xmin,bin_ymin,bin_zmin
   integer,allocatable::bin_head(:,:,:),sn_next(:)
   integer,dimension(1:nvector)::ind_grid,ind_cell
   real(dp)::x,y,z,dr_SN,d,u,v,w,ek,dr_cell
@@ -2326,16 +2326,20 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
-  ! Build spatial bins for SN
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  bin_size=boxlen/dble(nbin)
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nSN)))
+  ! Build spatial bins for SN (local domain binning for ksection)
+  bin_xmin=bisec_cpubox_min(myid,1)-rmax
+  bin_ymin=bisec_cpubox_min(myid,2)-rmax
+  bin_zmin=bisec_cpubox_min(myid,3)-rmax
+  inv_bin_size=1.0d0/(3.0d0*rmax)
+  nbx=max(1,int((bisec_cpubox_max(myid,1)-bisec_cpubox_min(myid,1)+2.0d0*rmax)*inv_bin_size)+1)
+  nby=max(1,int((bisec_cpubox_max(myid,2)-bisec_cpubox_min(myid,2)+2.0d0*rmax)*inv_bin_size)+1)
+  nbz=max(1,int((bisec_cpubox_max(myid,3)-bisec_cpubox_min(myid,3)+2.0d0*rmax)*inv_bin_size)+1)
+  allocate(bin_head(nbx,nby,nbz),sn_next(max(1,nSN)))
   bin_head=0; sn_next=0
   do iSN=1,nSN
-     ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
-     iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
-     ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+     ibx=max(1,min(nbx,int((xSN(iSN,1)-bin_xmin)*inv_bin_size)+1))
+     iby=max(1,min(nby,int((xSN(iSN,2)-bin_ymin)*inv_bin_size)+1))
+     ibz=max(1,min(nbz,int((xSN(iSN,3)-bin_zmin)*inv_bin_size)+1))
      sn_next(iSN)=bin_head(ibx,iby,ibz)
      bin_head(ibx,iby,ibz)=iSN
   end do
@@ -2387,14 +2391,14 @@ subroutine average_SN_ksec(xSN,vSN,vol_gas,dq,u2Blast,ind_blast,nSN, &
                  x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-                 ! Find cell's bin
-                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Find cell's bin (local domain coordinates)
+                 ibx=max(1,min(nbx,int((x-bin_xmin)*inv_bin_size)+1))
+                 iby=max(1,min(nby,int((y-bin_ymin)*inv_bin_size)+1))
+                 ibz=max(1,min(nbz,int((z-bin_zmin)*inv_bin_size)+1))
                  ! Loop over 27 neighbor bins
-                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
-                 do jby=max(1,iby-1),min(nbin,iby+1)
-                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                 do jbz=max(1,ibz-1),min(nbz,ibz+1)
+                 do jby=max(1,iby-1),min(nby,iby+1)
+                 do jbx=max(1,ibx-1),min(nbx,ibx+1)
                     iSN=bin_head(jbx,jby,jbz)
                     do while(iSN > 0)
                        ! Check if the cell lies within the SN radius
@@ -2526,9 +2530,9 @@ subroutine Sedov_blast_ksec(recvbuf,nrecv,nprops, &
 
   integer::ilevel,iSN,ind,ix,iy,iz,ngrid,iskip,ielt
   integer::i,nx_loc,igrid,ncache
-  integer::nbin,ibx,iby,ibz,jbx,jby,jbz,j
+  integer::nbin,nbx,nby,nbz,ibx,iby,ibz,jbx,jby,jbz,j
   integer::blast_cpu,owner_cpu_val,owner_idx_val,ind_blast_cell
-  real(dp)::bin_size,inv_bin_size
+  real(dp)::bin_size,inv_bin_size,bin_xmin,bin_ymin,bin_zmin
   integer,allocatable::bin_head(:,:,:),sn_next(:)
   integer,dimension(1:nvector)::ind_grid,ind_cell
   real(dp)::x,y,z,dx,dxx,dyy,dzz,dr_SN,d_gas,u,v,w,ESN
@@ -2589,17 +2593,21 @@ subroutine Sedov_blast_ksec(recvbuf,nrecv,nprops, &
   rmax=rmax/scale_l
   rmax2=rmax*rmax
 
-  ! Build spatial bins for SN (only those with vol_gas > 0)
-  nbin=max(1,min(128,int(boxlen/rmax)))
-  bin_size=boxlen/dble(nbin)
-  inv_bin_size=dble(nbin)/boxlen
-  allocate(bin_head(nbin,nbin,nbin),sn_next(max(1,nrecv)))
+  ! Build spatial bins for SN (local domain binning, only those with vol_gas > 0)
+  bin_xmin=bisec_cpubox_min(myid,1)-rmax
+  bin_ymin=bisec_cpubox_min(myid,2)-rmax
+  bin_zmin=bisec_cpubox_min(myid,3)-rmax
+  inv_bin_size=1.0d0/(3.0d0*rmax)
+  nbx=max(1,int((bisec_cpubox_max(myid,1)-bisec_cpubox_min(myid,1)+2.0d0*rmax)*inv_bin_size)+1)
+  nby=max(1,int((bisec_cpubox_max(myid,2)-bisec_cpubox_min(myid,2)+2.0d0*rmax)*inv_bin_size)+1)
+  nbz=max(1,int((bisec_cpubox_max(myid,3)-bisec_cpubox_min(myid,3)+2.0d0*rmax)*inv_bin_size)+1)
+  allocate(bin_head(nbx,nby,nbz),sn_next(max(1,nrecv)))
   bin_head=0; sn_next=0
   do iSN=1,nrecv
      if(vol_gas_loc(iSN) > 0d0) then
-        ibx=max(1,min(nbin,int(xSN(iSN,1)*inv_bin_size)+1))
-        iby=max(1,min(nbin,int(xSN(iSN,2)*inv_bin_size)+1))
-        ibz=max(1,min(nbin,int(xSN(iSN,3)*inv_bin_size)+1))
+        ibx=max(1,min(nbx,int((xSN(iSN,1)-bin_xmin)*inv_bin_size)+1))
+        iby=max(1,min(nby,int((xSN(iSN,2)-bin_ymin)*inv_bin_size)+1))
+        ibz=max(1,min(nbz,int((xSN(iSN,3)-bin_zmin)*inv_bin_size)+1))
         sn_next(iSN)=bin_head(ibx,iby,ibz)
         bin_head(ibx,iby,ibz)=iSN
      endif
@@ -2650,14 +2658,14 @@ subroutine Sedov_blast_ksec(recvbuf,nrecv,nprops, &
                  x=(xg(ind_grid(i),1)+xc(ind,1)-skip_loc(1))*scale
                  y=(xg(ind_grid(i),2)+xc(ind,2)-skip_loc(2))*scale
                  z=(xg(ind_grid(i),3)+xc(ind,3)-skip_loc(3))*scale
-                 ! Find cell's bin
-                 ibx=max(1,min(nbin,int(x*inv_bin_size)+1))
-                 iby=max(1,min(nbin,int(y*inv_bin_size)+1))
-                 ibz=max(1,min(nbin,int(z*inv_bin_size)+1))
+                 ! Find cell's bin (local domain coordinates)
+                 ibx=max(1,min(nbx,int((x-bin_xmin)*inv_bin_size)+1))
+                 iby=max(1,min(nby,int((y-bin_ymin)*inv_bin_size)+1))
+                 ibz=max(1,min(nbz,int((z-bin_zmin)*inv_bin_size)+1))
                  ! Loop over 27 neighbor bins
-                 do jbz=max(1,ibz-1),min(nbin,ibz+1)
-                 do jby=max(1,iby-1),min(nbin,iby+1)
-                 do jbx=max(1,ibx-1),min(nbin,ibx+1)
+                 do jbz=max(1,ibz-1),min(nbz,ibz+1)
+                 do jby=max(1,iby-1),min(nby,iby+1)
+                 do jbx=max(1,ibx-1),min(nbx,ibx+1)
                     iSN=bin_head(jbx,jby,jbz)
                     do while(iSN > 0)
                        ! Check if the cell lies within the SN radius
