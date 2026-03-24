@@ -1602,14 +1602,44 @@ the total core count doubles from 64 (1~node equivalent) to 512
 (8~nodes).  The variable-$\ncpu$ restart feature allows each rank
 count to read the same checkpoint.
 
-Figure~\ref{fig:cosmo1024_mpi} shows the elapsed time
-and speedup as a function of total cores.  Despite the inter-node
-communication overhead, the multi-node run achieves good parallel
-efficiency.  The hierarchical \ksec\ exchange
+Table~\ref{tab:mpi_scaling} and Figure~\ref{fig:cosmo1024_mpi}
+summarise the results.  The steady-state wall-clock time per coarse
+step decreases from 2858\,s (1~node) to 388\,s (8~nodes), yielding
+a $7.4\times$ speedup with $92\%$ parallel efficiency.  At
+intermediate counts the scaling is essentially ideal: $2.0\times$
+at 2~nodes ($99.8\%$) and $4.0\times$ at 4~nodes ($99.0\%$).
+The \texttt{poisson-mg AMR} multigrid V-cycle dominates the runtime
+at all rank counts ($43$--$46\%$), followed by sink operations
+($15$--$21\%$) and the combined Poisson base-level solver
+($7$--$12\%$).  The hierarchical \ksec\ exchange
 (Section~\ref{sec:ksec_exchange}) keeps the number of
 communication partners bounded at $O(\log P)$, preventing the
 all-to-all scaling bottleneck that would otherwise appear at high
-rank counts with Hilbert ordering.
+rank counts with Hilbert ordering.  The slight efficiency drop at
+8~nodes is attributable to inter-node communication latency in
+the multigrid solver, whose V-cycle requires global convergence
+checks and boundary exchanges at every relaxation step.
+
+\begin{table}
+\centering
+\caption{Multi-node MPI strong scaling (Cosmo1024, OMP\,=\,8,
+  8~ranks/node).  Timings are averaged over 4 steady-state coarse
+  steps (steps 220--223), excluding the first step which includes
+  the \code{load\_balance} remap.  The $\mu$s/pt column gives the
+  wall-clock time normalised by the total number of cell-updates
+  across all AMR sub-steps.}
+\label{tab:mpi_scaling}
+\begin{tabular}{rrrrrr}
+\hline
+$\ncpu$ & Nodes & Cores & Time (s) & Speedup & Eff.\ (\%) \\
+\hline
+  8 & 1 &  64 & 2858 & 1.00 & 100.0 \\
+ 16 & 2 & 128 & 1432 & 2.00 &  99.8 \\
+ 32 & 4 & 256 &  721 & 3.96 &  99.0 \\
+ 64 & 8 & 512 &  388 & 7.36 &  92.1 \\
+\hline
+\end{tabular}
+\end{table}
 
 \begin{figure}
 \centering
@@ -1618,8 +1648,9 @@ rank counts with Hilbert ordering.
   the Grammar cluster (8~nodes, 64~cores/node).
   (a)~Wall-clock time per coarse step versus total cores
   (64--512).  The dashed line shows ideal scaling from the
-  64-core baseline.
-  (b)~Speedup relative to 64 cores.  The upper axis shows
+  64-core baseline.  The simulation achieves $7.4\times$ speedup
+  at 512~cores ($92\%$ parallel efficiency).
+  (b)~Speedup relative to 64~cores.  The upper axis shows
   the equivalent number of nodes.}
 \label{fig:cosmo1024_mpi}
 \end{figure}
@@ -1836,7 +1867,11 @@ coarse-level solve.
 
 Strong scaling on a single 64-core node reaches $33.9\times$ speedup
 (53\,per\,cent parallel efficiency), while OpenMP thread scaling
-achieves $5.8\times$ with 16 threads per rank.  The variable-$\ncpu$
+achieves $5.8\times$ with 16 threads per rank.  Multi-node strong
+scaling on the Cosmo1024 test ($3.6 \times 10^8$ grids,
+$1.15 \times 10^9$ particles) achieves $7.4\times$ speedup from 1 to
+8~nodes ($92\%$ parallel efficiency), with near-ideal scaling up to
+4~nodes ($99\%$).  The variable-$\ncpu$
 restart capability, supporting both HDF5 and binary formats, provides
 operational flexibility for production campaigns where hardware
 availability changes between runs.
