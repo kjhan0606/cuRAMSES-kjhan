@@ -1008,9 +1008,7 @@ OpenMP oct-tree is about 600 times faster than brute-force
 \subsection{HDF5 Parallel I/O and Restart}
 \label{sec:hdf5}
 
-Standard \ramses\ writes one binary file per \mpi\ rank per output.
-Restarting with a different number of ranks is not directly supported,
-requiring an intermediate step of reading with the original rank count,
+Standard \ramses\ writes one binary file per \mpi\ rank per output. Therefore, restarting with a different number of ranks is not directly supported requiring an intermediate step of reading with the original rank count,
 redistributing, and re-writing.
 
 We implement HDF5 parallel I/O using the HDF5 library's \mpiio\ 
@@ -1030,8 +1028,7 @@ When the number of ranks in the output file ($\nfile$)
 differs from the current run (when $\nfile \ne \ncpu$), the following procedure
 executes during restart.
 \begin{enumerate}
-\item Build a uniform \ksec\ tree for the new $\ncpu$ (equal-volume
-  partitioning, without load-balance adjustment).
+\item Before reading in data files, build a uniform \ksec\ tree for the new $\ncpu$ (homogeneous equal-volume partitioning, without load-balance adjustment).
 \item Read all grids from the HDF5 file. Since the file is a single
   shared file, all ranks can access all data.
 \item For each grid, compute the CPU ownership from the father cell's
@@ -1047,7 +1044,7 @@ executes during restart.
 \end{enumerate}
 
 This approach requires that all ranks temporarily hold the full grid
-metadata (positions and \texttt{son} flags) during the reconstruction phase.
+metadata (positions and \code{son} flags) during the reconstruction phase.
 For typical production outputs (${\sim}10\,\mathrm{M}$ total grids), this
 temporary overhead is a few hundred MB, well within the memory
 budget freed by the optimizations of Section~\ref{sec:morton}.
@@ -1056,18 +1053,16 @@ budget freed by the optimizations of Section~\ref{sec:morton}.
 \subsection{Restarting Issues}
 \label{sec:varcpu_binary}
 
-When HDF5 is unavailable or the native binary format
-(\code{informat='origin'}) is preferred, a distributed I/O strategy
-enables variable-$\ncpu$ restart from the per-rank binary files
-written by standard \ramses.  The binary format stores one file per
+We implement a distributed I/O strategy that
+enables variable-$\ncpu$ restart even from the per-rank binary files written by standard \ramses.  The binary format stores one file per
 \mpi\ rank (\code{amr\_XXXXX.outYYYYY},
-\code{hydro\_XXXXX.outYYYYY}, etc.) so that the number of files equals
-$\nfile$, which may differ from the current $\ncpu$.
+\code{hydro\_XXXXX.outYYYYY}, etc.) so that the number of CPUs in the previous run equals the number of files
+($\nfile$), which may differ from the current number of CPUs, $\ncpu$.
 
 The restart proceeds in three stages as follows. 
 First, files are distributed among ranks by round-robin assignment.
 Second, each rank reads its assigned AMR files, determines the
-owner of each grid, and an
+owner of each grid, and an  
 \code{MPI\_ALLTOALLV} exchange routes grids to their new owners.
 Lastly, hydro and gravity data are redistributed using the same exchange
 metadata.  Particle files are filtered by position into the local
@@ -1078,33 +1073,34 @@ metadata.  Particle files are filtered by position into the local
 
 Table~\ref{tab:restart_compat} summarises the supported
 input--output combinations for variable-$\ncpu$ restart.
-The \ksec\ decomposition can restore from any input format and
-rank count because the spatial tree is rebuilt from scratch.
-Conversely, restoring to Hilbert ordering requires the input
-to have been written with Hilbert ordering, and the binary
-format further restricts restarts to the original $\ncpu$.
-
+Both the \ksec\ and Hilbert decompositions can restore from
+any input format and rank count: \ksec\ rebuilds the spatial
+tree from scratch, while Hilbert recomputes a uniform
+\code{bound\_key} partition for the new $\ncpu$.
+When the same-$\ncpu$ path detects that the file's domain
+decomposition ordering differs from the run ordering, it automatically
+redirects to the variable-$\ncpu$ path, which rebuilds the
+decomposition from scratch.  This allows cross-ordering restarts
+with any number of \mpi\ ranks for both binary and HDF5 formats.
 \begin{table}
 \centering
-\caption{Restart format compatibility.
-``Any'' means the output can be restarted with an arbitrary number
-of \mpi\ ranks; ``Same'' requires $\ncpu = \nfile$;
-``Diff'' requires $\ncpu \neq \nfile$ (the variable-$\ncpu$ path
-rebuilds the decomposition from scratch).}
+\caption{Supported restart format combinations.
+All combinations of format, file decomposition, and run decomposition
+are allowed with an arbitrary number of \mpi\ ranks.}
 \label{tab:restart_compat}
 \small
-\begin{tabular}{@{}llccc@{}}
+\begin{tabular}{@{}llcc@{}}
 \toprule
-Format & File DD & Run DD & $\ncpu$ & OK? \\
+Format & File DD & Run DD & $\ncpu$ \\
 \midrule
-Binary & Hilbert & Hilbert & Any   & Yes \\
-Binary & Hilbert & \ksec   & Diff  & Yes \\
-Binary & \ksec   & \ksec   & Any   & Yes \\
-Binary & \ksec   & Hilbert & Diff  & Yes \\
-HDF5   & Hilbert & Hilbert & Same  & Yes \\
-HDF5   & Hilbert & \ksec   & Any   & Yes \\
-HDF5   & \ksec   & \ksec   & Any   & Yes \\
-HDF5   & \ksec   & Hilbert & ---   & No  \\
+Binary & Hilbert & Hilbert & Any \\
+Binary & Hilbert & \ksec   & Any \\
+Binary & \ksec   & \ksec   & Any \\
+Binary & \ksec   & Hilbert & Any \\
+HDF5   & Hilbert & Hilbert & Any \\
+HDF5   & Hilbert & \ksec   & Any \\
+HDF5   & \ksec   & \ksec   & Any \\
+HDF5   & \ksec   & Hilbert & Any \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1131,7 +1127,7 @@ accumulate grid data into a \textbf{batched grid buffer} of configurable
 size (by default, 4096 grids) and launch GPU kernels asynchronously when
 the buffer becomes full.  Threads that do not acquire a slot execute the
 standard CPU code path.  The \code{schedule(dynamic)} clause ensures
-load balancing, so that if a GPU thread is waiting for kernel completion,
+load balancing so that if a GPU thread is waiting for kernel completion,
 remaining loop iterations are picked up by CPU threads.
 
 This design requires no code duplication, as the CPU path is the
@@ -1141,18 +1137,44 @@ within the same \texttt{OpenMP do} loop.
 \subsection{Batched Grid Buffering}
 \label{sec:hybrid_superbatch}
 
-GPU kernel launch latency ($\sim$10--50\,$\mu$s) is reduced by
-batching, whereby each GPU thread accumulates the full stencil data for many
-grids before launching a single kernel covering all accumulated grids.
-For the Godunov solver, the GPU pipeline executes five kernels in
-sequence of primitive variable conversion, slope computation, Riemann
-tracing, flux computation, and artificial diffusion.
+Launching a GPU kernel incurs a fixed overhead of 10--50\,$\mu$s,
+which dominates the useful computation when each kernel processes only
+a single grid.  To amortise this cost, the GPU thread in the
+\code{OpenMP do} loop does not launch a kernel immediately.  Instead,
+it collects the integer \emph{index list} --- the
+cell and neighbour identifiers that define each grid's stencil --- into
+a host-side buffer.  Once the buffer reaches 4\,096 grids, a
+\emph{flush} is triggered: the index list is uploaded to the device
+in a single transfer, and seven GPU kernels execute back-to-back on
+the entire batch:
+\begin{enumerate}
+  \item \textbf{Gather} --- reads the hydro variables from the
+        device-resident mesh arrays (\code{uold}, \code{son}) using
+        the uploaded indices, assembling the stencil for all 4\,096
+        grids in device memory;
+  \item \textbf{OK scan} --- marks cells that need updating (active
+        leaf cells);
+  \item \textbf{Primitive conversion} --- converts conservative
+        variables $(\rho, \rho\mathbf{v}, E)$ to primitives
+        $(\rho, \mathbf{v}, P)$;
+  \item \textbf{Slope} --- computes piecewise-linear slope limiters;
+  \item \textbf{Trace} --- performs the characteristic tracing to obtain
+        time-centred interface states;
+  \item \textbf{Riemann flux} --- solves the Riemann problem at every
+        cell interface;
+  \item \textbf{Scatter-reduce} --- accumulates the net flux into the
+        device-resident \code{unew} array.
+\end{enumerate}
 
 A key optimisation is the \textbf{on-device flux reduction}
-that computes the conservative update entirely on the GPU.  Instead of
-transferring the full flux array back to the host ($\sim$98\,MB per
-flush), the kernel reduces fluxes into compact per-grid output arrays,
-reducing the device-to-host transfer to $\sim$5\,MB per flush, a 20-times reduction in PCIe bandwidth.
+performed by the scatter-reduce kernel.  In a na\"{i}ve
+implementation, the full 6-face flux tensor for every cell in the batch
+would be copied back to the host (${\sim}98$\,MB per flush).
+Instead, the scatter-reduce kernel applies the conservative update
+$\Delta U = \Delta t\,(\mathbf{F}_{\rm in} - \mathbf{F}_{\rm out})$
+directly on the device, writing only the compact per-grid
+update to \code{unew}.  The resulting device-to-host transfer is
+${\sim}5$\,MB per flush --- a $20\times$ reduction in PCIe traffic.
 
 
 \subsection{GPU-Resident Mesh Data}
@@ -1197,8 +1219,7 @@ We extend the GPU acceleration to the multigrid (MG) Poisson solver.
 The red-black Gauss--Seidel smoother and residual computation are
 ported to CUDA kernels, with the device-side data (\code{phi},
 \code{f}, neighbour arrays) totalling approximately 6.4\,GB.
-
-A \emph{halo-only} exchange --- transferring only the ghost-zone
+A \emph{ghost-zone-only} exchange --- transferring only the
 boundary cells between host and device instead of the full
 \code{phi} array --- reduces per-sweep PCIe volume from
 ${\sim}2.4$\,GB to ${\sim}6$\,MB.  However, the interpolation step
@@ -1219,7 +1240,7 @@ test (Section~\ref{sec:perf_config}).
 \caption{GPU performance comparison on H100~NVL (2~ranks $\times$
 4~threads, 2 coarse steps).  ``MG base'' is the base-level multigrid
 solve and ``MG AMR'' is the fine-level AMR correction.  ``Full D2H/H2D''
-transfers the entire \code{phi} array every MG iteration; ``Halo-only''
+transfers the entire \code{phi} array every MG iteration; ``Ghost-zone-only''
 transfers only boundary cells during smoothing but still requires
 a full transfer for interpolation.}
 \label{tab:gpu_perf}
@@ -1229,9 +1250,9 @@ a full transfer for interpolation.}
 Mode & Total & MG base & MG AMR & Godunov \\
      & (s)   & (s)     & (s)    & (s)     \\
 \midrule
-CPU-only         & 45.9 & 10.2 & (incl.) & 9.5 \\
-GPU full D2H/H2D & 66.6 & 23.1 & 11.5    & 7.4 \\
-GPU halo-only     & 82.0 & 30.5 & 17.6    & 8.4 \\
+CPU-only              & 45.9 & 10.2 & (incl.) & 9.5 \\
+GPU full D2H/H2D      & 66.6 & 23.1 & 11.5    & 7.4 \\
+GPU ghost-zone-only   & 82.0 & 30.5 & 17.6    & 8.4 \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -1319,39 +1340,6 @@ memory.  The Cosmo1024 test is run on the \textit{Grammar} cluster\footnote{\url
 configuration is designed to evaluate parallel efficiency at a scale
 representative of production cosmological simulations, where
 billion-particle zoom-in runs routinely span multiple nodes.
-
-
-\subsection{Conservation Verification}
-\label{sec:perf_conservation}
-
-Every optimization is verified against a Hilbert-ordering reference run.
-The comparison encompasses the full set of global diagnostics:
-energy conservation error $e_{\rm cons}$, gravitational potential
-energy $e_{\rm pot}$, kinetic energy $e_{\rm kin}$, internal energy
-$e_{\rm int}$, total mass $m_{\rm tot}$, number of stars formed
-$n_\star$, number of sink particles $n_{\rm sink}$, and the total
-number of created AMR grids.
-The \ksec\ decomposition, Morton hash table, and their combination produce
-diagnostics identical to the reference ($e_{\rm cons} =
-3.77 \times 10^{-3}$, $e_{\rm pot} = -1.88 \times 10^{-6}$,
-$e_{\rm kin} = 1.23 \times 10^{-6}$; all other quantities match to
-machine precision).  The MG-optimized configuration
-yields $e_{\rm cons} = 3.79 \times 10^{-3}$ (0.5\,per\,cent higher),
-attributable to relaxed boundary synchronisation in the merged red-black
-sweep, well within the solver's convergence tolerance.
-
-Achieving bit-identical star and sink counts across different domain
-decompositions requires a thread-safe random number generator.  The
-standard Fortran \code{RANDOM\_NUMBER} intrinsic uses per-image state
-that depends on the thread scheduling order, introducing
-non-determinism under OpenMP.  We replace it with a deterministic
-generator seeded by the global grid cell index, so that each cell
-receives the same random draw regardless of the number of \mpi\ ranks
-or OpenMP threads.  This eliminates the sole source of run-to-run
-variation in star formation stochasticity.
-
-All optimizations operate purely at the data-structure and communication
-level, leaving the discrete operators unchanged.
 
 
 \subsection{Strong Scaling}
@@ -1691,6 +1679,40 @@ balancing.
 \label{fig:cosmo1024_omp}
 \end{figure}
 
+\subsubsection{Weak scaling}
+\label{sec:perf_weak}
+
+The strong-scaling tests above keep the problem size fixed while
+increasing resources; complementarily, we assess \emph{weak scaling}
+by growing the problem in proportion to the core count so that each
+rank handles a constant workload of ${\sim}8.4\times10^{6}$
+cells/rank.  Three configurations are used: Cosmo256 ($256^{3}$,
+2~ranks, 1~node, 16~cores), Cosmo512 ($512^{3}$, 16~ranks, 2~nodes,
+128~cores), and Cosmo1024 ($1024^{3}$, 128~ranks, 16~nodes,
+1024~cores).  All runs use identical cosmology
+(Section~\ref{sec:test_config}), $\ell_{\max}=\ell_{\min}+5$, and
+$N_{\rm omp}=8$.
+
+Figure~\ref{fig:weak_scaling} shows the per-step wall-clock time and
+the average microseconds per grid-point ($\mu$s\,/\,pt), the standard
+weak-scaling efficiency metric.  From Cosmo256 to Cosmo512 the
+efficiency is $88.5\%$; scaling further to Cosmo1024 yields $65.7\%$.
+The efficiency loss is dominated by the growth in inter-node
+communication volume and the increasing number of AMR levels, rather
+than load imbalance.
+
+\begin{figure}
+\centering
+\includegraphics[width=\textwidth]{fig_weak_scaling.pdf}
+\caption{Weak scaling of \curamses\ on the Grammar cluster
+  ($N_{\rm omp}=8$, same cosmology, $\ell_{\max}=\ell_{\min}+5$).
+  (a)~Wall-clock time per coarse step for the three problem sizes.
+  (b)~Average $\mu$s per grid-point; perfect weak scaling corresponds
+  to a constant value (dashed line).  The efficiency is $88.5\%$ at
+  128~cores and $65.7\%$ at 1024~cores relative to the 16-core
+  baseline.}
+\label{fig:weak_scaling}
+\end{figure}
 
 \subsection{Communication Microbenchmarks}
 \label{sec:perf_bench}

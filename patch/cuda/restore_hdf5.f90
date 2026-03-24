@@ -8,9 +8,10 @@
 !   - Particles (xp, vp, mp, idp, levelp, tp, zp)
 !   - Sinks
 !
-! Supports variable-ncpu restart (ncpu_file != ncpu) with ksection ordering:
-!   - Builds uniform ksection tree for new ncpu
-!   - Recomputes cpu_map via cmp_ksection_cpumap
+! Supports variable-ncpu restart (ncpu_file != ncpu) for any ordering:
+!   - Ksection: builds uniform tree for new ncpu
+!   - Hilbert: computes uniform bound_key for new ncpu
+!   - Recomputes cpu_map via generic cmp_cpumap
 !   - ALL ranks read ALL data, scatter to locally owned grids
 !   - First coarse step forces load_balance for optimal rebalancing
 !###########################################################################
@@ -120,26 +121,20 @@ subroutine restore_amr_hdf5()
   !=====================================================
   ! Step 2: Check ncpu_file vs ncpu
   !=====================================================
-  if(ncpu_file /= ncpu .or. ordering == 'ksection') then
-     ! For ksection ordering, always use the distributed varcpu path
+  if(ncpu_file /= ncpu .or. ordering == 'ksection' &
+       .or. trim(ordering_file) /= trim(ordering)) then
+     ! Variable-ncpu, ksection, or cross-ordering: use distributed varcpu path
      ! (the same-ncpu path replicates ALL grids on every rank, requiring
      !  ngridmax >= total_grids, which is prohibitively expensive)
-     if(ncpu_file /= ncpu .and. ordering /= 'ksection') then
-        if(myid==1) then
-           write(*,*) 'ERROR: Variable-ncpu restart only supported with ksection ordering.'
-           write(*,*) '       File ncpu=', ncpu_file, ', current ncpu=', ncpu
-        end if
-        call clean_stop
-     end if
      varcpu_restart = .true.
      varcpu_restart_done = .true.   ! flag in amr_commons: force load_balance on first step
      if(myid==1) then
         write(*,*) '============================================================'
         write(*,*) '============================================================'
-        write(*,*) '=====  VARIABLE NCPU RESTART                           ====='
-        write(*,*) '=====  File ncpu = ', ncpu_file
-        write(*,*) '=====  New  ncpu = ', ncpu
-        write(*,*) '=====  Rebuilding domain decomposition for new ncpu    ====='
+        write(*,*) '=====  VARIABLE NCPU / CROSS-ORDERING RESTART          ====='
+        write(*,*) '=====  File ncpu = ', ncpu_file, '  ordering = ', trim(ordering_file)
+        write(*,*) '=====  New  ncpu = ', ncpu,      '  ordering = ', trim(ordering)
+        write(*,*) '=====  Rebuilding domain decomposition                 ====='
         write(*,*) '=====  Load balance will be forced on first coarse step ====='
         write(*,*) '============================================================'
         write(*,*) '============================================================'
@@ -185,20 +180,60 @@ subroutine restore_amr_hdf5()
   ! Step 3: Domain decomposition
   !=====================================================
   if(varcpu_restart) then
-     !--- Variable ncpu: rebuild ksection tree for new ncpu ---
-     ! Arrays already allocated in init_amr for ncpu
-     ! Build uniform tree (volume-balanced, no load data needed)
+     !--- Variable ncpu: rebuild domain decomposition for new ncpu ---
      nx_loc = icoarse_max - icoarse_min + 1
      scale = boxlen / dble(nx_loc)
-     call build_ksection(update=.false.)
-     ! Rebuild tree navigation
-     call rebuild_ksec_cpuranges()
-     call compute_ksec_cpu_path()
-     bisec_cpubox_min2 = bisec_cpubox_min
-     bisec_cpubox_max2 = bisec_cpubox_max
-     if(myid==1) write(*,*) 'HDF5: ksection tree rebuilt for ncpu=', ncpu
 
-     ! Recompute coarse cpu_map via ksection tree
+     if(ordering == 'ksection') then
+        ! Build uniform ksection tree (volume-balanced)
+        call build_ksection(update=.false.)
+        call rebuild_ksec_cpuranges()
+        call compute_ksec_cpu_path()
+        bisec_cpubox_min2 = bisec_cpubox_min
+        bisec_cpubox_max2 = bisec_cpubox_max
+        if(myid==1) write(*,*) 'HDF5: ksection tree rebuilt for ncpu=', ncpu
+     else
+        ! Hilbert ordering: compute uniform bound_key for new ncpu
+        block
+           real(qdp) :: order_all_min, order_all_max
+           real(qdp), dimension(1:1) :: order_min_tmp, order_max_tmp
+           real(dp) :: x_tmp(1:1,1:3), dx_loc
+           integer :: idom
+           integer(8) :: iix, iiy, iiz
+
+           order_all_min =  huge(0.0_qdp)
+           order_all_max = -huge(0.0_qdp)
+           dx_loc = 0.5d0**1
+           do iiz = kcoarse_min, kcoarse_max
+           do iiy = jcoarse_min, jcoarse_max
+           do iix = icoarse_min, icoarse_max
+              x_tmp(1,1) = (dble(iix) + 0.5d0 - dble(icoarse_min)) * scale
+              x_tmp(1,2) = (dble(iiy) + 0.5d0 - dble(jcoarse_min)) * scale
+              x_tmp(1,3) = (dble(iiz) + 0.5d0 - dble(kcoarse_min)) * scale
+              call cmp_minmaxorder(x_tmp, order_min_tmp, order_max_tmp, dx_loc, 1)
+              order_all_min = min(order_all_min, order_min_tmp(1))
+              order_all_max = max(order_all_max, order_max_tmp(1))
+           end do
+           end do
+           end do
+           if(.not. allocated(bound_key)) allocate(bound_key(0:ndomain))
+           if(.not. allocated(bound_key2)) allocate(bound_key2(0:ndomain))
+           do idom = 0, ndomain - 1
+#ifdef QUADHILBERT
+              bound_key(idom) = order_all_min + real(idom, 16) / real(ndomain, 16) * &
+                   (order_all_max - order_all_min)
+#else
+              bound_key(idom) = order_all_min + real(idom, 8) / real(ndomain, 8) * &
+                   (order_all_max - order_all_min)
+#endif
+           end do
+           bound_key(ndomain) = order_all_max
+           bound_key2 = bound_key
+           if(myid==1) write(*,*) 'HDF5: Hilbert bound_key rebuilt for ncpu=', ncpu
+        end block
+     end if
+
+     ! Recompute coarse cpu_map via generic dispatcher
      do iz = kcoarse_min, kcoarse_max
      do iy = jcoarse_min, jcoarse_max
      do ix = icoarse_min, icoarse_max
@@ -206,7 +241,7 @@ subroutine restore_amr_hdf5()
         xx_cell(1,1) = (dble(ix) + 0.5d0 - dble(icoarse_min)) * scale
         xx_cell(1,2) = (dble(iy) + 0.5d0 - dble(jcoarse_min)) * scale
         xx_cell(1,3) = (dble(iz) + 0.5d0 - dble(kcoarse_min)) * scale
-        call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+        call cmp_cpumap(xx_cell, c_tmp, 1)
         cpu_map(ind) = c_tmp(1)
      end do
      end do
@@ -415,7 +450,7 @@ subroutine restore_amr_hdf5()
               flag1(ind_cell) = son_flag_buf((i-1)*twotondim + iskip)
            end do
 
-           ! Compute cpu_map for each cell via cmp_ksection_cpumap
+           ! Compute cpu_map for each cell via generic cmp_cpumap
            do iskip = 1, twotondim
               ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
               iz = (iskip - 1) / 4
@@ -427,7 +462,7 @@ subroutine restore_amr_hdf5()
                    - dble(jcoarse_min)) * scale
               xx_cell(1,3) = (xg_all(i, 3) + (dble(iz) - 0.5d0) * dx &
                    - dble(kcoarse_min)) * scale
-              call cmp_ksection_cpumap(xx_cell, c_tmp, 1)
+              call cmp_cpumap(xx_cell, c_tmp, 1)
               cpu_map(ind_cell) = c_tmp(1)
               cpu_map2(ind_cell) = c_tmp(1)
            end do

@@ -495,8 +495,17 @@ subroutine init_amr
      ! Read cpu boundaries
      read(ilun)ordering2
      if(ordering2.ne.ordering)then
-        if(myid==1)write(*,*)'Ordering is uncompatible'
-        call clean_stop
+        ! Cross-ordering restart: redirect to variable-ncpu path
+        if(myid==1) write(*,'(A,A,A,A,A)') &
+             ' Cross-ordering restart (file=', trim(ordering2), &
+             ' new=', trim(ordering), '): using variable-ncpu path'
+        close(ilun)
+        ! Reset arrays already read by same-ncpu header
+        numbl  = 0
+        headl  = 0
+        taill  = 0
+        call restore_amr_binary_varcpu(ncpu2, nlevelmax2)
+        goto 998
      endif
      if(ordering=='bisection') then
         read(ilun)bisec_wall(1:nbinodes)
