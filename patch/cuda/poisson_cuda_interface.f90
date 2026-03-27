@@ -67,6 +67,9 @@ module poisson_cuda_interface
      subroutine cuda_mg_finalize_c() bind(C, name='cuda_mg_finalize')
      end subroutine
 
+     subroutine cuda_mg_release_arrays_c() bind(C, name='cuda_mg_release_arrays')
+     end subroutine
+
      integer(c_int) function cuda_mg_is_ready_c() &
           bind(C, name='cuda_mg_is_ready')
        import :: c_int

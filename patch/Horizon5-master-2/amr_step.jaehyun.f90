@@ -5,6 +5,8 @@ recursive subroutine amr_step(ilevel,icount)
   use poisson_commons
 #ifdef HYDRO_CUDA
   use cuda_commons, only: cuda_pool_is_initialized_c
+  use poisson_cuda_interface, only: cuda_mg_release_arrays_c
+  use hydro_cuda_interface, only: cuda_mesh_free_c
 #endif
 #ifdef RT
   use rt_hydro_commons
@@ -31,6 +33,7 @@ recursive subroutine amr_step(ilevel,icount)
   integer:: info
 
   real(kind=4):: real_mem, real_mem_tot
+  real(kind=8):: t_lb_level_start, t_lb_level_end
 
   ! Particle sub-timers
   integer(kind=8) :: pt_t1, pt_t2, pt_rate
@@ -81,17 +84,19 @@ recursive subroutine amr_step(ilevel,icount)
   !---------------------------------------------------
   if(ilevel==levelmin) then
      ! Hydro auto-tuning: init + flag setting
-     if(.not. hy_auto_init .and. gpu_hydro) then
-        hy_auto_init = .true.
-        hy_auto_phase = 0
-     endif
-     if(hy_auto_init) then
-        if(hy_auto_phase == 0) then
-           gpu_hydro = .false.
-        else if(hy_auto_phase == 1) then
-           gpu_hydro = .true.
-        else
-           gpu_hydro = hy_use_gpu
+     if(gpu_auto_tune) then
+        if(.not. hy_auto_init .and. gpu_hydro) then
+           hy_auto_init = .true.
+           hy_auto_phase = 0
+        endif
+        if(hy_auto_init) then
+           if(hy_auto_phase == 0) then
+              gpu_hydro = .false.
+           else if(hy_auto_phase == 1) then
+              gpu_hydro = .true.
+           else
+              gpu_hydro = hy_use_gpu
+           endif
         endif
      endif
      ! Poisson auto-tuning: init is done near multigrid_fine call
@@ -431,19 +436,21 @@ recursive subroutine amr_step(ilevel,icount)
      ! gpu_fft is excluded from auto-tuning because cuFFT direct solve
      ! and MG V-cycle produce different potential scales, so switching
      ! between them mid-run causes energy conservation failure.
-     if(.not. mg_auto_init .and. gpu_poisson) then
-        mg_auto_init = .true.
-        mg_auto_phase = 0
-        mg_orig_poisson = gpu_poisson
-     endif
-     if(mg_auto_init .and. ilevel==levelmin) then
-        if(mg_auto_phase == 0) then
-           gpu_poisson = .false.
-        else if(mg_auto_phase == 1) then
-           gpu_poisson = mg_orig_poisson
-        else
-           if(.not. mg_use_gpu) then
+     if(gpu_auto_tune) then
+        if(.not. mg_auto_init .and. gpu_poisson) then
+           mg_auto_init = .true.
+           mg_auto_phase = 0
+           mg_orig_poisson = gpu_poisson
+        endif
+        if(mg_auto_init .and. ilevel==levelmin) then
+           if(mg_auto_phase == 0) then
               gpu_poisson = .false.
+           else if(mg_auto_phase == 1) then
+              gpu_poisson = mg_orig_poisson
+           else
+              if(.not. mg_use_gpu) then
+                 gpu_poisson = .false.
+              endif
            endif
         endif
      endif
@@ -728,15 +735,20 @@ recursive subroutine amr_step(ilevel,icount)
 
      ! Hyperbolic solver
                                call timer('hydro - godunov','start')
+     t_lb_level_start = MPI_WTIME()
 #ifdef HYDRO_CUDA
      ! --- GPU auto-tuning for hydro: flags set at levelmin entry ---
      ! (actual flag setting is done at start of amr_step(levelmin))
 #endif
 #ifdef HYDRO_CUDA
      call system_clock(hy_t1)
+     ! Release MG Poisson GPU arrays before hydro mesh allocation
+     if(gpu_hydro) call cuda_mg_release_arrays_c()
 #endif
      call godunov_fine(ilevel)
 #ifdef HYDRO_CUDA
+     ! Free hydro mesh from GPU after godunov_fine
+     if(gpu_hydro) call cuda_mesh_free_c()
      call system_clock(hy_t2)
      if(hy_auto_init) then
         hy_dt = dble(hy_t2-hy_t1)/dble(pt_rate)
@@ -867,6 +879,10 @@ recursive subroutine amr_step(ilevel,icount)
                                call timer('flag','start')
   if(.not.static) call flag_fine(ilevel,icount)
 
+  ! Accumulate per-level timing for time-based load balancing
+  t_lb_level_end = MPI_WTIME()
+  level_time_loc(ilevel) = level_time_loc(ilevel) + (t_lb_level_end - t_lb_level_start)
+  level_ncells_loc(ilevel) = numbl(myid,ilevel) * twotondim
 
   !----------------------------
   ! Merge finer level particles

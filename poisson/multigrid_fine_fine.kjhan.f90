@@ -1049,14 +1049,34 @@ subroutine get3cubepos_fine_mg(ind_grid,ind,nbors_father_cells,nbors_father_grid
 end subroutine get3cubepos_fine_mg
 
 ! ------------------------------------------------------------------------
-! Precompute neighbor grid cache (stub for compatibility)
-! multigrid_fine_commons.f90 calls this, but kisti version does inline lookups
+! Precompute neighbor grid cache for GPU MG Poisson
+! Builds nbor_grid_fine(0:twondim, 1:ngrid) for cuda_mg_upload
 ! ------------------------------------------------------------------------
 subroutine precompute_nbor_grid_fine(ilevel)
    use amr_commons
    use poisson_commons
+   use morton_hash
+   use morton_keys
    implicit none
    integer, intent(in) :: ilevel
-   ! No-op: this version does morton_nbor_grid inline
+
+   integer :: ngrid, igrid_mg, igrid_amr, j, igridn
+
+   ngrid = active(ilevel)%ngrid
+   if(ngrid == 0) then
+      if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
+      return
+   end if
+
    if(allocated(nbor_grid_fine)) deallocate(nbor_grid_fine)
+   allocate(nbor_grid_fine(0:twondim, 1:ngrid))
+
+   do igrid_mg = 1, ngrid
+      igrid_amr = active(ilevel)%igrid(igrid_mg)
+      nbor_grid_fine(0, igrid_mg) = igrid_amr  ! Self-reference
+      do j = 1, twondim
+         igridn = morton_nbor_grid(igrid_amr, ilevel, j)
+         nbor_grid_fine(j, igrid_mg) = igridn
+      end do
+   end do
 end subroutine precompute_nbor_grid_fine

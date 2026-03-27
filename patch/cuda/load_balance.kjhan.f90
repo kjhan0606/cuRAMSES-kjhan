@@ -465,6 +465,10 @@ subroutine cmp_new_cpu_map
   integer,dimension(1:overload)::ncell_sub_t
   integer(kind=8),dimension(1:overload)::npart_sub_t
 
+  ! Time-based load balancing blend factor
+  real(kind=8),dimension(1:MAXLEVEL) :: blend_factor
+  real(kind=8) :: my_cpc, sum_cpc, avg_cpc, tf
+
   ! Local constants
   nxny=nx*ny
   nx_loc=icoarse_max-icoarse_min+1
@@ -480,6 +484,33 @@ subroutine cmp_new_cpu_map
   else
      niter_cost(levelmin:nlevelmax)=1
   endif
+
+  ! Time-based load balancing: compute per-level blend factor
+  blend_factor = 1d0
+#ifndef WITHOUTMPI
+  if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
+     do ilevel = levelmin, nlevelmax
+        ! Cost-per-cell on this rank
+        if(level_ncells_loc(ilevel) > 0) then
+           my_cpc = level_time_loc(ilevel) / dble(level_ncells_loc(ilevel))
+        else
+           my_cpc = 0d0
+        end if
+        ! Global average cost-per-cell
+        call MPI_ALLREDUCE(my_cpc, sum_cpc, 1, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+        avg_cpc = sum_cpc / dble(ncpu)
+        ! Time correction factor
+        if(avg_cpc > 0d0) then
+           tf = my_cpc / avg_cpc   ! >1 means this rank is slower
+        else
+           tf = 1d0
+        end if
+        ! Blend: 1 + alpha*(tf - 1), clamped to [0.5, 2.0]
+        blend_factor(ilevel) = 1d0 + time_balance_alpha * (tf - 1d0)
+        blend_factor(ilevel) = max(0.5d0, min(2.0d0, blend_factor(ilevel)))
+     end do
+  end if
+#endif
 
   if(verbose) print *,"Entering cmp_new_cpu_map"
 
@@ -645,6 +676,10 @@ subroutine cmp_new_cpu_map
                        stop
                     endif
                     flag1(my_idx)=flag1(my_idx)*niter_cost(ilevel)
+                    ! Time-based blend
+                    if(time_balance_alpha > 0d0 .and. nstep_coarse > 0) then
+                       flag1(my_idx)=nint(dble(flag1(my_idx)) * blend_factor(ilevel))
+                    end if
                     npart_sub_t(isub)=npart_sub_t(isub)+flag1(my_idx)
                     hilbert_key(my_idx)=order_max(ncell_loc)
                  end if
@@ -669,6 +704,10 @@ subroutine cmp_new_cpu_map
 
   ! Clean up sink cost array
   if(allocated(sink_per_grid)) deallocate(sink_per_grid)
+
+  ! Reset time-based load balancing accumulators
+  level_time_loc = 0d0
+  level_ncells_loc = 0
 
   !------------------------------------------------
   ! Sort ordering key and store new index in flag2
@@ -747,6 +786,12 @@ subroutine cmp_new_cpu_map
      ! update the ksection
      call build_ksection(update=.true.)
   end if   ! end if not bisection/ksection
+
+  ! Reset time-based load balancing accumulators (ksection/bisection path)
+  if(use_cpubox_decomp) then
+     level_time_loc = 0d0
+     level_ncells_loc = 0
+  end if
 
   ! Free on-demand histogram arrays (no longer needed after build_bisection/ksection)
   if(allocated(bisec_ind_cell))  deallocate(bisec_ind_cell)

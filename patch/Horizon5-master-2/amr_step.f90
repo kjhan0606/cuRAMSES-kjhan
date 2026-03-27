@@ -3,6 +3,10 @@ recursive subroutine amr_step(ilevel,icount)
   use pm_commons
   use hydro_commons
   use poisson_commons
+#ifdef HYDRO_CUDA
+  use hydro_cuda_interface, only: cuda_mesh_free_c
+  use poisson_cuda_interface, only: cuda_mg_release_arrays_c
+#endif
 #ifdef RT
   use rt_hydro_commons
   use SED_module
@@ -28,6 +32,7 @@ recursive subroutine amr_step(ilevel,icount)
   integer:: info
 
   real(kind=4):: real_mem, real_mem_tot
+  real(kind=8):: t_lb_level_start, t_lb_level_end
 
   if(numbtot(1,ilevel)==0)return
 
@@ -426,7 +431,16 @@ recursive subroutine amr_step(ilevel,icount)
 
      ! Hyperbolic solver
                                call timer('hydro - godunov','start')
+#ifdef HYDRO_CUDA
+     ! Release MG Poisson GPU arrays to free VRAM for hydro mesh upload
+     if(gpu_hydro) call cuda_mg_release_arrays_c()
+#endif
+     t_lb_level_start = MPI_WTIME()
      call godunov_fine(ilevel)
+#ifdef HYDRO_CUDA
+     ! Release hydro mesh GPU arrays to free VRAM for next MG Poisson
+     if(gpu_hydro) call cuda_mesh_free_c()
+#endif
 
      ! Reverse update boundaries
                                call timer('hydro - rev ghostzones','start')
@@ -545,6 +559,10 @@ recursive subroutine amr_step(ilevel,icount)
                                call timer('flag','start')
   if(.not.static) call flag_fine(ilevel,icount)
 
+  ! Accumulate per-level timing for time-based load balancing
+  t_lb_level_end = MPI_WTIME()
+  level_time_loc(ilevel) = level_time_loc(ilevel) + (t_lb_level_end - t_lb_level_start)
+  level_ncells_loc(ilevel) = numbl(myid,ilevel) * twotondim
 
   !----------------------------
   ! Merge finer level particles

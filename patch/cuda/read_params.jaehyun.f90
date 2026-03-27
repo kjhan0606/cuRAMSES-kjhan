@@ -26,10 +26,11 @@ subroutine read_params
 !jhshin1
   namelist/run_params/clumpfind,cosmo,pic,sink,sinkprops,lightcone,poisson,hydro,rt,verbose,debug &
        & ,nrestart,ncontrol,nstepmax,nsubcycle,nremap,remap_thresh,ordering &
-       & ,bisec_tol,static,geom,overload,cost_weighting,aton &
+       & ,bisec_tol,static,geom,overload,cost_weighting,aton,varcpu_chunk_nfile &
        & ,memory_balance,mem_weight_grid,mem_weight_part,mem_weight_sink &
+       & ,time_balance_alpha &
        & ,jobcontrolfile &
-       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink &
+       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink,gpu_auto_tune &
        & ,use_fftw &
        & ,dump_pk &
        & ,exchange_method &

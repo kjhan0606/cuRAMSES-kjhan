@@ -32,6 +32,9 @@ static long long  g_mesh_ncell = 0;
 static cudaStream_t g_upload_stream = nullptr;
 static cudaEvent_t  g_upload_done_event = nullptr;
 static bool         g_mesh_host_pinned = false;
+static const void*  g_pinned_uold = nullptr;  // track pinned host ptrs for unregister
+static const void*  g_pinned_f    = nullptr;
+static const void*  g_pinned_son  = nullptr;
 
 // ============================================================================
 // Buffer management helpers (2x over-allocation)
@@ -357,6 +360,9 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
                       const int* son, long long ncell, int nvar, int ndim) {
     if (!pool_initialized) return;
 
+    // Clear stale CUDA errors from previous operations
+    cudaGetLastError();
+
     // Create dedicated upload stream + event on first call
     if (!g_upload_stream) {
         cudaStreamCreateWithFlags(&g_upload_stream, cudaStreamNonBlocking);
@@ -398,7 +404,7 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
         cudaError_t e2 = cudaMalloc(&d_mesh_f,    (size_t)ncell * ndim * sizeof(double));
         cudaError_t e3 = cudaMalloc(&d_mesh_son,  (size_t)ncell * sizeof(int));
         if (e1 != cudaSuccess || e2 != cudaSuccess || e3 != cudaSuccess) {
-            fprintf(stderr, "CUDA mesh: allocation FAILED (%.1f GB). Falling back to CPU gather.\n", gb);
+            fprintf(stderr, "CUDA mesh: allocation FAILED (%.1f GB). Falling back to CPU.\n", gb);
             if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
             if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
             if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -406,7 +412,7 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
             return;
         }
         g_mesh_ncell = ncell;
-        printf("CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d, free=%.1f/%.1f GB)\n",
+        fprintf(stderr, "CUDA mesh: allocated %.1f GB (ncell=%lld, nvar=%d, free=%.1f/%.1f GB)\n",
                gb, ncell, nvar,
                (double)(free_mem - need) / (1024.0*1024.0*1024.0),
                (double)total_mem / (1024.0*1024.0*1024.0));
@@ -417,15 +423,16 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
         cudaError_t ep = cudaHostRegister((void*)uold,
             (size_t)ncell * nvar * sizeof(double), cudaHostRegisterDefault);
         if (ep == cudaSuccess) {
-            if (f_grav)
+            g_pinned_uold = uold;
+            if (f_grav) {
                 cudaHostRegister((void*)f_grav,
                     (size_t)ncell * ndim * sizeof(double), cudaHostRegisterDefault);
+                g_pinned_f = f_grav;
+            }
             cudaHostRegister((void*)son,
                 (size_t)ncell * sizeof(int), cudaHostRegisterDefault);
+            g_pinned_son = son;
             g_mesh_host_pinned = true;
-            double gb_pin = ((double)ncell * (nvar + ndim) * sizeof(double) +
-                             (double)ncell * sizeof(int)) / (1024.0*1024.0*1024.0);
-            printf("CUDA mesh: pinned %.1f GB host memory for async DMA\n", gb_pin);
         }
     }
 
@@ -459,16 +466,17 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
 }
 
 void cuda_mesh_free(void) {
+    // Sync upload stream before freeing (stream/event kept alive for reuse)
     if (g_upload_stream) {
         cudaStreamSynchronize(g_upload_stream);
-        cudaStreamDestroy(g_upload_stream);  g_upload_stream = nullptr;
     }
-    if (g_upload_done_event) {
-        cudaEventDestroy(g_upload_done_event); g_upload_done_event = nullptr;
+    // Unregister pinned host memory before freeing device arrays
+    if (g_mesh_host_pinned) {
+        if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
+        if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
+        if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
+        g_mesh_host_pinned = false;
     }
-    // Note: host arrays are still in use by Fortran, don't unregister here
-    // (they will be freed by Fortran deallocate which handles unpin)
-    g_mesh_host_pinned = false;
     if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
     if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
     if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -613,3 +621,4 @@ int*      cuda_get_mesh_son()   { return d_mesh_son; }
 long long cuda_get_mesh_ncell() { return g_mesh_ncell; }
 int       cuda_mesh_is_ready()  { return (g_mesh_ncell > 0 && d_mesh_uold && d_mesh_son) ? 1 : 0; }
 cudaEvent_t cuda_get_upload_event() { return g_upload_done_event; }
+

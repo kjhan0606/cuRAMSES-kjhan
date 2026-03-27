@@ -71,7 +71,8 @@ subroutine multigrid_fine(ilevel,icount)
    logical :: use_mg_gpu, use_ri_gpu
 #ifdef HYDRO_CUDA
    integer(c_long_long) :: ncell_tot_c
-   integer :: ncell_tot, safe_int, ri_flag
+   integer(i8b) :: ncell_tot
+   integer :: safe_int, ri_flag
    real(kind=8) :: dx_mg, dx2_mg, oneoverdx2_mg, dx2_norm_mg
    real(kind=8) :: gpu_norm2, dummy_norm2
 #endif
@@ -231,8 +232,10 @@ subroutine multigrid_fine(ilevel,icount)
    end if
 
    ! GPU MG setup: controlled by gpu_poisson namelist parameter
-   if(gpu_poisson .and. .not. is_uniform_fft .and. cuda_pool_is_initialized_c() /= 0) then
-      ncell_tot = ncoarse + twotondim*ngridmax
+   ! Skip levels with no active grids (e.g., levelmax+1)
+   if(gpu_poisson .and. .not. is_uniform_fft .and. cuda_pool_is_initialized_c() /= 0 &
+      .and. active(ilevel)%ngrid > 0) then
+      ncell_tot = int(ncoarse,i8b) + int(twotondim,i8b)*int(ngridmax,i8b)
       ncell_tot_c = int(ncell_tot, c_long_long)
       dx_mg  = 0.5d0**ilevel
       dx2_mg = dx_mg*dx_mg
@@ -256,10 +259,11 @@ subroutine multigrid_fine(ilevel,icount)
            MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, info)
       use_ri_gpu = (ri_flag == 1)
 #endif
-      if(myid==1) write(*,'(A,I3,A,L1,A,L1,A,I12,A,I10)') &
+      if(myid==1) write(*,'(A,I3,A,L1,A,L1,A,I12,A,I12,A,I12,A,I10)') &
            ' MG GPU: level=',ilevel,' ready=',use_mg_gpu, &
            ' ri=',use_ri_gpu, &
-           ' ncell=',ncell_tot,' ngrid=',active(ilevel)%ngrid
+           ' ncell=',ncell_tot,' nco=',ncoarse,' ngm=',ngridmax, &
+           ' ngrid=',active(ilevel)%ngrid
    end if
 #endif
 

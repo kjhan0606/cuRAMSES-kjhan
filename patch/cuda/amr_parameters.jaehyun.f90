@@ -68,6 +68,7 @@ module amr_parameters
   logical::gpu_poisson=.false. ! GPU Poisson MG for AMR levels
   logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
   logical::gpu_sink=.false.    ! GPU AGN feedback (average_AGN + AGN_blast)
+  logical::gpu_auto_tune=.true.! Auto-tune CPU vs GPU (disable for benchmarks)
 
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
@@ -122,6 +123,7 @@ module amr_parameters
   integer::mem_weight_grid=0          ! 0 = auto from nvar; >0 = user override
   integer::mem_weight_part=12        ! Memory per particle in dp-equivalents
   integer::mem_weight_sink=500      ! Computational weight per sink particle
+  real(dp)::time_balance_alpha=0d0  ! Time-based LB blend: 0=memory-only, 0.3-0.5=hybrid
 
   ! Step parameters
   integer::nrestart=0         ! New run or backup file number
@@ -134,6 +136,7 @@ module amr_parameters
   integer::fbackup=1000000    ! Backup data to disk
   integer::nremap=5           ! Load balancing frequency (0: never, 5: optimal)
   real(dp)::remap_thresh=0.05d0 ! Weight inhomogeneity threshold for auto remap (5%)
+  integer::varcpu_chunk_nfile=0 ! Chunked varcpu restart: 0=all-at-once, N>0=files per chunk
 
   ! Output parameters
   integer::iout=1             ! Increment for output times

@@ -708,25 +708,21 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
   integer, allocatable :: numbb_file(:,:)  ! (nboundary, nlevelmax_file)
   integer, allocatable :: nactive_local(:,:)
 
-  ! Per-level local grid buffers (only grids from assigned files)
-  type local_level_t
-     real(dp), allocatable :: xg(:,:)        ! (ngrids, ndim)
+  ! Per-level local son_flag buffer (only for grid creation, freed per level)
+  type local_son_t
      integer, allocatable :: son_flag(:)     ! (ngrids * twotondim)
-     integer :: ngrids = 0
   end type
-  type(local_level_t) :: my_lvl(1:MAXLEVEL)
+  type(local_son_t) :: my_son(1:MAXLEVEL)
   integer :: lvl_offset(1:MAXLEVEL)
 
   ! File reading buffers
   integer, allocatable :: iig(:)
   real(dp), allocatable :: xxg(:)
 
-  ! MPI exchange variables
-  integer :: nlocal, nsend, nrecv, npack, d
-  integer, allocatable :: dest(:), cursor(:)
-  real(dp), allocatable :: sendbuf(:), recvbuf(:)
-  integer, allocatable :: scount(:), rcount(:), sdispl(:), rdispl(:)
-  integer, allocatable :: scount_p(:), rcount_p(:), sdispl_p(:), rdispl_p(:)
+  ! MPI exchange variables (ksection-based)
+  integer :: nlocal, nrecv, npack, d
+  integer, allocatable :: dest(:)
+  real(dp), allocatable :: sendbuf_2d(:,:), recvbuf_2d(:,:)
   integer :: ipacked
 
   ! Grid creation variables
@@ -1009,16 +1005,17 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
   ! ============================================================
   ! Step 6: Read active grids from assigned files only
   ! ============================================================
-  ! Compute local grid counts per level
+  ! Allocate varcpu_lvl (xg persists for hydro/poisson) and local son_flag
+  allocate(varcpu_lvl(1:nlevelmax))
   do ilevel = 1, nlevelmax_file
      nlocal = 0
      do ifile = 1, varcpu_nfiles_local
         nlocal = nlocal + varcpu_nactive(varcpu_my_files(ifile), ilevel)
      end do
-     my_lvl(ilevel)%ngrids = nlocal
+     varcpu_lvl(ilevel)%ngrids = nlocal
      if(nlocal > 0) then
-        allocate(my_lvl(ilevel)%xg(nlocal, ndim))
-        allocate(my_lvl(ilevel)%son_flag(nlocal * twotondim))
+        allocate(varcpu_lvl(ilevel)%xg(nlocal, ndim))
+        allocate(my_son(ilevel)%son_flag(nlocal * twotondim))
      end if
   end do
 
@@ -1083,7 +1080,7 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
                  read(ilun); read(ilun); read(ilun)  ! ind_grid, next, prev
                  do idim = 1, ndim
                     read(ilun) xxg
-                    my_lvl(ilevel)%xg(ind+1:ind+ncache, idim) = xxg(1:ncache)
+                    varcpu_lvl(ilevel)%xg(ind+1:ind+ncache, idim) = xxg(1:ncache)
                  end do
                  read(ilun)  ! father
                  do i = 1, twondim; read(ilun); end do  ! nbor
@@ -1091,9 +1088,9 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
                     read(ilun) iig
                     do i = 1, ncache
                        if(iig(i) > 0) then
-                          my_lvl(ilevel)%son_flag((ind + i - 1)*twotondim + iskip) = 1
+                          my_son(ilevel)%son_flag((ind + i - 1)*twotondim + iskip) = 1
                        else
-                          my_lvl(ilevel)%son_flag((ind + i - 1)*twotondim + iskip) = 0
+                          my_son(ilevel)%son_flag((ind + i - 1)*twotondim + iskip) = 0
                        end if
                     end do
                  end do
@@ -1112,18 +1109,29 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
   end do
 
   ! ============================================================
-  ! Step 7: Level-by-level MPI exchange + grid creation
+  ! Step 7: Level-by-level ksection exchange + grid creation
   ! ============================================================
   balance = .true.
   shrink = .false.
   npack = 4  ! xg(1:3) + packed_son_flag
 
-  allocate(varcpu_exc(1:nlevelmax))
+  ! Initialize ksection comm tree (needed for hilbert ordering exchange)
+  call init_ksection_comm_tree()
+
+  ! Build varcpu_file_start: cumulative grid count per local file per level
+  allocate(varcpu_file_start(0:varcpu_nfiles_local, 1:nlevelmax))
+  varcpu_file_start = 0
+  do ilevel = 1, nlevelmax
+     do j = 1, varcpu_nfiles_local
+        varcpu_file_start(j, ilevel) = varcpu_file_start(j-1, ilevel) + &
+             varcpu_nactive(varcpu_my_files(j), ilevel)
+     end do
+  end do
 
   do ilevel = 1, nlevelmax_file
      if(varcpu_ngrid_file(ilevel) == 0) cycle
 
-     nlocal = my_lvl(ilevel)%ngrids
+     nlocal = varcpu_lvl(ilevel)%ngrids
 
      ! Resize Morton hash table for this level
      call morton_hash_init(mort_table(ilevel), &
@@ -1131,13 +1139,25 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
 
      dx = 0.5d0**ilevel
 
-     ! 7a. Determine owner for each local grid
+     ! 7a. Pack send buffer and determine dest for each local grid
+     allocate(sendbuf_2d(1:npack, 1:max(nlocal,1)))
      allocate(dest(max(nlocal,1)))
+     twotol = 2.0d0**(ilevel-1)
      do i = 1, nlocal
-        twotol = 2.0d0**(ilevel-1)
-        ix = int(my_lvl(ilevel)%xg(i, 1) * twotol, 8)
-        iy = int(my_lvl(ilevel)%xg(i, 2) * twotol, 8)
-        iz = int(my_lvl(ilevel)%xg(i, 3) * twotol, 8)
+        sendbuf_2d(1, i) = varcpu_lvl(ilevel)%xg(i, 1)
+        sendbuf_2d(2, i) = varcpu_lvl(ilevel)%xg(i, 2)
+        sendbuf_2d(3, i) = varcpu_lvl(ilevel)%xg(i, 3)
+        ! Pack twotondim son_flag bits into one integer
+        ipacked = 0
+        do iskip = 1, twotondim
+           if(my_son(ilevel)%son_flag((i-1)*twotondim + iskip) > 0) &
+                ipacked = ipacked + 2**(iskip-1)
+        end do
+        sendbuf_2d(4, i) = dble(ipacked)
+        ! Determine owner CPU
+        ix = int(varcpu_lvl(ilevel)%xg(i, 1) * twotol, 8)
+        iy = int(varcpu_lvl(ilevel)%xg(i, 2) * twotol, 8)
+        iz = int(varcpu_lvl(ilevel)%xg(i, 3) * twotol, 8)
         xx_father(1,1) = ((dble(ix) + 0.5d0) / twotol - dble(icoarse_min)) * scale
         xx_father(1,2) = ((dble(iy) + 0.5d0) / twotol - dble(jcoarse_min)) * scale
         xx_father(1,3) = ((dble(iz) + 0.5d0) / twotol - dble(kcoarse_min)) * scale
@@ -1149,88 +1169,21 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
         dest(i) = c_tmp(1)
      end do
 
-     ! 7b. Count sends per destination
-     allocate(scount(0:ncpu-1), rcount(0:ncpu-1))
-     scount = 0
-     do i = 1, nlocal
-        scount(dest(i) - 1) = scount(dest(i) - 1) + 1
-     end do
+     ! 7b. Ksection hierarchical exchange
+     call ksection_exchange_dp(sendbuf_2d, nlocal, dest, npack, recvbuf_2d, nrecv)
+     deallocate(sendbuf_2d, dest)
 
-     ! 7c. Exchange counts
-     call MPI_ALLTOALL(scount, 1, MPI_INTEGER, rcount, 1, MPI_INTEGER, &
-          MPI_COMM_WORLD, info)
-     nsend = sum(scount)
-     nrecv = sum(rcount)
-     if(myid==1) write(*,'(A,I3,A,I10,A,I10,A,10I8)') &
-          ' Lvl ', ilevel, ' nsend=', nsend, ' nrecv=', nrecv, ' rcount=', rcount(0:min(ncpu-1,9))
+     if(myid==1) write(*,'(A,I3,A,I10,A,I10)') &
+          ' Lvl ', ilevel, ' nsend=', nlocal, ' nrecv=', nrecv
 
-     ! 7d. Compute displacements
-     allocate(sdispl(0:ncpu-1), rdispl(0:ncpu-1))
-     sdispl(0) = 0; rdispl(0) = 0
-     do i = 1, ncpu-1
-        sdispl(i) = sdispl(i-1) + scount(i-1)
-        rdispl(i) = rdispl(i-1) + rcount(i-1)
-     end do
-
-     ! 7e. Pack send buffer (npack dp per grid) and record send_order
-     allocate(sendbuf(npack * max(nsend,1)))
-     allocate(cursor(0:ncpu-1))
-     cursor = 0
-
-     ! Store exchange metadata
-     allocate(varcpu_exc(ilevel)%scount(0:ncpu-1))
-     allocate(varcpu_exc(ilevel)%rcount(0:ncpu-1))
-     allocate(varcpu_exc(ilevel)%sdispl(0:ncpu-1))
-     allocate(varcpu_exc(ilevel)%rdispl(0:ncpu-1))
-     allocate(varcpu_exc(ilevel)%send_order(max(nsend,1)))
-     varcpu_exc(ilevel)%scount = scount
-     varcpu_exc(ilevel)%rcount = rcount
-     varcpu_exc(ilevel)%sdispl = sdispl
-     varcpu_exc(ilevel)%rdispl = rdispl
-     varcpu_exc(ilevel)%nsend = nsend
-     varcpu_exc(ilevel)%nrecv = nrecv
-
-     do i = 1, nlocal
-        d = dest(i) - 1
-        j = sdispl(d) + cursor(d)  ! 0-based index in send buffer
-        sendbuf(npack*j + 1) = my_lvl(ilevel)%xg(i, 1)
-        sendbuf(npack*j + 2) = my_lvl(ilevel)%xg(i, 2)
-        sendbuf(npack*j + 3) = my_lvl(ilevel)%xg(i, 3)
-        ! Pack twotondim son_flag bits into one integer
-        ipacked = 0
-        do iskip = 1, twotondim
-           if(my_lvl(ilevel)%son_flag((i-1)*twotondim + iskip) > 0) &
-                ipacked = ipacked + 2**(iskip-1)
-        end do
-        sendbuf(npack*j + 4) = dble(ipacked)
-        varcpu_exc(ilevel)%send_order(j + 1) = i  ! 1-based
-        cursor(d) = cursor(d) + 1
-     end do
-     deallocate(cursor, dest)
-
-     ! 7f. MPI_ALLTOALLV exchange
-     allocate(recvbuf(npack * max(nrecv,1)))
-     allocate(scount_p(0:ncpu-1), rcount_p(0:ncpu-1))
-     allocate(sdispl_p(0:ncpu-1), rdispl_p(0:ncpu-1))
-     scount_p = scount * npack
-     rcount_p = rcount * npack
-     sdispl_p = sdispl * npack
-     rdispl_p = rdispl * npack
-     call MPI_ALLTOALLV(sendbuf, scount_p, sdispl_p, MPI_DOUBLE_PRECISION, &
-          recvbuf, rcount_p, rdispl_p, MPI_DOUBLE_PRECISION, MPI_COMM_WORLD, info)
-     deallocate(sendbuf, scount_p, rcount_p, sdispl_p, rdispl_p)
-     deallocate(scount, rcount, sdispl, rdispl)
-
-     ! 7g. Create grids from received data (all owned by myid)
-     allocate(varcpu_exc(ilevel)%recv_igrid(max(nrecv,1)))
-     varcpu_exc(ilevel)%recv_igrid = 0
+     ! 7c. Create grids from received data (all owned by myid)
      igrid_prev_cpu = 0
 
      do i = 1, nrecv
-        xg_recv(1) = recvbuf(npack*(i-1) + 1)
-        xg_recv(2) = recvbuf(npack*(i-1) + 2)
-        xg_recv(3) = recvbuf(npack*(i-1) + 3)
-        ipacked = int(recvbuf(npack*(i-1) + 4))
+        xg_recv(1) = recvbuf_2d(1, i)
+        xg_recv(2) = recvbuf_2d(2, i)
+        xg_recv(3) = recvbuf_2d(3, i)
+        ipacked = int(recvbuf_2d(4, i))
 
         ! Find father cell
         if(ilevel == 1) then
@@ -1249,7 +1202,6 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
            mkey = morton_encode(ix_p, iy_p, iz_p)
            igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
            if(igrid_father == 0) then
-              varcpu_exc(ilevel)%recv_igrid(i) = 0
               cycle  ! Father not in hash (virtual); handled by refine_fine
            end if
            ind_cell = 1 + int(mod(ix, 2_8)) + 2 * int(mod(iy, 2_8)) + 4 * int(mod(iz, 2_8))
@@ -1323,13 +1275,11 @@ subroutine restore_amr_binary_varcpu(ncpu2_in, nlevelmax2_in)
         numbl(myid, ilevel) = numbl(myid, ilevel) + 1
         igrid_prev_cpu = igrid_new
 
-        varcpu_exc(ilevel)%recv_igrid(i) = igrid_new
      end do
-     deallocate(recvbuf)
+     deallocate(recvbuf_2d)
 
-     ! Free level data
-     if(allocated(my_lvl(ilevel)%xg)) deallocate(my_lvl(ilevel)%xg)
-     if(allocated(my_lvl(ilevel)%son_flag)) deallocate(my_lvl(ilevel)%son_flag)
+     ! Free son_flag (varcpu_lvl%xg persists for hydro/poisson restore)
+     if(allocated(my_son(ilevel)%son_flag)) deallocate(my_son(ilevel)%son_flag)
 
      ! Create virtual grids via RAMSES refine mechanism
      if(ilevel == 1) then

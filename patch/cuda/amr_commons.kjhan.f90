@@ -83,20 +83,18 @@ module amr_commons
   ! Pre-computed neighbor grids for flag routines
   integer ,allocatable,dimension(:,:)::nbor_active_cache
 
-  ! Variable-ncpu restart: distributed exchange metadata
-  type varcpu_exc_t
-     integer :: nsend = 0, nrecv = 0
-     integer, allocatable :: scount(:), rcount(:)  ! (0:ncpu-1) per-rank send/recv counts
-     integer, allocatable :: sdispl(:), rdispl(:)  ! (0:ncpu-1) displacements
-     integer, allocatable :: send_order(:)         ! (nsend) local buf index for j-th send
-     integer, allocatable :: recv_igrid(:)         ! (nrecv) local igrid for j-th received grid
+  ! Variable-ncpu restart: per-level grid positions (for hydro/poisson Morton lookup)
+  type varcpu_lvl_t
+     real(dp), allocatable :: xg(:,:)   ! (ngrids, ndim) — grid positions from file
+     integer :: ngrids = 0
   end type
-  type(varcpu_exc_t), allocatable :: varcpu_exc(:)   ! (nlevelmax) per-level exchange
-  integer, allocatable :: varcpu_nactive(:,:)        ! (ncpu_file, nlevelmax) active grids per file
-  integer, allocatable :: varcpu_my_files(:)         ! file indices assigned to this rank
-  integer :: varcpu_nfiles_local = 0                 ! number of files this rank reads
-  integer, allocatable :: varcpu_ngrid_file(:)       ! (1:nlevelmax) total grids per level in file
-  integer, allocatable :: varcpu_grid_file_idx(:)    ! (1:ngridmax) local grid → file index (HDF5 path)
+  type(varcpu_lvl_t), allocatable :: varcpu_lvl(:)        ! (nlevelmax) per-level read data
+  integer, allocatable :: varcpu_file_start(:,:)           ! (0:nfiles_local, nlevelmax) cumul grid count
+  integer, allocatable :: varcpu_nactive(:,:)              ! (ncpu_file, nlevelmax) active grids per file
+  integer, allocatable :: varcpu_my_files(:)               ! file indices assigned to this rank
+  integer :: varcpu_nfiles_local = 0                       ! number of files this rank reads
+  integer, allocatable :: varcpu_ngrid_file(:)             ! (1:nlevelmax) total grids per level in file
+  integer, allocatable :: varcpu_grid_file_idx(:)          ! (1:ngridmax) local grid → file index (HDF5 path)
 
   ! Global indexing
   integer ,allocatable,dimension(:)  ::cpu_map  ! domain decomposition
@@ -173,6 +171,11 @@ module amr_commons
   CHARACTER(LEN=20)::type_hydro  ='hydro'
   CHARACTER(LEN=20)::type_accel  ='accel'
   CHARACTER(LEN=20)::type_flag   ='flag'
+
+  ! Per-level wall-clock timing for time-based load balancing
+  ! Accumulated between load_balance calls, reset after each remap
+  real(dp),dimension(1:MAXLEVEL) :: level_time_loc = 0d0    ! godunov+cooling+particles+feedback+flag
+  integer,dimension(1:MAXLEVEL)  :: level_ncells_loc = 0     ! local leaf cells per level
 
   ! Units specified by the user in the UNITS_PARAMS namelist for non-cosmo runs.
   ! These values shouldn't be used directly. Instead call units() in amr/units.f90.

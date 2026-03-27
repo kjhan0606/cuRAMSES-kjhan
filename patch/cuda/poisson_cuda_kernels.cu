@@ -350,6 +350,9 @@ void cuda_mg_upload(const double* phi, const double* f,
 {
     if (!is_pool_initialized()) return;
 
+    // Clear any stale CUDA error from previous operations (e.g., mesh_upload SKIP)
+    cudaGetLastError();
+
     // Create dedicated MG stream on first call
     if (!g_mg_stream) {
         cudaStreamCreateWithFlags(&g_mg_stream, cudaStreamNonBlocking);
@@ -612,6 +615,43 @@ void cuda_mg_finalize(void)
     g_mg_alloc_ngrid = 0;
     g_mg_ready = false;
     h_mg_partial_cap = 0;
+}
+
+// Release GPU data arrays but keep stream/events alive for reuse
+void cuda_mg_release_arrays(void)
+{
+    if (d_mg_phi)   { cudaFree(d_mg_phi);   d_mg_phi   = nullptr; }
+    if (d_mg_f1)    { cudaFree(d_mg_f1);    d_mg_f1    = nullptr; }
+    if (d_mg_f2)    { cudaFree(d_mg_f2);    d_mg_f2    = nullptr; }
+    if (d_mg_f3)    { cudaFree(d_mg_f3);    d_mg_f3    = nullptr; }
+    if (d_mg_flag2) { cudaFree(d_mg_flag2); d_mg_flag2 = nullptr; }
+    if (d_mg_nbor)  { cudaFree(d_mg_nbor);  d_mg_nbor  = nullptr; }
+    if (d_mg_igrid) { cudaFree(d_mg_igrid); d_mg_igrid = nullptr; }
+    if (d_mg_partial_norm2) { cudaFree(d_mg_partial_norm2); d_mg_partial_norm2 = nullptr; }
+    if (h_mg_partial_norm2) { cudaFreeHost(h_mg_partial_norm2); h_mg_partial_norm2 = nullptr; }
+    h_mg_partial_cap = 0;
+    // Free halo exchange arrays
+    if (d_halo_emit_cells) { cudaFree(d_halo_emit_cells); d_halo_emit_cells = nullptr; }
+    if (d_halo_recv_cells) { cudaFree(d_halo_recv_cells); d_halo_recv_cells = nullptr; }
+    if (d_halo_emit_buf)   { cudaFree(d_halo_emit_buf);   d_halo_emit_buf   = nullptr; }
+    if (d_halo_recv_buf)   { cudaFree(d_halo_recv_buf);   d_halo_recv_buf   = nullptr; }
+    if (h_halo_emit_buf)   { cudaFreeHost(h_halo_emit_buf); h_halo_emit_buf = nullptr; }
+    if (h_halo_recv_buf)   { cudaFreeHost(h_halo_recv_buf); h_halo_recv_buf = nullptr; }
+    g_halo_n_emit = 0;
+    g_halo_n_recv = 0;
+    // Free restrict/interp arrays
+    if (d_restrict_target)   { cudaFree(d_restrict_target);   d_restrict_target   = nullptr; }
+    if (d_interp_nbor_flat)  { cudaFree(d_interp_nbor_flat);  d_interp_nbor_flat  = nullptr; }
+    if (d_coarse_rhs_flat)   { cudaFree(d_coarse_rhs_flat);   d_coarse_rhs_flat   = nullptr; }
+    if (d_coarse_phi_flat)   { cudaFree(d_coarse_phi_flat);   d_coarse_phi_flat   = nullptr; }
+    if (h_coarse_rhs_pinned) { cudaFreeHost(h_coarse_rhs_pinned); h_coarse_rhs_pinned = nullptr; }
+    if (h_coarse_phi_pinned) { cudaFreeHost(h_coarse_phi_pinned); h_coarse_phi_pinned = nullptr; }
+    g_ri_ngrid  = 0;
+    g_ri_ncells = 0;
+    // Reset sizes so next upload re-allocates
+    g_mg_ncell = 0;
+    g_mg_alloc_ngrid = 0;
+    g_mg_ready = false;
 }
 
 int cuda_mg_is_ready(void)

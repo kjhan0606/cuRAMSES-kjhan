@@ -65,7 +65,7 @@ module hydro_hybrid_commons
   use amr_parameters, only: dp
   implicit none
 
-  integer, parameter :: HYBRID_SUPER_SIZE = 4096
+  integer, parameter :: HYBRID_SUPER_SIZE = 16384
   integer, parameter :: INTERP_INIT_CAP = 131072   ! 128K interpolated cells
 
   type gpu_state_t
@@ -1111,6 +1111,11 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
 
   n_hybrid_calls = n_hybrid_calls + 1
 
+  if(myid==1 .and. n_hybrid_calls<=3) then
+     write(*,*) 'HYBRID_ENTRY: call=',n_hybrid_calls,' gpu_hydro=',gpu_hydro, &
+          ' ilevel=',ilevel,' ncache=',ncache
+  end if
+
   ! Reset scatter buffer counts (serial)
   do it = 0, hybrid_max_threads-1
      scatter_bufs(it)%count = 0
@@ -1122,6 +1127,10 @@ subroutine godunov_fine_hybrid(ilevel, ncache)
      ncell_total = int(ncoarse, c_long_long) + int(twotondim, c_long_long) * int(ngridmax, c_long_long)
      call cuda_mesh_upload_f(uold, f, son, ncell_total, int(nvar, c_int), int(ndim, c_int), poisson)
      mesh_on_gpu = (cuda_mesh_is_ready_c() == 1)
+     if(myid==1 .and. n_hybrid_calls<=3) then
+        write(*,*) 'MESH_DIAG: on_gpu=',mesh_on_gpu,' ncell=',ncell_total, &
+             ' ngm=',ngridmax,' pool=',cuda_pool_is_initialized_c()
+     end if
   else
      mesh_on_gpu = .false.
   end if
