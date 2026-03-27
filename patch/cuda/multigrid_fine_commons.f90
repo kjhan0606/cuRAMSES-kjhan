@@ -232,27 +232,31 @@ subroutine multigrid_fine(ilevel,icount)
    end if
 
    ! GPU MG setup: controlled by gpu_poisson namelist parameter
-   ! Skip levels with no active grids (e.g., levelmax+1)
-   if(gpu_poisson .and. .not. is_uniform_fft .and. cuda_pool_is_initialized_c() /= 0 &
-      .and. active(ilevel)%ngrid > 0) then
+   ! All ranks must enter this block together (contains MPI collectives)
+   if(gpu_poisson .and. .not. is_uniform_fft .and. cuda_pool_is_initialized_c() /= 0) then
       ncell_tot = int(ncoarse,i8b) + int(twotondim,i8b)*int(ngridmax,i8b)
       ncell_tot_c = int(ncell_tot, c_long_long)
       dx_mg  = 0.5d0**ilevel
       dx2_mg = dx_mg*dx_mg
       oneoverdx2_mg = 1.0d0/dx2_mg
       dx2_norm_mg = dx_mg**(ndim)
-      call cuda_mg_upload_c( &
-           phi, f, flag2, ncell_tot_c, &
-           nbor_grid_fine, active(ilevel)%igrid, &
-           int(active(ilevel)%ngrid, c_int))
-      use_mg_gpu = (cuda_mg_is_ready_c() /= 0)
+      ! Upload only if this rank has active grids (ngrid=0 is safe for C side)
+      if(active(ilevel)%ngrid > 0) then
+         call cuda_mg_upload_c( &
+              phi, f, flag2, ncell_tot_c, &
+              nbor_grid_fine, active(ilevel)%igrid, &
+              int(active(ilevel)%ngrid, c_int))
+         use_mg_gpu = (cuda_mg_is_ready_c() /= 0)
+      else
+         use_mg_gpu = .false.
+      end if
       if(use_mg_gpu) call build_mg_halo_indices(ilevel)
       ! Setup GPU restrict/interp if MG GPU is ready and coarse levels exist
       if(use_mg_gpu .and. ilevel > 1) then
          call precompute_mg_gpu_restrict_interp(ilevel)
          use_ri_gpu = (cuda_mg_ri_is_ready_c() /= 0)
       end if
-      ! Synchronize use_ri_gpu across all ranks (MPI collective paths must match)
+      ! Synchronize use_ri_gpu across all ranks (MPI collective — all ranks must participate)
 #ifndef WITHOUTMPI
       ri_flag = 0; if(use_ri_gpu) ri_flag = 1
       call MPI_ALLREDUCE(MPI_IN_PLACE, ri_flag, 1, &
