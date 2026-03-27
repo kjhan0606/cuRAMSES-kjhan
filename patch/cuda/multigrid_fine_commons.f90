@@ -240,7 +240,7 @@ subroutine multigrid_fine(ilevel,icount)
       dx2_mg = dx_mg*dx_mg
       oneoverdx2_mg = 1.0d0/dx2_mg
       dx2_norm_mg = dx_mg**(ndim)
-      ! Upload only if this rank has active grids (ngrid=0 is safe for C side)
+      ! Upload only if this rank has active grids
       if(active(ilevel)%ngrid > 0) then
          call cuda_mg_upload_c( &
               phi, f, flag2, ncell_tot_c, &
@@ -250,13 +250,20 @@ subroutine multigrid_fine(ilevel,icount)
       else
          use_mg_gpu = .false.
       end if
+      ! Synchronize use_mg_gpu: all ranks must agree (V-cycle has MPI comms)
+#ifndef WITHOUTMPI
+      ri_flag = 0; if(use_mg_gpu) ri_flag = 1
+      call MPI_ALLREDUCE(MPI_IN_PLACE, ri_flag, 1, &
+           MPI_INTEGER, MPI_MIN, MPI_COMM_WORLD, info)
+      use_mg_gpu = (ri_flag == 1)
+#endif
       if(use_mg_gpu) call build_mg_halo_indices(ilevel)
       ! Setup GPU restrict/interp if MG GPU is ready and coarse levels exist
       if(use_mg_gpu .and. ilevel > 1) then
          call precompute_mg_gpu_restrict_interp(ilevel)
          use_ri_gpu = (cuda_mg_ri_is_ready_c() /= 0)
       end if
-      ! Synchronize use_ri_gpu across all ranks (MPI collective — all ranks must participate)
+      ! Synchronize use_ri_gpu across all ranks
 #ifndef WITHOUTMPI
       ri_flag = 0; if(use_ri_gpu) ri_flag = 1
       call MPI_ALLREDUCE(MPI_IN_PLACE, ri_flag, 1, &
