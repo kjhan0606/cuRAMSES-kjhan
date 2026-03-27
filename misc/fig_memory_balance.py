@@ -26,16 +26,18 @@ ax1.plot(ncpu, m_max, 's-', color='#1D4ED8', markersize=4, linewidth=1.5,
 ncpu_ideal = np.array([1, 2, 4, 8, 16, 32, 64])
 m_ideal = 147.2 / ncpu_ideal
 ax1.plot(ncpu_ideal, m_ideal, '--', color=c_gray, linewidth=1,
-         label=r'Ideal $\propto 1/N_{\rm cpu}$')
+         label=r'Ideal $\propto 1/N_{\rm rank}$')
 
 ax1.axhline(y=4.0, color=c_red, linewidth=0.8, linestyle=':', alpha=0.6)
 ax1.text(50, 4.5, 'Fixed overhead\n~4 GB', fontsize=5.5, color=c_red, ha='center')
 
 ax1.set_xscale('log', base=2)
 ax1.set_yscale('log')
-ax1.set_xlabel(r'$N_{\rm cpu}$', fontsize=9)
+ax1.set_xlabel(r'$N_{\rm rank}$', fontsize=9)
 ax1.set_ylabel('Memory per rank (GB)', fontsize=9)
-ax1.set_title('(a) Memory per rank', fontsize=9, fontweight='bold')
+_bbox = dict(boxstyle='round,pad=0.3', facecolor='white', alpha=0.85, edgecolor='none')
+ax1.text(0.03, 0.97, '(a) Memory per rank', transform=ax1.transAxes,
+         fontsize=9, fontweight='bold', va='top', ha='left', bbox=_bbox, zorder=20)
 ax1.set_xticks(ncpu)
 ax1.set_xticklabels([str(n) for n in ncpu], fontsize=7)
 ax1.tick_params(axis='y', labelsize=7)
@@ -59,15 +61,17 @@ ax2_r.tick_params(axis='y', labelcolor=c_red, labelsize=7)
 ax2_r.set_ylim(1.0, 1.75)
 
 ax2.set_xscale('log', base=2)
-ax2.set_xlabel(r'$N_{\rm cpu}$', fontsize=9)
-ax2.set_title('(b) Load balance quality', fontsize=9, fontweight='bold')
+ax2.set_xlabel(r'$N_{\rm rank}$', fontsize=9)
+ax2.text(0.03, 0.97, '(b) Load balance quality', transform=ax2.transAxes,
+         fontsize=9, fontweight='bold', va='top', ha='left', bbox=_bbox, zorder=20)
 ax2.set_xticks(ncpu)
 ax2.set_xticklabels([str(n) for n in ncpu], fontsize=7)
 ax2.grid(True, alpha=0.2)
 
 lns = ln1 + ln2
 labs = [l.get_label() for l in lns]
-ax2.legend(lns, labs, fontsize=5.5, loc='upper left', frameon=True, fancybox=True)
+ax2.legend(lns, labs, fontsize=5.5, loc='upper left',
+           bbox_to_anchor=(0.0, 0.87), frameon=True, fancybox=True)
 
 plt.tight_layout()
 plt.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/fig_memory_balance.pdf',

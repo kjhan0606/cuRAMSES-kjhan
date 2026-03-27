@@ -35,6 +35,7 @@
 \newcommand{\code}[1]{\texttt{#1}}
 \newcommand{\mpi}[0]{\texttt{MPI}}
 \newcommand{\mpiio}[0]{\texttt{MPI-IO}}
+\newcommand{\dd}[0]{{domain decomposition}}
 
 \title[cuRAMSES~I: Scalable AMR Optimizations for Cosmological Simulations]
 {cuRAMSES~I: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
@@ -373,6 +374,26 @@ $e_{\rm pot}$ (gravitational potential energy), and
 $e_{\rm kin}$ (kinetic energy)
 to machine precision after advancing ten coarse time steps.
 
+In addition to pure memory-based balancing, \curamses\ supports a
+\emph{hybrid} mode that incorporates computation-time feedback.  Each
+rank measures the wall-clock time spent in the main physics loop
+(hydrodynamics, cooling, feedback, and refinement flagging) at every
+AMR level, and a global average cost-per-cell $\bar{t}$ is computed
+via \code{MPI\_ALLREDUCE}.  A blending parameter $\alpha$
+(\code{time\_balance\_alpha}, default 0) controls the correction:
+\begin{equation}
+C_{\rm hybrid} = C_{\rm cell} \times
+\bigl[1 + \alpha\,(t_{\rm local}/\bar{t} - 1)\bigr],
+\label{eq:hybrid_cost}
+\end{equation}
+where $t_{\rm local}$ is the local cost-per-cell and the correction
+factor is clamped to $[0.5,\,2.0]$ to prevent runaway rebalancing.
+When $\alpha = 0$ the scheme reduces to pure memory-based balancing;
+setting $\alpha = 0.3$--$0.5$ allows the balancer to shift load away
+from computationally expensive ranks (e.g.\ those hosting active AGN
+or dense star-forming regions) while still respecting memory
+constraints.
+
 
 \section{AUTO-TUNING MPI COMMUNICATIONS}
 \label{sec:ksec_exchange}
@@ -416,7 +437,7 @@ P2P the best choice when neighbour sets are sparse.
 \label{sec:backend_ksection}
 
 The \ksec\ backend replaces the global communication pattern with a
-hierarchical tree walk using the domain decomposition tree described
+hierarchical tree walk using the domain decomposition (\dd) tree described
 in Section~\ref{sec:ksec_tree}.  The algorithm walks the tree from
 root to leaf, where each node represents a contiguous group of \mpi\
 ranks.  At each level~$\ell$, a node is
@@ -774,7 +795,7 @@ FFT (multi-threaded via \textsc{fftw3}+OpenMP) solves the system.
 \subsubsection{Large grid ($N > 256^3$)}
 The global grid is distributed across ranks using FFTW's native slab
 decomposition along the $x$-axis.  Data redistribution between
-RAMSES's spatial domain decomposition and FFTW's slab layout requires
+RAMSES's spatial \dd\ and FFTW's slab layout requires
 an all-to-all exchange in both forward and reverse directions.
 
 \subsubsection{Sparse point-to-point exchange}
@@ -782,7 +803,7 @@ We replace \code{MPI\_ALLTOALLV} with sparse
 \code{MPI\_ISEND}/\code{MPI\_IRECV} targeting only actual
 communication partners, since each rank's domain overlaps only a
 small number of FFTW slabs.  Partner lists are precomputed from the
-spatial bounding boxes and cached until the domain decomposition
+spatial bounding boxes and cached until the \dd\
 changes, reducing the communication count from $O(\nrank)$ to
 $O(n_{\text{partners}})$.
 
@@ -1092,15 +1113,14 @@ Particle files are filtered by position into the local
 
 Table~\ref{tab:restart_compat} summarises the supported
 input--output combinations for variable-$\nrank$ restart.
-Both the \ksec\ and Hilbert decompositions can restore from
-any input format and rank count: \ksec\ rebuilds the spatial
+Both the \ksec\ and Hilbert \dd\ can restore from
+any input format and rank count as \ksec\ rebuilds the spatial
 tree from scratch, while Hilbert recomputes a uniform
 \code{bound\_key} partition for the new $\nrank$.
-When the same-$\nrank$ path detects that the file's domain
-decomposition ordering differs from the run ordering, it automatically
+When the same-$\nrank$ path detects that the file's \dd\ ordering differs from the run ordering, it automatically
 redirects to the variable-$\nrank$ path, which rebuilds the
 decomposition from scratch.  This allows cross-ordering restarts
-with any number of \mpi\ ranks for both binary and HDF5 formats.
+with any number of \mpi\ ranks for both original binary and HDF5 formats.
 \begin{table}
 \centering
 \caption{Supported restart format combinations.
@@ -1139,14 +1159,7 @@ between CPU and GPU execution at runtime.
 \subsection{Dynamic Dispatch Model}
 \label{sec:hybrid_dispatch}
 
-At the start of each parallel region, each OMP thread attempts to
-acquire a GPU stream slot via an atomic counter.  Threads that succeed
-accumulate grid data into a \textbf{batched grid buffer} of configurable
-size (by default, 4096 grids) and launch GPU kernels asynchronously when
-the buffer becomes full.  Threads which do not acquire an available slot, move on to execute the
-standard Fortran solver.  The \code{schedule(dynamic)} clause ensures
-load balancing so that while a GPU thread is waiting for kernel completion,
-remaining loop iterations are picked up by CPU threads.
+At the start of each parallel region, each OMP thread attempts to acquire a GPU stream slot via an atomic counter.  Threads which are allowed, accumulate grid data into a \textbf{batched grid buffer} of configurable size (by default, 4096 grids) and launch GPU kernels asynchronously when the buffer becomes full.  Threads which do not acquire an available slot, move on to execute the standard Fortran solver on the CPU side.  The \code{schedule(dynamic)} clause ensures load balancing so that while a GPU thread is waiting for kernel completion, remaining loop iterations are picked up by CPU threads.
 
 This design requires no code duplication since the CPU branch is the
 original Fortran subroutine, and the GPU branch is an alternative
@@ -1155,44 +1168,21 @@ within the same \texttt{OpenMP do} loop.
 \subsection{Batched Grid Buffering}
 \label{sec:hybrid_superbatch}
 
-Launching a GPU kernel prompts a fixed overhead of 10--50\,$\mu$s,
-which dominates the useful computation especially when each kernel processes only
-a single grid at a time.  To mitigate this cost, the GPU thread in the
+Launching a GPU kernel prompts a fixed overhead of 10--50\,$\mu$s, which dominates the computation time seriously when each kernel processes only a single grid at a time.  To mitigate this cost overhead, the GPU thread in the
 \code{OpenMP do} loop does not launch a kernel immediately.  Instead,
-it collects the integer \emph{index list} --- the
-cell and neighbour identifiers that define each grid's stencil --- into
+it collects the integer \emph{index list} (the
+cell and neighbour identifiers which define each grid's stencil) into
 a host-side buffer.  Once the buffer reaches 4096 grids, a
-\emph{flush} is triggered. Then, the index list is uploaded to the device in a single transfer and seven consecutive GPU kernels execute on the entire batch:
-\begin{enumerate}
-  \item \textbf{Gather} --- reads the conserved hydrodynamic variables
-        (density $\rho$, momentum $\rho\mathbf{v}$, total energy $E$)
-        from the device-resident mesh arrays using the uploaded
-        indices, assembling the stencil for all 4096 grids in device
-        global memory;
-  \item \textbf{OK scan} --- marks cells that need updating (active
-        leaf cells);
-  \item \textbf{Primitive conversion} --- converts the conserved
-        variables $(\rho, \rho\mathbf{v}, E)$ to the primitive
-        variables $(\rho, \mathbf{v}, P)$ needed by the Riemann solver;
-  \item \textbf{Slope} --- computes piecewise-linear slope limiters;
-  \item \textbf{Trace} --- performs the characteristic tracing to obtain
-        time-centred interface states;
-  \item \textbf{Riemann flux} --- solves the Riemann problem at every
-        cell interface;
-  \item \textbf{Scatter-reduce} --- accumulates the net flux into the
-        device-resident \code{unew} array, updating the conserved
-        variables in place.
-\end{enumerate}
+\emph{flush} is triggered. Then, the index list is uploaded to the device (or GPU) in a single transfer. And consecutive GPU kernels execute on the entire batch. 
 
-A key optimisation is the \textbf{on-device flux reduction}
-performed by the last scatter-reduce kernel.  In a na\"{i}ve
+A key optimisation is the \textbf{on-device compactification}.  In a na\"{i}ve
 implementation, the intermediate flux data for every cell in the batch
 would be copied back to the host (${\sim}98$\,MB per flush), creating
 a severe PCIe bandwidth bottleneck.
 Instead, the scatter-reduce kernel completes the conservative update
 directly on the device, writing only the final per-grid result to
 \code{unew}.  The resulting device-to-host transfer is
-${\sim}5$\,MB per flush --- a $20\times$ reduction in PCIe traffic.
+${\sim}5$\,MB per flush, about 20 times of reduction in PCIe traffic.
 
 
 \subsection{GPU-Resident Mesh Data}
@@ -1312,8 +1302,7 @@ $h = 0.6766$) in a periodic box of side 256\,$h^{-1}$\,Mpc, with
 initial conditions generated by \textsc{music} \citep{Hahn2011} at
 $z = 29.5$.  All runs include radiative cooling \citep[Haardt \&
 Madau background;][]{HaardtMadau2012}, star formation, Type~II
-supernova (SNII) and AGN feedback, Bondi black hole accretion, and
-BH spin with magnetically arrested disc (MAD) jets.
+supernova (SNII) and AGN feedback, Bondi black hole accretion, and BH spin with magnetically arrested disc (MAD) jets as included in \cite{Lee2021}.
 
 The \textbf{Cosmo256} test is designed for code consistency
 verification.  It has $200\,\mathrm{M}$ dark matter particles with a
@@ -1330,8 +1319,8 @@ simulation sized to fit within a single compute node.  It contains
 $135.7\,\mathrm{M}$ dark matter particles with a base grid of
 $512^3$ (\code{levelmin}=9) and \code{levelmax}=16.  At the
 restart epoch ($z \approx 4.3$, $a = 0.19$) levels~9--14 are active,
-comprising $54\,\mathrm{M}$ AMR grids, ${\sim}291\,000$ stellar
-particles, and ${\sim}32\,000$ sink (black hole) particles.
+comprising about $54\,\mathrm{M}$ AMR grids, ${\sim}291$k stellar
+particles, and ${\sim}32$k sink (black hole) particles.
 
 The \textbf{Cosmo1024} test, used for multi-node scaling
 (Section~\ref{sec:perf_multinode}), is a larger cosmological
@@ -1341,14 +1330,14 @@ It contains $1024^3$ (${\approx}\,1.07\,\mathrm{B}$) dark matter
 particles with a base grid of $1024^3$ (\code{levelmin}=10) and
 \code{levelmax}=18.  At the restart epoch ($z \approx 5.2$,
 $a = 0.16$) levels~10--15 are active, comprising
-${\sim}\,362\,\mathrm{M}$ AMR grids, ${\sim}941\,000$ stellar
-particles, and ${\sim}35\,000$ sink particles.  The total particle
+${\sim}\,362\,\mathrm{M}$ AMR grids, ${\sim}941$k stellar
+particles, and ${\sim}35$k sink particles.  The total particle
 count including dark matter exceeds $1.15 \times 10^9$.
 The run is restarted from an HDF5 output using the
 variable-$\nrank$ restart feature.
 
 The Cosmo256 and Cosmo512 tests are run on a dual-socket AMD EPYC
-7543 node (64 physical cores, 128 threads) with 1\,TB of DDR4
+7543 node (64 physical cores) with 512 GB of DDR4
 memory.  The Cosmo1024 test is run on the \textit{Grammar}
 cluster\footnote{\url{https://cac.kias.re.kr/systems/clusters/grammar}}
 (up to 32~nodes, dual-socket AMD EPYC 7543 per node, 64~cores/node,
@@ -1358,70 +1347,48 @@ cluster\footnote{\url{https://cac.kias.re.kr/systems/clusters/grammar}}
 \subsection{Strong Scaling}
 \label{sec:perf_timing}
 
-We separate the scaling analysis into two complementary parts. The
+We separate the scaling analysis into two complementary parts.  The
 full-physics application benchmark in this section tests intra-node
 strong scaling with all solver components active, providing precise
-per-component attribution. The multi-node communication scaling
-behaviour, which is governed by the \ksec\ domain decomposition and
-sparse P2P exchange patterns, is characterised independently through
-dedicated microbenchmarks on a 16-node cluster in
-Section~\ref{sec:bench_ghost}.
+per-component attribution.  The multi-node communication scaling
+behaviour, governed by the \ksec\ \dd\ and sparse P2P exchange
+patterns, is characterised independently through dedicated
+microbenchmarks on a 16-node cluster
+(Section~\ref{sec:bench_ghost}).
 
 We measure strong scaling by restarting the Cosmo512 simulation
-from an HDF5 output at $z \approx 4.3$.  The test problem comprises
-$54\,\mathrm{M}$ AMR grids (levels~9--14), $135.7\,\mathrm{M}$
-dark matter particles, ${\sim}291\,000$ stellar particles, and
-${\sim}32\,000$ sink particles, with the full physics suite enabled.
-The variable-$\nrank$ restart feature (\S\ref{sec:varcpu}) allows the
+from an HDF5 output at $z \approx 4.3$.  The variable-$\nrank$ restart feature (\S\ref{sec:varcpu}) allows the
 output to be read with any number of \mpi\ ranks. A forced
 \code{load\_balance} on the first coarse step ensures optimal grid
-distribution before timing begins; we then measure 2 additional
-coarse steps.
-The test platform has two AMD EPYC 7543 processors (64 cores, 128 threads)
-and 1\,TB of shared memory; all runs use \code{OMP\_NUM\_THREADS=1}.
+distribution before timing begins. We then measure two additional
+coarse steps. All runs set \code{OMP\_NUM\_THREADS=1}.
 
 The wall-clock time and per-component timer averages for $\nrank = 1$--64
-are measured.  All configurations yield energy conservation errors
-$e_{\rm cons}$ of $\mathcal{O}(10^{-4})$, with small variations due
-to floating-point summation order changes across different domain
-decompositions.
-
-Several scaling trends are evident:
-
-\begin{itemize}
-\item \emph{Particle operations} scale nearly ideally from 1 to 64 ranks:
-  538\,s $\to$ 14\,s, a $38.4\times$ speedup for $64\times$ the ranks.
-
-\item \emph{Multigrid Poisson solver} dominates the total time ($\sim$37\%),
-  scaling from 4034\,s (1~rank) to 106\,s (64~ranks).  The $38.2\times$
-  speedup is near-ideal, reflecting the effectiveness of the Morton
-  hash-based neighbour lookup and precomputed cache arrays.
-
-\item \emph{Godunov solver} scales $58.4\times$ from 1 to 64 ranks
-  (2536\,s $\to$ 43\,s).  The super-linear speedup arises because
-  multi-rank runs benefit from cache effects, since each rank processes
-  a smaller working set that fits in the L3 cache.
-
-\item \emph{Sink particle operations} scale well up to 24 ranks
-  (1346\,s $\to$ 69\,s, $19.5\times$) but slow beyond 32 ranks
-  due to the global ALLREDUCE operations in AGN feedback.
-
-\item \emph{Load balancing} overhead converges to $\sim$16\,s beyond
-  32 ranks.  This cost is spread over \code{nremap} coarse steps
-  (every 5 steps in production).
-
-\item The \emph{overall speedup} reaches $33.9\times$ at 64 ranks
-  relative to the single-rank baseline, demonstrating excellent
-  scaling efficiency ($53\%$) on this shared-memory node.
-\end{itemize}
+are measured.  The multigrid Poisson solver dominates the total time
+(approximately 37\,per\,cent at 1~rank) and scales from 4034\,s to
+106\,s at 64~ranks (speedup of 38.2), reflecting the effectiveness of
+the Morton hash-based neighbour lookup and precomputed cache arrays.
+The Godunov solver achieves a super-linear speedup of 58.4 (2536\,s to
+43\,s) because smaller per-rank working sets fit in the L3 cache.
+Particle operations show comparable scaling (538\,s to 14\,s, speedup
+of 38.4).  Sink particle operations scale well up to 24~ranks (1346\,s
+to 69\,s) but flatten beyond 32~ranks due to global \code{ALLREDUCE}
+operations in AGN feedback.  Load-balancing overhead converges to
+approximately 16\,s beyond 32~ranks and is further reduced by the
+\code{nremap} interval (every 5 coarse steps in production).  The
+overall speedup reaches 33.9 at 64~ranks (parallel efficiency of
+53\,per\,cent).  Although individual components such as the MG solver
+and particle routines scale nearly ideally, the aggregate efficiency is
+limited by synchronisation barriers and serial fractions that become
+relatively more significant at high rank counts on a single node.
 
 Figure~\ref{fig:scaling} visualises these trends.  Panel~(a) shows the
 elapsed time and per-component timer values as a function of $\nrank$
 on a log--log scale.  All major components follow the ideal scaling
 line closely up to $\sim$16 ranks, with gradual deviation at higher
 rank counts due to communication overhead.
-Panel~(b) shows the speedup relative to the single-rank baseline:
-particle operations and the flag routine achieve near-ideal scaling,
+Panel~(b) shows the speedup relative to the single-rank baseline as
+particle operations and the flag routine achieve near-ideal scaling
 while the elapsed time reaches $33.9\times$ at 64 ranks.
 
 % TODO: Move panel titles inside the plot box. If there is no proper
@@ -1450,47 +1417,25 @@ while the elapsed time reaches $33.9\times$ at 64 ranks.
 \label{fig:scaling}
 \end{figure*}
 
-
 \subsection{OpenMP Thread Scaling}
 \label{sec:perf_omp}
 
-To evaluate intra-rank parallelism we fix $\nrank = 4$ and vary
-\code{OMP\_NUM\_THREADS} from 1 to 30, using the same Cosmo512 problem as
-Section~\ref{sec:perf_timing}.  The total core count ranges from 4 to
-120, and the physical core limit of the dual-socket node is 64.
+To evaluate intra-rank parallelism we fix $\nrank = 4$ and vary \code{OMP\_NUM\_THREADS} from 1 to 30, using the same Cosmo512 problem as Section~\ref{sec:perf_timing}.  The total core count ranges from 4 to 120, and the physical core limit of the dual-socket node is 64.
 
-All runs conserve energy
-to $e_{\rm cons} \le 6.56 \times 10^{-4}$.
-
-Several trends distinguish the OpenMP scaling from the \mpi\-only results:
-
-\begin{itemize}
-\item \emph{Multigrid Poisson solver} benefits the most from
-  threading, improving from $1085 \to 121$\,s at 16 threads ($8.9\times$), with
-  continued gains beyond 16 threads reaching $10.5\times$ at 30 threads.
-  The precomputed neighbour arrays and fused residual loops
-  (Section~\ref{sec:multigrid}) expose substantial loop-level
-  parallelism.
-
-\item \emph{Godunov solver} scales $11.4\times$ from 1 to 16 threads
-  ($610 \to 54$\,s).  Beyond 16 threads, performance degrades slightly
-  due to memory bandwidth saturation and NUMA effects.
-
-\item \emph{Sinks and Poisson} exhibit modest scaling ($3.0\times$ and
-  $3.0\times$ at 16 threads) because sink operations involve global
-  reductions and serial sections that limit parallelism.
-
-\item \emph{Overall speedup} plateaus at $5.8\times$ with 16 threads
-  (64 cores), limited by the serial fraction of \mpi\ communication and
+Several trends distinguish the OpenMP scaling from the \mpi-only results as \emph{Multigrid Poisson solver} benefits the most from threading, improving from $1085 \to 121$\,s at 16 threads ($8.9\times$) with continued gains beyond 16 threads reaching $10.5\times$ at 30 threads.
+ The precomputed neighbour arrays and fused residual loops (Section~\ref{sec:multigrid}) expose substantial loop-level parallelism. But \emph{Godunov solver} scales $11.4\times$ from 1 to 16 threads
+  ($610 \to 54$\,s).  Beyond 16 threads, performance degrades slightly due to memory bandwidth saturation and \texttt{NUMA} effects (mismatch between CPU cores and memory banks).
+On the other hand, \emph{Sinks and Poisson} exhibit modest scaling (3.0 times speedups for each at 16 threads) because sink operations involve global
+  reductions and sequential sections which limit parallelism.
+\emph{Overall speedup} plateaus at 5.8 times speedup with 16 threads (64 cores) mainly limited by the sequential parts of \mpi\ communication and
   sink-particle operations.  Beyond the physical core count,
   oversubscription yields no further improvement.
-\end{itemize}
+
 
 Figure~\ref{fig:omp_scaling} compares per-component timers and speedup
 curves as a function of $\nthread$.  The vertical dotted line marks
 the physical core limit (64 cores).  Panel~(a) shows that the MG solver
-and Godunov components track the ideal scaling line most closely, while
-sinks and Poisson saturate early.  Panel~(b) confirms that the overall
+and Godunov components track the ideal scaling relation closely, while sinks and Poisson saturate early.  Panel~(b) confirms that the overall
 speedup reaches a ceiling near $6\times$, indicating that further
 performance gains require additional \mpi\ ranks rather than more threads
 per rank.
@@ -1514,45 +1459,42 @@ speedup, while the overall elapsed time plateaus at ${\sim}5.8\times$.}
 \label{sec:perf_membal}
 
 The memory-weighted cost function (equation~\ref{eq:cost_function})
-assigns $w_{\rm grid}$ automatically from \code{nvar} (2256\,B for
+assigns $w_{\rm grid}$ automatically from \code{nvar} (2256\,Bytes for
 \code{nvar}=14 in our test) and $w_{\rm part} = 12$ bytes per particle.
 Table~\ref{tab:membal} quantifies the load balance achieved by this
 scheme across the strong-scaling runs described in the preceding section.
-
 \begin{table}
 \centering
 \caption{Memory load balance for the strong-scaling test
   ($54\,\mathrm{M}$ grids, $135.7\,\mathrm{M}$ particles).
   $M_{\min}$ and $M_{\max}$ are the minimum and maximum per-rank
   resident memory after the final load-balance remap (step 243).
-  The ratio $M_{\max}/M_{\min}$ measures memory imbalance.
-  The level-10 grid counts illustrate the per-rank work imbalance
-  at the most populated refined level ($19.5\,\mathrm{M}$ grids total).}
+  The level-10 grid counts illustrate per-rank work imbalance
+  at the most populated level ($19.5\,\mathrm{M}$ grids total).}
 \label{tab:membal}
 \small
-\begin{tabular}{rrrrcrrr}
+\begin{tabular}{rrrrrrr}
 \hline
-$\nrank$ & $M_{\min}$ & $M_{\max}$ & $\frac{M_{\max}}{M_{\min}}$
-  & & \multicolumn{3}{c}{Lv-10 grids/rank ($\times 10^3$)} \\
-  &  (Gb) & (Gb) &  & & min & max & ratio \\
+$\nrank$ & $M_{\min}$ & $M_{\max}$ & $M$ ratio
+  & \multicolumn{3}{c}{Lv-10 grids/rank ($\times 10^3$)} \\
+  &  (GB) & (GB) &
+  & min & max & ratio \\
 \hline
-  1 & 147.2 & 147.2 & 1.000 & &\multicolumn{3}{c}{---} \\
-  2 &  87.0 &  87.4 & 1.005 & & 9120 & 10338 & 1.13 \\
-  4 &  50.1 &  50.5 & 1.008 & & 4546 &  5210 & 1.15 \\
-  8 &  28.0 &  28.6 & 1.021 & & 2200 &  2675 & 1.22 \\
- 12 &  20.9 &  21.4 & 1.024 & & 1370 &  1828 & 1.33 \\
- 16 &  16.7 &  17.1 & 1.024 & & 1021 &  1376 & 1.35 \\
- 24 &  12.5 &  13.1 & 1.048 & &  671 &   937 & 1.40 \\
- 32 &  10.7 &  11.1 & 1.037 & &  521 &   711 & 1.36 \\
- 48 &   8.2 &   8.6 & 1.049 & &  306 &   479 & 1.56 \\
- 64 &   8.2 &   8.6 & 1.049 & &  225 &   362 & 1.61 \\
+  1 & 147.2 & 147.2 & 1.000  &\multicolumn{3}{c}{---} \\
+  2 &  87.0 &  87.4 & 1.005  & 9120 & 10338 & 1.13 \\
+  4 &  50.1 &  50.5 & 1.008  & 4546 &  5210 & 1.15 \\
+  8 &  28.0 &  28.6 & 1.021  & 2200 &  2675 & 1.22 \\
+ 12 &  20.9 &  21.4 & 1.024  & 1370 &  1828 & 1.33 \\
+ 16 &  16.7 &  17.1 & 1.024  & 1021 &  1376 & 1.35 \\
+ 24 &  12.5 &  13.1 & 1.048  &  671 &   937 & 1.40 \\
+ 32 &  10.7 &  11.1 & 1.037  &  521 &   711 & 1.36 \\
+ 48 &   8.2 &   8.6 & 1.049  &  306 &   479 & 1.56 \\
+ 64 &   8.2 &   8.6 & 1.049  &  225 &   362 & 1.61 \\
 \hline
 \end{tabular}
 \end{table}
 
-The memory-weighted balancer keeps the per-rank memory imbalance
-remarkably low, with $M_{\max}/M_{\min} \le 1.05$ for all rank counts tested,
-from 2 to 64.  This is achieved despite substantial grid-count imbalance
+The memory-weighted balancer keeps the per-rank memory imbalance remarkably low, with $M_{\max}/M_{\min} \le 1.05$ for all rank counts tested from 2 to 64.  This is achieved despite substantial grid-count imbalance
 at the most populated refined level (level~10, containing
 $19.5\,\mathrm{M}$ grids), where the per-rank max/min ratio grows from
 1.13 at 2~ranks to 1.61 at 64~ranks because the \ksec\ sub-domains
@@ -1591,13 +1533,12 @@ Figure~\ref{fig:memory_balance} visualizes these trends.
 \label{fig:memory_balance}
 \end{figure*}
 
-\paragraph{Time-based hybrid balancing.}
-An optional runtime parameter \code{time\_balance\_alpha} ($\alpha_t$,
+An optional runtime \emph{key} parameter \code{time\_balance\_alpha} ($\alpha_t$,
 default~0) blends measured per-level wall-clock cost into the memory-weighted
 cost function.  For each level $\ell$, the code accumulates the local time
 $T_\ell$ spent in the domain-size-dependent section (Godunov, cooling,
 particle moves, star formation, and flagging) between successive remap
-calls.  A per-level blend factor
+calls.  A per-level blend factor is defined as
 \begin{equation}
   f_\ell = 1 + \alpha_t \bigl(\bar{c}_\ell^{\rm loc}/\bar{c}_\ell^{\rm avg} - 1\bigr),
   \quad f_\ell \in [0.5,\,2.0],
@@ -1617,10 +1558,7 @@ because its cost is independent of the local domain size.
 The preceding single-node tests demonstrate intra-node scaling
 efficiency but cannot probe the inter-node communication overhead
 that dominates production runs.  We therefore perform a multi-node
-strong-scaling study using the Cosmo1024 configuration
-(${\sim}362\,\mathrm{M}$ grids, $1.15 \times 10^9$ particles)
-on the \textit{Grammar} cluster (up to 32~nodes, dual-socket AMD
-EPYC 7543, 64~cores/node, 512\,GB RAM/node, 100\,Gbps InfiniBand).
+strong-scaling study using the Cosmo1024 configuration.
 
 \subsubsection{MPI rank scaling}
 \label{sec:perf_mpi_scaling}
@@ -1636,13 +1574,12 @@ restart feature allows each rank count to read the same checkpoint.
 
 Table~\ref{tab:mpi_scaling} and Figure~\ref{fig:scaling}(c,d)
 summarise the results.  The steady-state wall-clock time per coarse
-step decreases from 2858\,s (1~node, 8~ranks) to 108\,s
-(32~nodes, 256~ranks), yielding a $26.5\times$ speedup.
-Up to 16~nodes the scaling is essentially ideal: $2.0\times$
+step decreases from 2858\,s for 8 ranks on 1~node to 108\,s for 256 ranks on 32 nodes, yielding a $26.5\times$ speedup.
+Up to 16~nodes the scaling is essentially ideal, for example, $2.0\times$
 at 2~nodes ($99.8\%$ efficiency), $4.0\times$ at 4~nodes
 ($99.0\%$), and $15.7\times$ at 16~nodes ($98.4\%$).  Even at the
 largest configuration of 32~nodes (256~ranks, 2048~cores), the
-parallel efficiency remains $82.8\%$---a strong result for an AMR
+parallel efficiency remains $82.8\%$, which is a strong result for an AMR
 code with full subgrid physics.
 
 The \texttt{poisson-mg AMR} multigrid V-cycle dominates the runtime
@@ -1657,9 +1594,8 @@ rank counts with Hilbert ordering.  The efficiency dip at 8~nodes
 the interplay between inter-node latency and improved per-rank cache
 utilisation as the working set shrinks.  At 32~nodes, the per-rank
 grid count drops to ${\sim}1.4\,\mathrm{M}$, and the communication
-overhead in the multigrid V-cycle---which requires global convergence
-checks and boundary exchanges at every relaxation step---begins to
-dominate.
+overhead in the multigrid V-cycle begins to dominate because it requires global convergence
+checks and boundary exchanges at every relaxation step.
 
 \begin{table}
 \centering
@@ -1671,9 +1607,9 @@ dominate.
   $\mu$s/pt column gives the wall-clock time normalised by the
   total number of cell-updates across all AMR sub-steps.}
 \label{tab:mpi_scaling}
-\begin{tabular}{rrrrrrr}
+\begin{tabular}{@{\,}r@{\;\;}r@{\;\;}r@{\;\;}r@{\;\;}r@{\;\;}r@{\;\;}r@{\,}}
 \hline
-$\nrank$ & Nodes & Cores & Time (s) & $\mu$s/pt & Speedup & Eff.\ (\%) \\
+$\nrank$ & Nodes & Cores & Time\,(s) & $\mu$s/pt & Speedup & Eff.\,(\%) \\
 \hline
    8 &  1 &   64 & 2858 & 7.66 &  1.00 & 100.0 \\
   16 &  2 &  128 & 1432 & 7.67 &  2.00 &  99.8 \\
@@ -1689,8 +1625,8 @@ $\nrank$ & Nodes & Cores & Time (s) & $\mu$s/pt & Speedup & Eff.\ (\%) \\
 \label{sec:perf_multinode_omp}
 
 To identify the optimal \mpi/OpenMP balance, we fix the total
-resource at 8~nodes (512~cores) and vary the \mpi/OMP split:
-$\nrank \times \nthread = 512$, with $\nthread$ ranging from
+resource at 8~nodes (512~cores) and vary the \mpi/OMP split with
+$\nrank \times \nthread = 512$, where $\nthread$ ranges from
 1 (pure \mpi, 512 ranks) to 64 (8~ranks, 64~threads each).  Each
 configuration allocates $\nrank/8$ ranks per node, so the per-node
 memory footprint varies inversely with $\nrank$ while the total
@@ -1703,17 +1639,15 @@ achieves $9.9\times$ speedup over pure \mpi, a super-linear
 efficiency of $123\%$ that reflects the large communication
 overhead of 512 ranks.  The minimum per-step time occurs near
 $\nthread = 32$ ($4.17\,\mu$s/pt) but with only $53\%$
-thread efficiency; we therefore adopt $\nthread = 8$ as the
+thread efficiency. We therefore adopt $\nthread = 8$ as the
 production setting, balancing communication savings against
 hyperthreading overhead and memory consolidation.
 Beyond $\nthread = 8$ (the physical core limit), additional
-threads share execution units and the MG~AMR solver---which
-dominates the total time---scales poorly due to its inherently
-sequential level-by-level structure.
+threads share execution units and the MG~AMR solver scales poorly due to its inherently sequential level-by-level structure, which dominates the total time.
 
 \begin{figure*}
 \centering
-\includegraphics[width=\columnwidth]{fig_cosmo1024_omp_scaling.pdf}
+\includegraphics[width=\textwidth]{fig_cosmo1024_omp_scaling.pdf}
 \caption{Hybrid \mpi/OpenMP scaling of \curamses\ (Cosmo1024)
   on 8~nodes (512~cores total), varying the \mpi/OMP split
   ($\nrank \times \nthread = 512$).
@@ -1780,7 +1714,7 @@ grid sizes up to $N=2048$ are feasible.
 \label{sec:bench_ghost}
 
 This benchmark constructs a uniform $N^3$ periodic grid, assigns cell
-ownership via either Hilbert or \ksec\ domain decomposition, and
+ownership via either Hilbert or \ksec\ \dd, and
 measures ghost zone exchange time for three communication backends:
 \textit{P2P} (non-blocking \texttt{MPI\_ISEND/IRECV}),
 \texttt{MPI\_ALLTOALLV}, and the hierarchical \ksec\ exchange described
@@ -1836,7 +1770,7 @@ communication costs in \curamses.
 \subsubsection{Load balance quality}
 \label{sec:bench_lb}
 
-To isolate the impact of domain decomposition geometry on load balance,
+To isolate the impact of \dd\ geometry on load balance,
 a third benchmark assigns non-uniform cell weights drawn from 20
 Gaussian clusters (amplitude 10--100, width $\sigma=0.02$--0.10)
 superposed on a unit background.  For each DD method (Hilbert vs.\
@@ -1920,7 +1854,7 @@ grids --- is verified to match the Hilbert-ordering reference run,
 with only a 0.5\,per\,cent shift in $e_{\rm cons}$ for the merged
 red-black sweep.  The use of a deterministic, cell-index-seeded random
 number generator ensures that star formation stochasticity is
-independent of the domain decomposition and thread scheduling.
+independent of the \dd\ and thread scheduling.
 
 The techniques presented here --- Morton hash table, \ksec\
 decomposition, spatial binning, and auto-tuning \mpi\ backends --- are
@@ -2454,7 +2388,7 @@ values are shown where applicable.}
 \toprule
 Parameter & Namelist block & Type & Default & Description \\
 \midrule
-\code{ordering}        & \code{\&RUN\_PARAMS}   & string  & \code{'hilbert'} & Domain decomposition ordering (\code{'hilbert'} or \code{'ksection'}) \\
+\code{ordering}        & \code{\&RUN\_PARAMS}   & string  & \code{'hilbert'} & \dd\ ordering (\code{'hilbert'} or \code{'ksection'}) \\
 \code{use\_fftw}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable FFTW3 direct Poisson solver at base level \\
 \code{exchange\_method} & \code{\&RUN\_PARAMS}  & string  & \code{'auto'}    & MPI exchange backend (\code{'auto'}, \code{'p2p'}, \code{'ksection'}) \\
 \code{gpu\_hydro}      & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for hydrodynamics \\
@@ -2462,15 +2396,16 @@ Parameter & Namelist block & Type & Default & Description \\
 \code{gpu\_fft}        & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for FFT solver \\
 \code{gpu\_sink}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for sink particle routines \\
 \code{memory\_balance} & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable memory-weighted load balancing \\
-\code{use\_neutrino}   & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable massive neutrino linear response \\
-\code{de\_perturb}     & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable dark energy perturbation corrections \\
 \midrule
 \code{mem\_weight\_grid} & \code{\&AMR\_PARAMS} & integer & auto             & Memory cost per grid (0\,=\,auto from \code{nvar}; $>0$\,=\,override) \\
 \code{mem\_weight\_part} & \code{\&AMR\_PARAMS} & integer & 12               & Memory cost per particle \\
 \code{mem\_weight\_sink} & \code{\&AMR\_PARAMS} & integer & 500              & Computational cost per sink particle \\
+\code{time\_balance\_alpha} & \code{\&AMR\_PARAMS} & real & 0                & Hybrid time-weight factor for load balancing \\
 \midrule
-\code{omega\_nu}       & \code{\&COSMO\_PARAMS} & real    & 0                & Massive neutrino density parameter $\Omega_\nu$ \\
-\code{neutrino\_table} & \code{\&COSMO\_PARAMS} & string  & ---              & Path to neutrino transfer function table \\
+\code{q\_refine\_holdback} & \code{\&REFINE\_PARAMS} & logical & \code{.false.} & Enable graduated $\ell_{\max}$ (proper-distance holdback) \\
+\midrule
+\code{cooling\_method}  & \code{\&PHYSICS\_PARAMS} & string & \code{'implicit'} & Cooling integration method (\code{'implicit'} or \code{'exact'}) \\
+\code{grackle\_table}   & \code{\&PHYSICS\_PARAMS} & string & ---              & Path to Grackle cooling table \\
 \bottomrule
 \end{tabular}
 \end{table*}
