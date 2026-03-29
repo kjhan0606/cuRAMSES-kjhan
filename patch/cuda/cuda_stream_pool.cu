@@ -341,7 +341,14 @@ void cuda_pool_finalize(void) {
             }
         }
     }
-    // Free persistent mesh arrays
+    // Unregister persistent host pins
+    if (g_mesh_host_pinned) {
+        if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
+        if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
+        if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
+        g_mesh_host_pinned = false;
+    }
+    // Free persistent mesh device arrays
     if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
     if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
     if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
@@ -371,11 +378,11 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
 
     // Reallocate if size changed
     if (ncell != g_mesh_ncell) {
-        // Unpin previous host arrays if pinned
+        // Unpin previous host arrays if pinned (use tracked pointers)
         if (g_mesh_host_pinned) {
-            cudaHostUnregister((void*)uold);  // same pointer, just unpin
-            if (f_grav) cudaHostUnregister((void*)f_grav);
-            cudaHostUnregister((void*)son);
+            if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
+            if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
+            if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
             g_mesh_host_pinned = false;
         }
         if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
@@ -466,21 +473,12 @@ void cuda_mesh_upload(const double* uold, const double* f_grav,
 }
 
 void cuda_mesh_free(void) {
-    // Sync upload stream before freeing (stream/event kept alive for reuse)
+    // Persistent mode: keep device arrays + host pins alive for reuse.
+    // cuda_mesh_upload() skips realloc when ncell == g_mesh_ncell.
+    // Final cleanup happens in cuda_pool_finalize().
     if (g_upload_stream) {
         cudaStreamSynchronize(g_upload_stream);
     }
-    // Unregister pinned host memory before freeing device arrays
-    if (g_mesh_host_pinned) {
-        if (g_pinned_uold) { cudaHostUnregister((void*)g_pinned_uold); g_pinned_uold = nullptr; }
-        if (g_pinned_f)    { cudaHostUnregister((void*)g_pinned_f);    g_pinned_f    = nullptr; }
-        if (g_pinned_son)  { cudaHostUnregister((void*)g_pinned_son);  g_pinned_son  = nullptr; }
-        g_mesh_host_pinned = false;
-    }
-    if (d_mesh_uold) { cudaFree(d_mesh_uold); d_mesh_uold = nullptr; }
-    if (d_mesh_f)    { cudaFree(d_mesh_f);    d_mesh_f    = nullptr; }
-    if (d_mesh_son)  { cudaFree(d_mesh_son);  d_mesh_son  = nullptr; }
-    g_mesh_ncell = 0;
 }
 
 void hydro_cuda_profile_accumulate(int stream_slot, int ngrid) {
