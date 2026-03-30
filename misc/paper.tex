@@ -37,8 +37,8 @@
 \newcommand{\mpiio}[0]{\texttt{MPI-IO}}
 \newcommand{\dd}[0]{{domain decomposition}}
 
-\title[cuRAMSES~I: Scalable AMR Optimizations for Cosmological Simulations]
-{cuRAMSES~I: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
+\title[cuRAMSES: Scalable AMR Optimizations for Cosmological Simulations]
+{cuRAMSES: Scalable AMR Optimizations for Large-Scale Cosmological Simulations}
 
 \author[J.~Kim]{
 Juhan Kim$^{1}$\thanks{E-mail: kjhan@kias.re.kr}
@@ -67,13 +67,14 @@ We present \curamses, a suite of advanced domain decomposition strategies and
 algorithmic optimizations for the \ramses\ adaptive mesh refinement (AMR) code, 
 designed to overcome the communication, memory, and solver bottlenecks inherent 
 in massive cosmological simulations. 
-The central innovation is a recursive \ksec\ domain decomposition that replaces the traditional Hilbert curve ordering with a hierarchical spatial partitioning. This approach substitutes global all-to-all communications with neighbour-only  point-to-point communications. By maintaining a constant number of communication partners regardless of the total rank count, it significantly improves strong scaling at high concurrency. 
+The central innovation is a recursive \ksec\ domain decomposition that replaces the traditional Hilbert curve ordering with a hierarchical spatial partitioning. This approach substitutes global all-to-all communications with neighbour-only point-to-point communications. By maintaining a constant number of communication partners regardless of the total rank count, it significantly improves strong scaling at high concurrency. 
 To address critical memory constraints at scale, we introduce a Morton-key hash 
 table for octree-neighbour lookup alongside on-demand array allocation, drastically reducing the per-rank memory footprint. Furthermore, a novel spatial hash-binning algorithm in box-type local domains accelerates supernova and AGN feedback routines by over two orders of magnitude (a ${\sim}260\times$ speedup). 
 For hybrid architectures, an automatic CPU/GPU dispatch model with GPU-resident 
 mesh data reduces host--device transfer overhead to just 5.7\% of the GPU runtime. Additionally, a variable-$\nrank$ restart capability enables flexible I/O workflows. 
-Extensive diagnostics verify that all modifications preserve mass, momentum, and 
-energy conservation to machine precision.
+Extensive diagnostics verify that all modifications preserve mass, momentum, and
+energy conservation, matching the reference Hilbert-ordering run to within
+0.5\,per\,cent in the total energy diagnostic.
 \end{abstract}
 
 \begin{keywords}
@@ -91,13 +92,13 @@ Cosmological hydrodynamic simulations play a central role in modern
 astrophysics, connecting the predictions of the $\Lambda$CDM paradigm
 to the observable properties of galaxies, the intergalactic medium,
 and the large-scale structures of the Universe. Over the past decade,
-landmark galaxy formation simulations --- IllustrisTNG
+landmark galaxy formation simulations such as IllustrisTNG
 \citep{Pillepich2018,Nelson2019} with the moving-mesh code \textsc{arepo}
 \citep{Springel2010}, EAGLE \citep{Schaye2015} with \textsc{gadget}
 \citep{Springel2005}, and the Horizon-AGN/Horzion-Run 5/NewHorizon/NewCluster simulations
 \citep{Dubois2014,Lee2021,Dubois2021,Han2026} with the adaptive mesh refinement (AMR) code
 \ramses\ \citep{Teyssier2002}, among others
-\citep{Hopkins2018,Dave2019,Tremmel2017} have advanced our
+\citep{Hopkins2018,Dave2019,Tremmel2017}, have advanced our
 understanding of cosmic structure.
 
 These achievements, however, highlight the need for simulations of
@@ -159,7 +160,7 @@ implied 80 times more weight to grid with respect to particle, severely underwei
 particle-dominated cells. For example, a grid hosting $10^4$ particles in a dense
 halo carries a cost only ${\sim}125\times$ that of an empty cell,
 whereas its actual memory footprint is about 450 times larger
-(taking $w_{\rm grid}=2256$\,B for \code{nvar}=14 and $w_{\rm part}=12$\,B per particle; see
+(taking $w_{\rm grid}=2256$\,B (Bytes) for \code{nvar}=14 and $w_{\rm part}=12$\,B per particle; see
 Section~\ref{sec:ksec_membal}).  The result is that particle-rich
 ranks are systematically overloaded in both memory and compute time
 \citep{Springel2005}. The problem is particularly acute in
@@ -246,8 +247,8 @@ The tree is a $k$-ary structure where each \emph{node} represents a
 contiguous group of \mpi\ ranks sharing a spatial sub-domain. The
 \emph{root} node at level 0 spans all $\nrank$ ranks and each
 \emph{leaf} node at level~$L$ corresponds to a single rank.
-At each level $l$, the
-domain of a node is split into $k_l$ child nodes along the longest
+At each level $\ell$, the
+domain of a node is split into $k_\ell$ child nodes along the longest
 axis of the current bounding box. This longest-axis selection ensures
 roughly isotropic sub-domains minimising the surface-to-volume ratio
 and hence the ghost-zone count.
@@ -277,7 +278,7 @@ vary by approximately 10--30\,per\,cent, reflecting load-balanced wall placement
 The tree is stored as a set of arrays indexed by node identifier.
 For each internal node, the child indices for each of the $k_\ell$
 partitions and the spatial coordinates of the partition boundaries
-are recorded; for each leaf node, the assigned \mpi\ rank is stored.
+are recorded. And for each leaf node, the assigned \mpi\ rank is stored.
 Every node also carries the minimum and maximum rank indices of all
 leaves in its subtree, enabling rapid range queries during the
 hierarchical exchange.
@@ -291,8 +292,8 @@ is at most a few hundreds for practical values of $\nrank$
 \subsection{Load-Balanced Wall Placement}
 \label{sec:ksec_loadbal}
 
-When the tree is updated during load balancing (every \code{nremap}
-coarse steps), the wall positions at a certain level are adjusted by iterative
+When the tree is updated during load balancing (at every \code{nremap}
+coarse steps or by constraints on the acceptable inhomogeneity), the wall positions at a certain level are adjusted by iterative
 binary search so that each partition receives a load proportional to the
 number of ranks it contains. The procedure operates level by level and top to bottom. At level $\ell$,
 the following steps are performed.
@@ -372,7 +373,7 @@ $M_{\max}/M_{\min} \le 1.05$ across 2--64 ranks
 $e_{\rm cons}$ (fractional total energy conservation error),
 $e_{\rm pot}$ (gravitational potential energy), and
 $e_{\rm kin}$ (kinetic energy)
-to machine precision after advancing ten coarse time steps.
+to within the expected level after advancing ten coarse time steps.
 
 In addition to pure memory-based balancing, \curamses\ supports a
 \emph{hybrid} mode that incorporates computation-time feedback.  Each
@@ -456,7 +457,7 @@ all-to-all pattern. Even in the best case, where the \mpi\ library
 internally optimises \code{MPI\_ALLTOALLV} to skip zero-length
 communications, a rank with six neighbours must still perform at least six
 pairwise transfers (and often more on non-ideal interconnects), so the
-\ksec\ communication count of $\Olog{\sum_l k_l}$ remains competitive.
+\ksec\ communication count of $\Olog{\sum_\ell k_\ell}$ remains competitive.
 Crucially, $N_{\rm com}$ depends only on the prime factorization of
 $\nrank$ and is completely independent of the degree of particle
 clustering or the AMR refinement level, so the communication topology remains fixed regardless of how complex the simulation becomes. Figure~\ref{fig:hier_exchange} illustrates the communication pattern
@@ -1145,148 +1146,7 @@ HDF5   & \ksec   & Hilbert & Any \\
 \end{table}
 
 % ===================================================================
-% 8. GPU-ACCELERATED SOLVERS
-% ===================================================================
-\section{GPU-ACCELERATED SOLVERS}
-\label{sec:hybrid}
-Certain compute-intensive routines, namely the Godunov solver, gravity force
-computation, hydrodynamic synchronisation, CFL timestep, prolongation,
-and radiative cooling, are amenable to GPU acceleration.  Rather than
-running entire time steps on the GPU, \curamses\ adopts a
-\emph{hybrid dispatch} model where OpenMP threads dynamically choose
-between CPU and GPU execution at runtime.
-
-\subsection{Dynamic Dispatch Model}
-\label{sec:hybrid_dispatch}
-
-At the start of each parallel region, each OMP thread attempts to acquire a GPU stream slot via an atomic counter.  Threads which are allowed, accumulate grid data into a \textbf{batched grid buffer} of configurable size (by default, 4096 grids) and launch GPU kernels asynchronously when the buffer becomes full.  Threads which do not acquire an available slot, move on to execute the standard Fortran solver on the CPU side.  The \code{schedule(dynamic)} clause ensures load balancing so that while a GPU thread is waiting for kernel completion, remaining loop iterations are picked up by CPU threads.
-
-This design requires no code duplication since the CPU branch is the
-original Fortran subroutine, and the GPU branch is an alternative
-within the same \texttt{OpenMP do} loop.
-
-\subsection{Batched Grid Buffering}
-\label{sec:hybrid_superbatch}
-
-Launching a GPU kernel prompts a fixed overhead of 10--50\,$\mu$s, which dominates the computation time seriously when each kernel processes only a single grid at a time.  To mitigate this cost overhead, the GPU thread in the
-\code{OpenMP do} loop does not launch a kernel immediately.  Instead,
-it collects the integer \emph{index list} (the
-cell and neighbour identifiers which define each grid's stencil) into
-a host-side buffer.  Once the buffer reaches 4096 grids, a
-\emph{flush} is triggered. Then, the index list is uploaded to the device (or GPU) in a single transfer. And consecutive GPU kernels execute on the entire batch. 
-
-A key optimisation is the \textbf{on-device compactification}.  In a na\"{i}ve
-implementation, the intermediate flux data for every cell in the batch
-would be copied back to the host (${\sim}98$\,MB per flush), creating
-a severe PCIe bandwidth bottleneck.
-Instead, the scatter-reduce kernel completes the conservative update
-directly on the device, writing only the final per-grid result to
-\code{unew}.  The resulting device-to-host transfer is
-${\sim}5$\,MB per flush, about 20 times of reduction in PCIe traffic.
-
-
-\subsection{GPU-Resident Mesh Data}
-\label{sec:hybrid_gather}
-We note that the GPU benchmarks presented in this section are
-necessarily limited in scale.  Multi-GPU clusters large enough to
-test production-size cosmological simulations remain scarce and
-prohibitively expensive for most research groups.  The results below
-should therefore be interpreted as a proof of concept rather than a
-definitive GPU scaling assessment.
-
-The initial GPU implementation gathers the stencil data for each batch
-of grids on the CPU, copies it to the device, and copies the results
-back after the kernel finishes.  Profiling reveals that this
-host-to-device (H2D) transfer accounts for about majority of the total
-GPU time, completely negating the kernel speedup.
-
-We therefore adopt a \emph{GPU-resident mesh} strategy in which the full AMR
-mesh arrays (\code{uold}, \code{unew}, \code{phi}, \code{f},
-\code{son}) are uploaded to the device once at the beginning of each
-level update.  The gather phase, which formerly assembled the stencil
-on the host, is moved to a GPU kernel that reads directly from
-device-resident arrays.  After the Godunov sweep the scatter kernel
-writes updated fluxes back to \code{unew} on the device, and only the
-modified portion is copied back to the host.
-
-This reorganisation reduces the host-to-device transfer to less than
-$10\%$ of wall-clock time.  The gather time drops from 70.7\,s to
-2.1\,s ($34\times$) and the data transfer from 6.6\,s to 0.24\,s
-($27\times$).  The approach requires one \mpi\ rank per GPU because
-the mesh upload consumes 4--9\,GB of device memory per rank.  When the
-device memory is insufficient the code automatically runs on the CPU
-instead.
-
-With the Godunov solver running efficiently on the GPU, we next turn
-to the other major compute kernel, the multigrid Poisson solver, which
-dominates the remaining runtime.
-
-\subsection{GPU Multigrid Solver}
-\label{sec:hybrid_mg}
-
-We extend the GPU acceleration to the multigrid (MG) Poisson solver.
-The red-black Gauss--Seidel smoother and residual computation are
-implemented as CUDA kernels, with the GPU-side data (\code{phi},
-\code{f}, neighbour arrays) totalling approximately 6.4\,GB.
-A \emph{ghost-zone-only} exchange --- transferring only the
-boundary cells between host and device instead of the full
-\code{phi} array --- reduces per-sweep PCIe volume from
-${\sim}2.4$\,GB to ${\sim}6$\,MB.  However, the interpolation step
-between AMR levels still requires a full \code{phi} device-to-host
-transfer at each V-cycle.
-
-\subsection{GPU Performance Assessment}
-\label{sec:hybrid_perf}
-
-Table~\ref{tab:gpu_perf} summarises the GPU performance on the
-\textit{Syntax} cluster\footnote{\url{https://cac.kias.re.kr/systems/clusters/syntax}}, which hosts NVIDIA H100~NVL GPUs
-(93.1\,GB HBM3 per device, PCIe Gen5), using 2~\mpi\ ranks
-$\times$ 4~OMP threads, running 2 coarse steps of the Cosmo512
-test (Section~\ref{sec:perf_config}).
-
-\begin{table}
-\centering
-\caption{GPU performance comparison on H100~NVL (2~ranks $\times$
-4~threads, 2 coarse steps).  ``MG base'' is the base-level multigrid
-solve and ``MG AMR'' is the fine-level AMR correction.  ``Full D2H/H2D''
-transfers the entire \code{phi} array every MG iteration; ``Ghost-zone-only''
-transfers only boundary cells during smoothing but still requires
-a full transfer for interpolation.}
-\label{tab:gpu_perf}
-\footnotesize
-\begin{tabular}{@{}lrrrr@{}}
-\toprule
-Mode & Total & MG base & MG AMR & Godunov \\
-     & (s)   & (s)     & (s)    & (s)     \\
-\midrule
-CPU-only              & 45.9 & 10.2 & (incl.) & 9.5 \\
-GPU full D2H/H2D      & 66.6 & 23.1 & 11.5    & 7.4 \\
-GPU ghost-zone-only   & 82.0 & 30.5 & 17.6    & 8.4 \\
-\bottomrule
-\end{tabular}
-\end{table}
-
-The Godunov solver benefits modestly from GPU offloading (9.5\,s
-$\to$ 7.4--8.4\,s), but the multigrid solver is consistently
-\emph{slower} on the GPU, with the base-level solve degrading from 10.2\,s
-to 30.5\,s (about 3 times slower).  The root cause is the PCIe bandwidth
-bottleneck.  Even on the H100~NVL with PCIe Gen5, pageable memory
-throughput is 9.2\,GB/s and pinned memory reaches only
-13.6--22.4\,GB/s.  The MG solver's coarse-level solve and the
-interpolation/restriction operators remain on the CPU, forcing a full
-\code{phi} (a potential array) device-to-host and host-to-device transfer at every
-V-cycle iteration.  This synchronisation cost overwhelms the
-computational savings from the GPU kernels.
-
-The fundamental difficulty is that AMR multigrid requires
-level-by-level processing with inter-level transfers that break GPU
-data residency.  A net GPU speedup would require full device-residency
-of the entire V-cycle. For the current code structure, CPU-only
-optimizations (Section~\ref{sec:multigrid}) remain more effective.
-
-
-% ===================================================================
-% 9. PERFORMANCE RESULTS
+% 8. PERFORMANCE RESULTS
 % ===================================================================
 \section{PERFORMANCE RESULTS}
 \label{sec:performance}
@@ -1675,16 +1535,27 @@ cells/rank.  Three configurations are used: Cosmo256 ($256^{3}$,
 2~ranks, 1~node, 16~cores), Cosmo512 ($512^{3}$, 16~ranks, 2~nodes,
 128~cores), and Cosmo1024 ($1024^{3}$, 128~ranks, 16~nodes,
 1024~cores).  All runs use identical cosmology
-(Section~\ref{sec:test_config}), $\ell_{\max}=\ell_{\min}+5$, and
+(Section~\ref{sec:perf_config}), $\ell_{\max}=\ell_{\min}+5$, and
 $\nthread=8$.
 
 Figure~\ref{fig:weak_scaling} shows the per-step wall-clock time and
 the average microseconds per grid-point ($\mu$s\,/\,pt), the standard
 weak-scaling efficiency metric.  From Cosmo256 to Cosmo512 the
 efficiency is $88.5\%$; scaling further to Cosmo1024 yields $65.7\%$.
-The efficiency loss is dominated by the growth in inter-node
-communication volume and the increasing number of AMR levels, rather
-than load imbalance.
+A per-component breakdown reveals where this efficiency loss originates.
+Of the ${\sim}\,505$\,s additional wall time from Cosmo256 to
+Cosmo1024, sink-particle processing accounts for 53\,per\,cent
+($+267$\,s, $2.5\times$ growth), driven by the $\Olog{\nrank}$
+all-reduce synchronisation in accretion and merging diagnostics and
+the increasing number of sinks at later evolutionary stages.
+Load balancing contributes a further 20\,per\,cent ($+100$\,s,
+$1.6\times$ growth) as the remap communication volume grows with
+the number of inter-node domain boundaries.  By contrast, the
+hydrodynamic solver scales nearly perfectly ($+3$\,s, $1.02\times$),
+confirming that the \ksec\ ghost-zone exchange maintains constant
+communication cost per rank.  The Poisson solvers (MG base + AMR)
+grow by $1.2\times$, consistent with the additional AMR levels in
+the larger problem.
 
 \begin{figure*}
 \centering
@@ -1796,6 +1667,260 @@ Krylov approach used in \curamses' multigrid V-cycle smoother.
 
 
 % ===================================================================
+% 9. GPU-ACCELERATED SOLVERS
+% ===================================================================
+\section{GPU OFFLOADING: APPROACH AND ASSESSMENT}
+\label{sec:hybrid}
+Certain compute-intensive routines, namely the Godunov solver, gravity force
+computation, hydrodynamic synchronisation, CFL timestep, prolongation,
+and radiative cooling, are amenable to GPU acceleration.  Rather than
+running entire time steps on the GPU, \curamses\ adopts a
+\emph{hybrid dispatch} model where OpenMP threads dynamically choose
+between CPU and GPU execution at runtime.
+
+\subsection{Dynamic Dispatch Model}
+\label{sec:hybrid_dispatch}
+
+At the start of each parallel region, each OMP thread attempts to acquire a GPU stream slot via an atomic counter.  Threads which are allowed, accumulate grid data into a \textbf{batched grid buffer} of configurable size (by default, 4096 grids) and launch GPU kernels asynchronously when the buffer becomes full.  Threads which do not acquire an available slot, move on to execute the standard Fortran solver on the CPU side.  The \code{schedule(dynamic)} clause ensures load balancing so that while a GPU thread is waiting for kernel completion, remaining loop iterations are picked up by CPU threads.
+
+This design requires no code duplication since the CPU branch is the
+original Fortran subroutine, and the GPU branch is an alternative
+within the same \texttt{OpenMP do} loop.
+
+\subsection{Batched Grid Buffering}
+\label{sec:hybrid_superbatch}
+
+Launching a GPU kernel prompts a fixed overhead of 10--50\,$\mu$s, which dominates the computation time seriously when each kernel processes only a single grid at a time.  To mitigate this cost overhead, the GPU thread in the
+\code{OpenMP do} loop does not launch a kernel immediately.  Instead,
+it collects the integer \emph{index list} (the
+cell and neighbour identifiers which define each grid's stencil) into
+a host-side buffer.  Once the buffer reaches 4096 grids, a
+\emph{flush} is triggered. Then, the index list is uploaded to the device (or GPU) in a single transfer. And consecutive GPU kernels execute on the entire batch.
+
+A key optimisation is the \textbf{on-device compactification}.  In a na\"{i}ve
+implementation, the intermediate flux data for every cell in the batch
+would be copied back to the host (${\sim}98$\,MB per flush), creating
+a severe PCIe bandwidth bottleneck.
+Instead, the scatter-reduce kernel completes the conservative update
+directly on the device, writing only the final per-grid result to
+\code{unew}.  The resulting device-to-host transfer is
+${\sim}5$\,MB per flush, about 20 times of reduction in PCIe traffic.
+
+
+\subsection{GPU-Resident Mesh Data}
+\label{sec:hybrid_gather}
+The initial GPU implementation gathers the stencil data for each batch
+of grids on the CPU, copies it to the device, and copies the results
+back after the kernel finishes.  Profiling reveals that this
+host-to-device (H2D) transfer accounts for about majority of the total
+GPU time, completely negating the kernel speedup.
+
+We therefore adopt a \emph{GPU-resident mesh} strategy in which the full AMR
+mesh arrays (\code{uold}, \code{unew}, \code{phi}, \code{f},
+\code{son}) are uploaded to the device once at the beginning of each
+level update.  The gather phase, which formerly assembled the stencil
+on the host, is moved to a GPU kernel that reads directly from
+device-resident arrays.  After the Godunov sweep the scatter kernel
+writes updated fluxes back to \code{unew} on the device, and only the
+modified portion is copied back to the host.
+
+Furthermore, GPU device arrays and pinned host memory registrations
+are kept \emph{persistent} across level updates and fine timesteps.
+Rather than allocating, pinning, freeing, and unpinning the mesh
+buffers at every level (approximately 95 cycles per three coarse
+steps), the code allocates once and reuses the buffers whenever the
+mesh size remains unchanged.  Reallocation occurs only when the cell
+count changes (e.g.\ after load balancing).  Final cleanup is deferred
+to program termination.  This eliminates the dominant
+\code{cudaHostRegister}/\code{cudaHostUnregister} overhead (measured at
+${\sim}3$--$4$\,s per cycle for 23\,GB of host memory), reducing the
+per-level GPU overhead to the \code{cudaMemcpy} cost alone.
+
+This reorganisation reduces the host-to-device transfer to less than
+$10\%$ of wall-clock time.  The gather time drops from 70.7\,s to
+2.1\,s ($34\times$) and the data transfer from 6.6\,s to 0.24\,s
+($27\times$).  The approach requires one \mpi\ rank per GPU because
+the mesh upload consumes 4--9\,GB of device memory per rank.  When the
+device memory is insufficient the code automatically runs on the CPU
+instead.
+
+With the Godunov solver running efficiently on the GPU, we next turn
+to the other major compute kernel, the multigrid Poisson solver, which
+dominates the remaining runtime.
+
+\subsection{GPU Multigrid Solver}
+\label{sec:hybrid_mg}
+
+We extend the GPU acceleration to the multigrid (MG) Poisson solver.
+The red-black Gauss--Seidel smoother and residual computation are
+implemented as CUDA kernels, with the GPU-side data (\code{phi},
+\code{f}, neighbour arrays) totalling approximately 6.4\,GB.
+A \emph{ghost-zone-only} exchange transferring only the
+boundary cells between host and device instead of the full
+\code{phi} array, reduces per-sweep PCIe volume from
+${\sim}2.4$\,GB to ${\sim}6$\,MB.  However, the interpolation step
+between AMR levels still requires a full \code{phi} device-to-host
+transfer at each V-cycle.
+
+\subsection{GPU Performance Assessment}
+\label{sec:hybrid_perf}
+
+Table~\ref{tab:gpu_perf} summarises the GPU performance on the
+\textit{Syntax} cluster\footnote{\url{https://cac.kias.re.kr/systems/clusters/syntax}}, which hosts NVIDIA H100~NVL GPUs
+(93.1\,GB HBM3 per device, PCIe Gen5~$\times 16$), using 4~\mpi\ ranks
+$\times$ 8~OMP threads, running 3 coarse steps of the Cosmo1024
+test (Section~\ref{sec:perf_config}).  Each \mpi\ rank is bound to
+one H100~NVL device (4~GPUs per node).
+
+\begin{table}
+\centering
+\caption{GPU performance comparison on H100~NVL (4~ranks $\times$
+8~threads, 3 coarse steps, Cosmo1024).  The GPU run uses persistent
+mesh buffers and ghost-zone-only MG exchange.}
+\label{tab:gpu_perf}
+\footnotesize
+\begin{tabular}{@{}lrrrrr@{}}
+\toprule
+Mode & Total & MG AMR & FFTW3  & Godunov & Other \\
+     & (s)   & (s)    & (s)        & (s)     & (s)   \\
+\midrule
+CPU-only   & 1852 & 1094 & 104 & 181 &  473 \\
+GPU  & 1534 &  643 & 120 & 263 &  508 \\
+\midrule
+Speedup    & $1.21\times$ & $1.70\times$ & --- & $0.69\times$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The multigrid Poisson solver on AMR levels is the dominant
+beneficiary of GPU offloading since the MG~AMR component drops from
+1094\,s to 643\,s, a $1.70\times$ speedup that accounts for the
+entire net improvement.  The Godunov hydrodynamics solver, by
+contrast, is \emph{slower} on the GPU (181\,s~$\to$~263\,s).
+The stencil gather and scatter kernels execute efficiently on the
+device, but the per-level \code{cudaMemcpy} of the full mesh
+(${\sim}23$\,GB per upload) is costly enough to negate the kernel
+speedup.  It is important to note that the GPU mode dedicates one of
+the $r$ OMP threads to GPU management (kernel launch, stream
+synchronisation, PCIe transfer), so the comparison at $r = 8$ is
+effectively \emph{7 CPU threads + 1~GPU} versus \emph{8 CPU threads}
+in the CPU-only run.
+
+\subsubsection{Bandwidth-limited performance model}
+
+To quantify the GPU efficiency as a function of the CPU--GPU
+interconnect bandwidth, we decompose the MG~AMR time into three
+components as
+\begin{equation}
+T_{\mathrm{MG}}(B) \;=\; T_{\mathrm{CPU}}^{\mathrm{fixed}}
+  \;+\; T_{\mathrm{GPU}}^{\mathrm{kernel}}
+  \;+\; {V_{\mathrm{PCIe}}}{B^{-1}},
+\label{eq:gpu_model}
+\end{equation}
+where $T_{\mathrm{CPU}}^{\mathrm{fixed}}$ is the time spent in
+coarse-level solves and interpolation/restriction operators that
+remain on the CPU (${\approx}\,383$\,s, ${\sim}\,35$\,per\,cent of
+the CPU-only time), $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ is the
+GPU stencil compute time (${\approx}\,178$\,s, corresponding to a
+${\sim}\,4\times$ kernel speedup over CPU), $V_{\mathrm{PCIe}}$ is
+the cumulative PCIe transfer volume (${\approx}\,1820$\,GB over
+the full run), and $B$ is the effective CPU--GPU bandwidth.
+
+Fig.~\ref{fig:gpu_mg_model} shows the model predictions.  On the
+H100~NVL (measured $B \approx 22$\,GB/s with pinned memory),
+the model reproduces the observed $1.70\times$ speedup.  The
+curve reveals three regimes. First, in the \textit{Transfer-dominated} ($B \lesssim 20$\,GB/s), the
+      PCIe bottleneck limits the speedup to ${\lesssim}\,1.5\times$.
+      Even legacy PCIe Gen3 ($B \approx 12$\,GB/s) still yields a
+      net speedup of $1.53\times$ because the MG stencil computation
+      is expensive enough to offset the transfer cost.
+Second, in the \textit{Current hardware} ($20 \lesssim B \lesssim 60$\,GB/s),
+      PCIe Gen4--Gen5 accelerators achieve $1.7$--$1.8\times$ speedup.
+      The H100~NVL falls in this regime.
+And the last, in the \textit{Compute-limited} ($B \gtrsim 100$\,GB/s), the speedup
+      saturates at an asymptotic limit of ${\sim}\,1.95\times$, set
+      by the Amdahl fraction of CPU-only work.  Even the NVIDIA
+      GH200 with its NVLink-C2C coherent interconnect
+      ($B \approx 450$\,GB/s) reaches only $1.94\times$, indicating
+      that further bandwidth improvements yield diminishing returns.
+
+However, equation~(\ref{eq:gpu_model}) was evaluated at a fixed thread
+count $r = 8$.  Since GPU mode dedicates one thread to device
+management, the effective comparison is $(r{-}1)$ CPU threads plus one
+GPU versus $r$ CPU threads.  Defining the total serial MG~AMR work as
+$C_{\mathrm{total}} = r \, T_{\mathrm{CPU}}(r)$ and the serial
+CPU-fixed work as $C_{\mathrm{fixed}} = (r{-}1)\,
+T_{\mathrm{CPU}}^{\mathrm{fixed}}$, the generalised speedup becomes
+\begin{eqnarray} \nonumber
+S(r, B) \equiv &  {T_\mathrm{CPU} \over T_\mathrm{MG}(B)} \\
+= &\frac{C_{\mathrm{total}} / r}
+  {C_{\mathrm{fixed}} / (r{-}1) \;+\; T_{\mathrm{GPU}}^{\mathrm{kernel}}
+   \;+\; V_{\mathrm{PCIe}} \, B^{-1}},
+\label{eq:gpu_model_r}
+\end{eqnarray}
+where $r$ is the number of OMP threads per \mpi\ rank (each rank
+bound to one GPU).  From the Cosmo1024 benchmark at $r = 8$ and
+$B = 22$\,GB/s we obtain $C_{\mathrm{total}} = 8752$\,s$\cdot$thread,
+$C_{\mathrm{fixed}} = 2681$\,s$\cdot$thread,
+$T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s, and
+$V_{\mathrm{PCIe}} = 1824$\,GB.
+
+Panel (c) of Fig.~\ref{fig:gpu_mg_model} shows $S(r)$ for several
+GPU cards.  For a given card the speedup peaks at $r \approx 4$
+and decreases for both smaller and larger $r$: at $r = 2$ the loss
+of half the CPU threads outweighs the GPU contribution, while at
+large $r$ the GPU overhead exceeds the kernel saving.
+The card-dependent quantity is $T_{\mathrm{GPU}}^{\mathrm{kernel}}$.
+Because the AMR multigrid stencil accesses octree data through
+irregular, pointer-chasing patterns, it does not achieve peak HBM
+streaming bandwidth; instead, the effective throughput scales with
+the number of streaming multiprocessors (SMs), which determines
+the degree of memory-level parallelism available to hide access
+latency.  Accordingly, we set
+$T_{\mathrm{GPU}}^{\mathrm{kernel}} \propto 1 / N_{\mathrm{SM}}$,
+calibrated from the H100~NVL ($N_{\mathrm{SM}} = 132$,
+$T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s).
+Separate benchmarks on A40~GPUs ($N_{\mathrm{SM}} = 84$) at $r = 4$
+and $r = 8$ confirm this scaling within $5\,\mathrm{per\,cent}$ for the
+4-rank configuration (Fig.~\ref{fig:gpu_mg_model}c, filled squares).
+Our benchmark configuration $r = 8$ yields $S = 1.70$ on H100 and
+sits on the slowly declining branch past the optimum, indicating
+that a system with a higher GPU-to-CPU ratio (fewer threads per GPU)
+would benefit more from GPU offloading.
+
+\begin{figure*}
+\centering
+\includegraphics[width=\textwidth]{fig_gpu_mg_model.pdf}
+\caption{Multigrid Poisson GPU performance model.
+\textit{(a)}: MG AMR wall time as a function of effective
+CPU--GPU bandwidth $B$ (equation~\ref{eq:gpu_model}), compared with
+the CPU-only baseline (dashed) and the infinite-bandwidth limit
+(dotted).  The red star marks the measured H100~NVL data point.
+\textit{(b)}: corresponding speedup over CPU-only.  The asymptotic
+limit of $1.95\times$ is set by the Amdahl fraction of
+CPU-bound work.
+\textit{(c)}: speedup as a function of OMP threads per GPU $r$
+(equation~\ref{eq:gpu_model_r}).  Curves for different GPU cards use
+$T_{\mathrm{GPU}}^{\mathrm{kernel}} \propto 1/N_{\mathrm{SM}}$
+(SM-count scaling, see text).  The current benchmark ($r = 8$,
+red star) sits past the optimum $r \approx 4$.  Filled markers
+show measured MG~AMR speedups on H100~NVL and A40 at $r = 4$ and $8$
+(two data points per card from 2-rank and 4-rank configurations).}
+\label{fig:gpu_mg_model}
+\end{figure*}
+
+The key insight is that the AMR multigrid algorithm has such an
+irreducible CPU-bound component that the coarse-level solve and
+interpolation/restriction operators require inter-level data
+movement that breaks GPU data residency.  A net GPU speedup beyond
+$2\times$ would require porting these operations to the device as
+well, along with full device-residency of the entire V-cycle.
+Nevertheless, the current hybrid approach already provides a
+worthwhile $1.7\times$ MG speedup on commodity PCIe hardware
+reducing the total simulation time by 17\,per\,cent.
+
+
+% ===================================================================
 % 10. CONCLUSIONS
 % ===================================================================
 \section{CONCLUSIONS}
@@ -1841,18 +1966,28 @@ are:
   HDF5 and binary I/O with arbitrary rank counts.
 
 \item \textbf{GPU acceleration} (Section~\ref{sec:hybrid}):
-  GPU-resident mesh reduces H2D transfer to 5.7\,per\,cent, but the MG
-  solver is $3\times$ slower on GPU due to per-V-cycle PCIe transfers;
-  CPU-only optimization remains more effective for AMR multigrid.
+  a hybrid CPU+GPU dispatch model with GPU-resident mesh data
+  achieves a $1.70\times$ MG Poisson speedup on H100~NVL GPUs,
+  but the Godunov solver is $0.69\times$ (slower) due to per-level
+  23\,GB \code{cudaMemcpy} overhead.  The net improvement is a
+  modest $1.21\times$ overall, indicating that PCIe-connected GPUs
+  provide limited benefit for AMR codes with frequent inter-level
+  data movement.
 \end{enumerate}
 
-All optimizations preserve conservation to machine precision
-(Section~\ref{sec:perf_conservation}).  Every global diagnostic ---
+All optimizations preserve conservation diagnostics.  Every global diagnostic ---
 $e_{\rm cons}$, $e_{\rm pot}$, $e_{\rm kin}$, $e_{\rm int}$,
 $m_{\rm tot}$, $n_\star$, $n_{\rm sink}$, and the total number of AMR
-grids --- is verified to match the Hilbert-ordering reference run,
-with only a 0.5\,per\,cent shift in $e_{\rm cons}$ for the merged
-red-black sweep.  The use of a deterministic, cell-index-seeded random
+grids --- is verified to match the Hilbert-ordering reference run to
+within roundoff.  The sole exception is the merged red-black sweep
+(Section~\ref{sec:multigrid}), which intentionally uses stale boundary
+values at inter-sweep ghost zones, introducing a 0.5\,per\,cent shift
+in $e_{\rm cons}$ relative to the standard sequential sweep.  This shift
+is comparable to the effect of changing the domain decomposition itself
+and does not grow with integration time: the merged sweep is algebraically
+equivalent to one full Gauss--Seidel iteration with a slightly different
+update ordering, and the V-cycle converges to the same residual tolerance
+regardless.  The use of a deterministic, cell-index-seeded random
 number generator ensures that star formation stochasticity is
 independent of the \dd\ and thread scheduling.
 
@@ -1865,12 +2000,22 @@ Fourier-space transfer functions, without altering the real-space AMR
 infrastructure.
 
 The GPU acceleration experiment (Section~\ref{sec:hybrid}) demonstrates
-that a hybrid CPU+GPU approach is viable for the Godunov solver but
-counterproductive for AMR multigrid, where per-V-cycle PCIe transfers
-negate the kernel speedup.  Achieving efficient GPU utilisation for
-AMR multigrid remains an open challenge requiring full device-residency
-of the V-cycle, ideally with GPU-native restriction, prolongation, and
-coarse-level solve.
+both the potential and limitations of hybrid CPU+GPU execution for AMR
+codes.  The MG Poisson solver benefits from GPU offloading
+($1.70\times$ on H100~NVL), but the Godunov solver is actually
+\emph{slower} on the GPU ($0.69\times$) because per-level
+\code{cudaMemcpy} of the full 23\,GB mesh negates the kernel speedup.
+The net overall improvement of $1.21\times$ is modest, and a
+generalised performance model (equation~\ref{eq:gpu_model_r}) shows
+that the speedup is sensitive to the CPU-to-GPU thread ratio $r$:
+the current benchmark ($r = 8$) sits past the optimum of $r \approx 4$.
+Notably, the AMR stencil kernel throughput scales with the number
+of SMs rather than peak HBM bandwidth, because the irregular octree
+access pattern is latency-bound; this scaling is confirmed by
+independent A40 benchmarks within 5\,per\,cent (Fig.~\ref{fig:gpu_mg_model}c).
+Achieving efficient GPU utilisation for the full AMR V-cycle remains an
+open challenge requiring device-residency of the restriction,
+prolongation, and coarse-level solve operations.
 
 Strong scaling on a single 64-core node reaches $33.9\times$ speedup
 (53\,per\,cent parallel efficiency), while OpenMP thread scaling
@@ -1883,9 +2028,7 @@ restart capability, supporting both HDF5 and binary formats, provides
 operational flexibility for production campaigns where hardware
 availability changes between runs.
 
-\curamses\ is in production use for the Horizon Run~5 cosmological
-simulation project and will be made publicly available upon completion
-of the benchmark campaign.
+\curamses\ is in production use for the next-generation cosmological simulation project and will be made publicly available upon completion of the benchmark campaign.
 
 
 % ===================================================================
@@ -1893,11 +2036,7 @@ of the benchmark campaign.
 % ===================================================================
 \section*{Acknowledgements}
 
-This work was supported by the Korea Institute for Advanced Study.
-Computational resources were provided by the KIAS Center for Advanced
-Computation. The author thanks Romain Teyssier for the public release
-of the \ramses\ code and the \ramses\ developer community for
-continued maintenance and improvements.
+This work was supported by the Korea Institute for Advanced Study. Computational resources were provided by the KIAS Center for Advanced Computation.  J.K. is supported by KIAS Individual Grants (KG039603) at the Korea Institute for Advanced Study. The author thanks Romain Teyssier for the public release of the \ramses\ code and the \ramses\ developer community for continued maintenance and improvements.
 
 
 % ===================================================================
@@ -2019,7 +2158,7 @@ Kim J., Park C., L'Huillier B., Hong S.~E., 2015, J.\ Korean Astron.\ Soc., 48, 
 
 \bibitem[\protect\citeauthoryear{Klypin \& Prada}{Klypin \& Prada}{2019}]{Klypin2019}
 Klypin A., Prada F., 2019, MNRAS, 489, 1684,
-\href{https://doi.org/10.1093/mnras/stz2217}{doi:10.1093/mnras/stz2217}
+\href{https://doi.org/10.1093/mnras/stz2217}{doi:10.1093/mnras/stz2194}
 
 \bibitem[\protect\citeauthoryear{Klypin \& Prada}{Klypin \& Prada}{2018}]{Klypin2018}
 Klypin A., Prada F., 2018, MNRAS, 478, 4602,
@@ -2264,7 +2403,8 @@ vast majority of the simulation.
 \subsection{Memory Savings Summary}
 \label{app:mem_summary}
 
-The hash table memory cost is given by equation~(\ref{eq:hash_memory}).
+The hash table memory cost is
+far smaller than the original \code{nbor} cost of $48\,\ngridmax$ bytes.
 The \code{grid\_level} array adds $4\,\ngridmax$ bytes.
 Compared to the original \code{nbor} cost of $48\,\ngridmax$
 bytes, the net savings are approximately
@@ -2366,7 +2506,6 @@ $2 N_{\rm dim} = 6$:
 We replace the division by $2N_{\rm dim}$ with a multiplication by
 the precomputed reciprocal $1/(2N_{\rm dim})$, which is faster
 on most architectures.
-
 
 
 % ===================================================================
