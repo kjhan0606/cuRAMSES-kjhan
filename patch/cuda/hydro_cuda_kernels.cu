@@ -1948,7 +1948,7 @@ struct AuxBuffers {
     int child_cap, child_nvar;
 };
 
-static AuxBuffers g_aux[N_STREAMS];
+static AuxBuffers g_aux[MAX_CUDA_STREAMS];
 static bool g_aux_initialized = false;
 
 static void init_aux_buffers() {
@@ -2078,8 +2078,8 @@ __global__ void synchro_hydro_kernel(
 }
 
 // Per-stream generic device buffers for synchro/cmpdt
-static double* g_generic_buf[N_STREAMS] = {};
-static size_t  g_generic_cap[N_STREAMS] = {};
+static double* g_generic_buf[MAX_CUDA_STREAMS] = {};
+static size_t  g_generic_cap[MAX_CUDA_STREAMS] = {};
 
 static void ensure_generic_buf(int slot, size_t needed) {
     if (needed > g_generic_cap[slot]) {

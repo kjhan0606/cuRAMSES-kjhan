@@ -30,7 +30,7 @@ subroutine read_params
        & ,memory_balance,mem_weight_grid,mem_weight_part,mem_weight_sink &
        & ,time_balance_alpha &
        & ,jobcontrolfile &
-       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink,gpu_auto_tune &
+       & ,gpu_hydro,gpu_poisson,gpu_fft,gpu_sink,gpu_auto_tune,n_cuda_streams &
        & ,use_fftw &
        & ,dump_pk &
        & ,exchange_method &
@@ -297,9 +297,10 @@ subroutine read_params
   end if
 #else
   if(myid==1 .and. (gpu_hydro .or. gpu_poisson .or. gpu_fft .or. gpu_sink)) then
-     write(*,'(A,L1,A,L1,A,L1,A,L1)') &
+     write(*,'(A,L1,A,L1,A,L1,A,L1,A,I0)') &
           ' GPU acceleration: hydro=',gpu_hydro, &
-          ' poisson=',gpu_poisson,' fft=',gpu_fft,' sink=',gpu_sink
+          ' poisson=',gpu_poisson,' fft=',gpu_fft,' sink=',gpu_sink, &
+          ' streams=',n_cuda_streams
   end if
 #endif
 

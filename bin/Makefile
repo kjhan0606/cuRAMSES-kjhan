@@ -61,7 +61,7 @@ ifdef USE_CUDA
   CUDA_DIR = /opt/ohpc/pub/cuda/13.0.2
   NVCC = $(CUDA_DIR)/bin/nvcc
   CUDA_ARCH = -gencode arch=compute_80,code=sm_80 -gencode arch=compute_86,code=sm_86 -gencode arch=compute_89,code=sm_89 -gencode arch=compute_90,code=sm_90
-  N_CUDA_STREAMS ?= 1
+  N_CUDA_STREAMS ?= 16
   NVCCFLAGS = -O3 $(CUDA_ARCH) -DNDIM=$(NDIM) -DNVAR=$(NVAR) -DNVECTOR=$(NVECTOR) -DN_STREAMS=$(N_CUDA_STREAMS)
   FFLAGS += -DHYDRO_CUDA
   LIBS_CUDA = -L$(CUDA_DIR)/lib64 -lcudart -lcufft -lstdc++ -Wl,-rpath,$(CUDA_DIR)/lib64
@@ -150,11 +150,11 @@ ATON_OBJ = observe.o init_radiation.o rad_init.o rad_boundary.o rad_stars.o rad_
 #############################################################################
 ramses:	$(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o
 	$(F90) $(MODOBJ) $(AMRLIB) $(CUDA_OBJS) ramses.o -o $(EXEC)$(NDIM)d $(LIBS)
-	rm write_makefile.f90
+	rm -f write_makefile.f90
 #	rm write_patch.f90
 ramses_aton: $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o
 	$(F90) $(MODOBJ) $(ATON_MODOBJ) $(AMRLIB) $(ATON_OBJ) ramses.o -o $(EXEC)$(NDIM)d $(LIBS) $(LIBCUDA)
-	rm write_makefile.f90
+	rm -f write_makefile.f90
 #	rm write_patch.f90
 #############################################################################
 write_gitinfo.o: FORCE

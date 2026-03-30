@@ -19,8 +19,18 @@
 #define NVECTOR 32
 #endif
 
-#ifndef N_STREAMS
-#define N_STREAMS 1
+// MAX_CUDA_STREAMS: compile-time upper bound for static arrays.
+// Actual stream count is set at runtime via cuda_pool_init(local_rank, n_streams).
+#ifndef MAX_CUDA_STREAMS
+#define MAX_CUDA_STREAMS 16
+#endif
+
+// Legacy: if N_STREAMS was passed via -D, use it as default but cap at MAX
+#ifdef N_STREAMS
+#if N_STREAMS > MAX_CUDA_STREAMS
+#undef MAX_CUDA_STREAMS
+#define MAX_CUDA_STREAMS N_STREAMS
+#endif
 #endif
 
 // Stencil ranges (matches hydro_parameters.f90: iu1:iu2 = -1:4)
@@ -98,7 +108,7 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
-    void cuda_pool_init(int local_rank);
+    void cuda_pool_init(int local_rank, int n_streams);
     int  cuda_acquire_stream(void);
     void cuda_release_stream(int slot);
     void cuda_stream_sync(int slot);

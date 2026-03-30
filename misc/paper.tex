@@ -1846,26 +1846,14 @@ And the last, in the \textit{Compute-limited} ($B \gtrsim 100$\,GB/s), the speed
       ($B \approx 450$\,GB/s) reaches only $1.94\times$, indicating
       that further bandwidth improvements yield diminishing returns.
 
-However, equation~(\ref{eq:gpu_model}) was evaluated at a fixed thread
-count $r = 8$.  Since GPU mode dedicates one thread to device
-management, the effective comparison is $(r{-}1)$ CPU threads plus one
-GPU versus $r$ CPU threads.  Defining the total serial MG~AMR work as
-$C_{\mathrm{total}} = r \, T_{\mathrm{CPU}}(r)$ and the serial
-CPU-fixed work as $C_{\mathrm{fixed}} = (r{-}1)\,
-T_{\mathrm{CPU}}^{\mathrm{fixed}}$, the generalised speedup becomes
-\begin{eqnarray} \nonumber
-S(r, B) \equiv &  {T_\mathrm{CPU} \over T_\mathrm{MG}(B)} \\
-= &\frac{C_{\mathrm{total}} / r}
+However, equation~(\ref{eq:gpu_model}) was evaluated at a fixed thread count $r = 8$.  Since GPU mode dedicates one thread to device management, the effective comparison is $(r{-}1)$ CPU threads plus one GPU versus $r$ CPU threads.  Defining the total serial MG~AMR work as $C_{\mathrm{total}} = r \, T_{\mathrm{CPU}}(r)$ and the serial CPU-fixed work as $C_{\mathrm{fixed}} = (r{-}1)\, T_{\mathrm{CPU}}^{\mathrm{fixed}}$, the generalised speedup ($S(r,B)\equiv T_\mathrm{CPU}/T_\mathrm{MG}$ becomes
+\begin{equation} 
+S(r, B) = \frac{C_{\mathrm{total}} / r}
   {C_{\mathrm{fixed}} / (r{-}1) \;+\; T_{\mathrm{GPU}}^{\mathrm{kernel}}
    \;+\; V_{\mathrm{PCIe}} \, B^{-1}},
 \label{eq:gpu_model_r}
-\end{eqnarray}
-where $r$ is the number of OMP threads per \mpi\ rank (each rank
-bound to one GPU).  From the Cosmo1024 benchmark at $r = 8$ and
-$B = 22$\,GB/s we obtain $C_{\mathrm{total}} = 8752$\,s$\cdot$thread,
-$C_{\mathrm{fixed}} = 2681$\,s$\cdot$thread,
-$T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s, and
-$V_{\mathrm{PCIe}} = 1824$\,GB.
+\end{equation}
+where $r$ is the number of OMP threads per \mpi\ rank (each rank bound to one GPU).  From the Cosmo1024 benchmark at $r = 8$ and $B = 22$\,GB/s we obtain $C_{\mathrm{total}} = 8752$\,s$\cdot$thread, $C_{\mathrm{fixed}} = 2681$\,s$\cdot$thread, $T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s, and $V_{\mathrm{PCIe}} = 1824$\,GB.
 
 Panel (c) of Fig.~\ref{fig:gpu_mg_model} shows $S(r)$ for several
 GPU cards.  For a given card the speedup peaks at $r \approx 4$

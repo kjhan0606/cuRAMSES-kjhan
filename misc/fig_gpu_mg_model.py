@@ -198,7 +198,7 @@ ax2.grid(True, alpha=0.3)
 # --- (c) Speedup vs r (improved model) ---
 # GH200: 72 Grace ARM cores / 1 GPU = 72 → extend x-axis slightly beyond
 r_gh200 = 72   # natural operating point for GH200
-r_range = np.linspace(0.5, 80, 500)
+r_range = np.logspace(0, np.log10(100), 500)  # 1..100 for log-log plot
 
 # Overlap model: T = max(a*T_cpu, Tk, V/B)  (multi-stream pipeline)
 # Since Tk > V/B for all cards, simplifies to max(a*T_cpu, Tk)
@@ -227,8 +227,8 @@ for gname, gbw, gsm, gcol, gls, glw in gpu_cards:
 # Break-even and ceiling
 ax3.axhline(1.0, color='steelblue', ls='-', lw=0.8, alpha=0.4)
 ax3.axhline(S_ceiling, color='k', ls=':', lw=1.0, alpha=0.4)
-ax3.text(1.5, S_ceiling + 0.04, f'$1/a = {S_ceiling:.2f}\\times$',
-         fontsize=9, color='k', alpha=0.6, va='bottom')
+ax3.text(1.1, S_ceiling * 1.06, f'$1/a = {S_ceiling:.2f}\\times$',
+         fontsize=8, color='k', alpha=0.6, va='bottom')
 
 # Legend entries for serial vs overlap
 ax3.plot([], [], 'k-', lw=1.5, label='serial (single stream)')
@@ -240,12 +240,12 @@ S_gh200_serial = S_r_model(r_gh200, b_for_card(132, 450))
 S_gh200_overlap = S_r_overlap(r_gh200, 132)
 ax3.plot(r_gh200, S_gh200_overlap, 'p', color='#9467bd', ms=11, zorder=7,
          markeredgecolor='k', markeredgewidth=0.8)
-ax3.annotate(f'GH200 $r={r_gh200}$\n'
-             f'serial {S_gh200_serial:.2f}$\\times$\n'
-             f'overlap {S_gh200_overlap:.2f}$\\times$',
+ax3.annotate(f'GH200 $r\\!={r_gh200}$\n'
+             f'  serial {S_gh200_serial:.2f}$\\times$\n'
+             f'  overlap {S_gh200_overlap:.2f}$\\times$',
              (r_gh200, S_gh200_overlap), textcoords='offset points',
-             xytext=(-12, 8), fontsize=8.5, color='#9467bd',
-             fontweight='bold', ha='right', va='bottom')
+             xytext=(-14, -6), fontsize=7.5, color='#9467bd',
+             fontweight='bold', ha='right', va='top')
 
 # Mark benchmark (r=8) on H100 curve
 S_bench = S_r_model(r_bench, b_h100_fit)
@@ -269,20 +269,30 @@ ax3.plot([], [], 'h', color='#d62728', ms=9, markeredgecolor='k',
 ax3.plot([], [], 's', color='#8c564b', ms=8, markeredgecolor='k',
          markeredgewidth=1.0, label='A40 measured')
 
-ax3.fill_between(r_range, 0, 1.0, alpha=0.03, color='steelblue')
-ax3.text(65, 0.55, 'CPU faster', fontsize=10, color='steelblue',
+ax3.fill_between(r_range, 0.3, 1.0, alpha=0.03, color='steelblue')
+ax3.text(50, 0.55, 'CPU faster', fontsize=10, color='steelblue',
          fontstyle='italic', ha='center', va='top')
 
 ax3.set_xlabel('OMP Threads per GPU ($r$)', fontsize=13)
 ax3.set_ylabel('Speedup vs CPU-only', fontsize=13)
-ax3.set_xlim(0, 80)
-ax3.set_ylim(0.0, 3.1)
+ax3.set_xscale('log')
+ax3.set_yscale('log')
+ax3.set_xlim(1, 100)
+ax3.set_ylim(0.3, 3.5)
+# Use explicit tick values for readability on log scale
+from matplotlib.ticker import ScalarFormatter, NullFormatter, FixedLocator
+ax3.xaxis.set_major_formatter(ScalarFormatter())
+ax3.xaxis.set_minor_formatter(NullFormatter())
+ax3.yaxis.set_major_locator(FixedLocator([0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]))
+ax3.yaxis.set_major_formatter(ScalarFormatter())
+ax3.yaxis.set_minor_formatter(NullFormatter())
 ax3.tick_params(labelsize=11)
-ax3.text(0.03, 0.97, '(c) Speedup vs $r$',
+ax3.text(0.03, 0.90, '(c) Speedup vs $r$',
          transform=ax3.transAxes, fontsize=13, fontweight='bold',
          va='top', ha='left')
-ax3.legend(fontsize=6.5, loc='upper right', ncol=1)
-ax3.grid(True, alpha=0.3)
+ax3.legend(fontsize=5.5, loc='lower left',
+           bbox_to_anchor=(0.02, 0.02), ncol=2)
+ax3.grid(True, alpha=0.3, which='both')
 
 fig.tight_layout()
 fig.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/fig_gpu_mg_model.pdf',

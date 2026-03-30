@@ -8,8 +8,9 @@
 #include <cstdio>
 #include <cstring>
 
-// Global pool
-static StreamSlot g_pool[N_STREAMS];
+// Global pool (sized to compile-time max; only g_n_active_streams are used)
+static StreamSlot g_pool[MAX_CUDA_STREAMS];
+static int g_n_active_streams = 1;
 static bool pool_initialized = false;
 static int g_device_id = 0;
 
@@ -213,7 +214,7 @@ static void ensure_pinned_buffers(int slot, int ngrid) {
 
 extern "C" {
 
-void cuda_pool_init(int local_rank) {
+void cuda_pool_init(int local_rank, int n_streams) {
     int device_count = 0;
     cudaGetDeviceCount(&device_count);
     if (device_count <= 0) {
@@ -224,15 +225,21 @@ void cuda_pool_init(int local_rank) {
     g_device_id = local_rank % device_count;
     cudaSetDevice(g_device_id);
 
+    // Clamp requested streams to [1, MAX_CUDA_STREAMS]
+    if (n_streams < 1) n_streams = 1;
+    if (n_streams > MAX_CUDA_STREAMS) n_streams = MAX_CUDA_STREAMS;
+    g_n_active_streams = n_streams;
+
     cudaDeviceProp prop;
     cudaGetDeviceProperties(&prop, g_device_id);
-    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d, PCIe %04x:%02x)\n",
+    printf("CUDA pool: MPI local rank %d -> GPU %d (%s, %.1f GB, SM %d.%d, PCIe %04x:%02x, streams=%d)\n",
            local_rank, g_device_id, prop.name,
            prop.totalGlobalMem / 1073741824.0,
            prop.major, prop.minor,
-           prop.pciBusID, prop.pciDeviceID);
+           prop.pciBusID, prop.pciDeviceID,
+           g_n_active_streams);
 
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         cudaStreamCreateWithFlags(&g_pool[s].stream, cudaStreamNonBlocking);
         g_pool[s].busy = 0;
         g_pool[s].d_uloc = nullptr; g_pool[s].d_gloc = nullptr;
@@ -271,7 +278,7 @@ int cuda_acquire_stream(void) {
     if (!pool_initialized) return -1;
     // Ensure this OMP thread uses the correct GPU device (per-thread context)
     cudaSetDevice(g_device_id);
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         if (!g_pool[s].busy) {
             if (__sync_lock_test_and_set(&g_pool[s].busy, 1) == 0) {
                 return s;
@@ -287,29 +294,29 @@ int cuda_acquire_stream(void) {
 }
 
 void cuda_release_stream(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return;
+    if (slot < 0 || slot >= g_n_active_streams) return;
     __sync_lock_release(&g_pool[slot].busy);
 }
 
 void cuda_stream_sync(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return;
+    if (slot < 0 || slot >= g_n_active_streams) return;
     cudaStreamSynchronize(g_pool[slot].stream);
     __sync_lock_release(&g_pool[slot].busy);
 }
 
 int cuda_stream_query(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return 0;
+    if (slot < 0 || slot >= g_n_active_streams) return 0;
     return (cudaStreamQuery(g_pool[slot].stream) == cudaSuccess) ? 1 : 0;
 }
 
 int cuda_get_n_streams(void) {
     if (!pool_initialized) return 0;
-    return N_STREAMS;
+    return g_n_active_streams;
 }
 
 void cuda_pool_finalize(void) {
     if (!pool_initialized) return;
-    for (int s = 0; s < N_STREAMS; s++) {
+    for (int s = 0; s < g_n_active_streams; s++) {
         cudaStreamSynchronize(g_pool[s].stream);
         cudaStreamDestroy(g_pool[s].stream);
         if (g_pool[s].d_uloc) cudaFree(g_pool[s].d_uloc);
@@ -482,7 +489,7 @@ void cuda_mesh_free(void) {
 }
 
 void hydro_cuda_profile_accumulate(int stream_slot, int ngrid) {
-    if (stream_slot < 0 || stream_slot >= N_STREAMS) return;
+    if (stream_slot < 0 || stream_slot >= g_n_active_streams) return;
     StreamSlot& s = g_pool[stream_slot];
     if (!s.ev_initialized) return;
     // Events must already be recorded and stream synchronized
@@ -601,7 +608,7 @@ bool is_pool_initialized() { return pool_initialized; }
 bool pool_ensure_hydro_buffers(int slot, int ngrid) { return ensure_hydro_buffers(slot, ngrid); }
 bool pool_ensure_hydro_inter_buffers(int slot, int ngrid) { return ensure_hydro_inter_buffers(slot, ngrid); }
 cudaStream_t cuda_get_stream_internal(int slot) {
-    if (slot < 0 || slot >= N_STREAMS) return 0;
+    if (slot < 0 || slot >= g_n_active_streams) return 0;
     return g_pool[slot].stream;
 }
 bool pool_ensure_stencil_buffers(int slot, int ngrid, int n_interp) {

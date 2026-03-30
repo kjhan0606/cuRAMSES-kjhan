@@ -11,9 +11,10 @@ module cuda_commons
 
   ! C interface to stream pool
   interface
-     subroutine cuda_pool_init_c(local_rank) bind(C, name='cuda_pool_init')
+     subroutine cuda_pool_init_c(local_rank, n_streams) bind(C, name='cuda_pool_init')
        import :: c_int
        integer(c_int), value :: local_rank
+       integer(c_int), value :: n_streams
      end subroutine
 
      function cuda_acquire_stream_c() result(slot) bind(C, name='cuda_acquire_stream')
@@ -58,6 +59,7 @@ contains
   !-----------------------------------------------------------
   subroutine cuda_pool_init_f()
     use amr_commons, only: myid
+    use amr_parameters, only: n_cuda_streams
     implicit none
     include 'mpif.h'
     integer :: node_comm, local_rank, ierr
@@ -68,7 +70,7 @@ contains
     call MPI_Comm_rank(node_comm, local_rank, ierr)
     call MPI_Comm_free(node_comm, ierr)
 
-    call cuda_pool_init_c(int(local_rank, c_int))
+    call cuda_pool_init_c(int(local_rank, c_int), int(n_cuda_streams, c_int))
 
     cuda_n_streams = int(cuda_get_n_streams_c())
     cuda_available = (cuda_n_streams > 0)

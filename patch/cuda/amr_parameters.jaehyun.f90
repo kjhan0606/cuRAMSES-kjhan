@@ -69,6 +69,7 @@ module amr_parameters
   logical::gpu_fft=.false.     ! cuFFT direct solve for uniform base level
   logical::gpu_sink=.false.    ! GPU AGN feedback (average_AGN + AGN_blast)
   logical::gpu_auto_tune=.true.! Auto-tune CPU vs GPU (disable for benchmarks)
+  integer::n_cuda_streams=1   ! Number of CUDA streams (runtime, max 16)
 
   ! FFTW3 CPU direct Poisson solver (requires USE_FFTW compilation)
   logical::use_fftw=.false.    ! FFTW3 CPU direct solve for uniform base level
