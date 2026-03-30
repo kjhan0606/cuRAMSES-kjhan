@@ -1752,15 +1752,18 @@ dominates the remaining runtime.
 \label{sec:hybrid_mg}
 
 We extend the GPU acceleration to the multigrid (MG) Poisson solver.
-The red-black Gauss--Seidel smoother and residual computation are
-implemented as CUDA kernels, with the GPU-side data (\code{phi},
-\code{f}, neighbour arrays) totalling approximately 6.4\,GB.
-A \emph{ghost-zone-only} exchange transferring only the
-boundary cells between host and device instead of the full
-\code{phi} array, reduces per-sweep PCIe volume from
-${\sim}2.4$\,GB to ${\sim}6$\,MB.  However, the interpolation step
-between AMR levels still requires a full \code{phi} device-to-host
-transfer at each V-cycle.
+All four V-cycle kernels---red-black Gauss--Seidel smoothing,
+residual computation, restriction, and interpolation---are implemented
+as CUDA kernels, with the GPU-side data (\code{phi}, \code{f},
+neighbour arrays) totalling approximately 6.4\,GB.
+A \emph{ghost-zone-only} exchange transferring only the boundary cells
+between host and device instead of the full \code{phi} array reduces
+per-sweep PCIe volume from ${\sim}2.4$\,GB to ${\sim}6$\,MB.
+The remaining bottleneck is the MPI halo exchange after each kernel,
+which requires device-to-host and host-to-device transfers of
+boundary data at every smoothing sweep and level transition.
+The complete GPU-accelerated V-cycle algorithm is detailed in
+Appendix~\ref{app:vcycle}.
 
 \subsection{GPU Performance Assessment}
 \label{sec:hybrid_perf}
@@ -1818,9 +1821,8 @@ T_{\mathrm{MG}}(B) \;=\; T_{\mathrm{CPU}}^{\mathrm{fixed}}
 \label{eq:gpu_model}
 \end{equation}
 where $T_{\mathrm{CPU}}^{\mathrm{fixed}}$ is the time spent in
-coarse-level solves and interpolation/restriction operators that
-remain on the CPU (${\approx}\,383$\,s, ${\sim}\,35$\,per\,cent of
-the CPU-only time), $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ is the
+MPI halo exchanges and coarse-level solves that cannot be offloaded
+(${\approx}\,383$\,s, ${\sim}\,35$\,per\,cent of the CPU-only time), $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ is the
 GPU stencil compute time (${\approx}\,178$\,s, corresponding to a
 ${\sim}\,4\times$ kernel speedup over CPU), $V_{\mathrm{PCIe}}$ is
 the cumulative PCIe transfer volume (${\approx}\,1820$\,GB over
@@ -1867,7 +1869,7 @@ $V_{\mathrm{PCIe}} = 1824$\,GB.
 
 Panel (c) of Fig.~\ref{fig:gpu_mg_model} shows $S(r)$ for several
 GPU cards.  For a given card the speedup peaks at $r \approx 4$
-and decreases for both smaller and larger $r$: at $r = 2$ the loss
+and decreases for both smaller and larger $r$. At $r = 2$ the loss
 of half the CPU threads outweighs the GPU contribution, while at
 large $r$ the GPU overhead exceeds the kernel saving.
 The card-dependent quantity is $T_{\mathrm{GPU}}^{\mathrm{kernel}}$.
@@ -1909,14 +1911,17 @@ show measured MG~AMR speedups on H100~NVL and A40 at $r = 4$ and $8$
 \label{fig:gpu_mg_model}
 \end{figure*}
 
-The key insight is that the AMR multigrid algorithm has such an
-irreducible CPU-bound component that the coarse-level solve and
-interpolation/restriction operators require inter-level data
-movement that breaks GPU data residency.  A net GPU speedup beyond
-$2\times$ would require porting these operations to the device as
-well, along with full device-residency of the entire V-cycle.
+All V-cycle arithmetic---smoothing, residual, restriction, and
+interpolation---already executes on the GPU
+(Appendix~\ref{app:vcycle}).  The irreducible CPU-bound fraction
+(${\sim}\,35$\,per\,cent) is dominated by MPI halo exchanges
+({\sc isend}/{\sc irecv} + {\sc waitall}, ${\sim}\,10$ calls per
+V-cycle iteration) and by the coarse-level solve that falls below
+the GPU-dispatch threshold.  A net speedup beyond ${\sim}\,2\times$
+would therefore require overlapping communication with computation
+or reducing the halo-exchange frequency.
 Nevertheless, the current hybrid approach already provides a
-worthwhile $1.7\times$ MG speedup on commodity PCIe hardware
+worthwhile $1.7\times$ MG speedup on commodity PCIe hardware,
 reducing the total simulation time by 17\,per\,cent.
 
 
@@ -2509,7 +2514,86 @@ on most architectures.
 
 
 % ===================================================================
-% APPENDIX G: NEW NAMELIST PARAMETERS
+% APPENDIX G: GPU-ACCELERATED V-CYCLE ALGORITHM
+% ===================================================================
+\section{GPU-ACCELERATED V-CYCLE ALGORITHM}
+\label{app:vcycle}
+
+Algorithm~\ref{alg:vcycle} summarises one iteration of the
+GPU-accelerated V-cycle used by the multigrid Poisson solver at each
+AMR level (Section~\ref{sec:hybrid_mg}).  All arithmetic---smoothing,
+residual computation, restriction, and interpolation---executes on the
+GPU, while halo exchanges require device-to-host and host-to-device
+transfers bracketing MPI point-to-point communication.  The
+\emph{reverse-gather} step after restriction collects the coarse
+residual from neighbouring ranks whose fine grids overlap the local
+coarse grid.  On levels coarser than the GPU threshold the same
+algorithm runs on the CPU.
+
+\begin{algorithm}
+\caption{GPU-accelerated V-cycle at AMR level $\ell$}
+\label{alg:vcycle}
+\begin{algorithmic}[1]
+\REQUIRE Fine-level right-hand side $f$, initial guess $\phi$
+\ENSURE  Updated $\phi$ satisfying $\nabla^2_h\phi\approx f$
+\medskip
+
+\STATE \textbf{--- Pre-smoothing ($\times\,n_{\rm gs}$) ---}
+\FOR{$i = 1$ \TO $n_{\rm gs}$}
+  \STATE GS-Red$(\phi)$           \hfill\textit{[GPU kernel]}
+  \STATE Halo-exchange$(\phi)$    \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+  \STATE GS-Black$(\phi)$         \hfill\textit{[GPU kernel]}
+  \STATE Halo-exchange$(\phi)$    \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+\ENDFOR
+
+\medskip
+\STATE \textbf{--- Residual ---}
+\STATE $r \leftarrow f - \nabla^2_h\phi$ \hfill\textit{[GPU kernel]}
+\STATE Halo-exchange$(r)$         \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+
+\medskip
+\STATE \textbf{--- Restriction ---}
+\STATE $r_c \leftarrow R\,r$      \hfill\textit{[GPU kernel]}
+\STATE Reverse-comm$(r_c)$        \hfill\textit{[MPI P2P]}
+
+\medskip
+\STATE \textbf{--- Coarse solve ---}
+\STATE Recursive V-cycle at level $\ell-1$ \hfill\textit{[CPU or GPU]}
+
+\medskip
+\STATE \textbf{--- Interpolation \& correction ---}
+\STATE $\phi \leftarrow \phi + P\,\phi_c$ \hfill\textit{[GPU kernel]}
+\STATE Halo-exchange$(\phi)$      \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+
+\medskip
+\STATE \textbf{--- Post-smoothing ($\times\,n_{\rm gs}$) ---}
+\FOR{$i = 1$ \TO $n_{\rm gs}$}
+  \STATE GS-Red$(\phi)$           \hfill\textit{[GPU kernel]}
+  \STATE Halo-exchange$(\phi)$    \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+  \STATE GS-Black$(\phi)$         \hfill\textit{[GPU kernel]}
+  \STATE Halo-exchange$(\phi)$    \hfill\textit{[GPU $\to$ MPI $\to$ GPU]}
+\ENDFOR
+
+\medskip
+\STATE \textbf{--- Convergence check ---}
+\STATE $\|r\|_2^2 \leftarrow$ GPU reduce $+$ \textsc{MPI\_Allreduce}
+\end{algorithmic}
+\end{algorithm}
+
+With the merged red-black exchange optimisation
+(Appendix~\ref{app:mg_merged_rb}), the two separate halo exchanges per
+GS sweep (lines~3--6) are fused into a single exchange, reducing the
+total exchange count from 9 to~5 per iteration.  The GPU kernels are
+memory-bandwidth limited and achieve near-peak throughput
+(Section~\ref{sec:hybrid_perf}); consequently the irreducible CPU-fixed fraction
+$T_{\mathrm{CPU}}^{\mathrm{fixed}}/T_{\mathrm{MG}}^{\mathrm{CPU}}
+\approx 0.36$ in the performance model (equation~\ref{eq:gpu_model})
+is dominated by MPI halo exchanges that cannot be overlapped with
+computation.
+
+
+% ===================================================================
+% APPENDIX H: NEW NAMELIST PARAMETERS
 % ===================================================================
 \section{NEW NAMELIST PARAMETERS}
 \label{app:namelist}
