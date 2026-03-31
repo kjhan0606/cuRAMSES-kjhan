@@ -23,6 +23,7 @@ import numpy as np
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+from matplotlib.ticker import ScalarFormatter, NullFormatter, FixedLocator
 
 # ================================================================
 # BANDWIDTH MODEL (panels a, b) — fixed r=8, n4
@@ -87,13 +88,40 @@ def S_r_model(r, b_val):
     return tc / (a_fixed * tc + b_val)
 
 # GPU card specs: (name, B_pcie, N_SM, color, ls, lw)
+# A100 removed from this list — handled separately with fitted A100-node model
 gpu_cards = [
     ('V100',      12,   80, 'grey',      '--', 1.2),
     ('A40',       B_a40_eff,   84, '#8c564b',   '-',  1.5),
-    ('A100',      25,  108, '#2ca02c',   '--', 1.2),
     ('H100 NVL',  22,  132, '#d62728',   '-',  2.0),
     ('GH200',    450,  132, '#9467bd',   '--', 1.2),
 ]
+
+# ================================================================
+# A100 SXM4 — measured on separate node (different CPU baseline)
+# CPU MG AMR: r=4: 1663.0s, r=8: 974.0s  (faster than H100-node CPU)
+# GPU MG AMR: r=4: 808.1s,  r=8: 564.6s
+# ================================================================
+_alpha_a100 = (1662.978/973.973 * 0.125 - 0.25) / (1.0 - 1662.978/973.973)
+_T_s_a100   = 973.973 / (0.125 + _alpha_a100)
+_a_a100     = (808.051 - 564.584) / (1662.978 - 973.973)  # 0.3536
+_b_a100     = 564.584 - _a_a100 * 973.973                  # 220.2
+_B_a100_eff = 25.0     # PCIe Gen4 x16 effective bandwidth
+_Tk_a100    = _b_a100 - V4_pcie / _B_a100_eff              # kernel time
+
+def T_cpu_r_a100(r):
+    return _T_s_a100 * (1.0/r + _alpha_a100)
+
+def S_r_a100_serial(r):
+    tc = T_cpu_r_a100(r)
+    return tc / (_a_a100 * tc + _b_a100)
+
+def S_r_a100_overlap(r):
+    tc = T_cpu_r_a100(r)
+    return tc / max(_a_a100 * tc, _Tk_a100)
+
+print(f"\nA100 fit: a={_a_a100:.4f}, T_s={_T_s_a100:.0f}, alpha={_alpha_a100:.4f}")
+print(f"  b={_b_a100:.1f}, Tk={_Tk_a100:.1f} (model pred: {Tk_h100*N_SM_h100/108:.1f})")
+print(f"  A100 kernel {100*(1 - _Tk_a100/(Tk_h100*N_SM_h100/108)):.0f}% faster than 1/N_SM scaling")
 
 # Verify
 print(f"r-model: a={a_fixed:.4f}, T_s={_T_serial:.0f}, alpha={_alpha:.4f}")
@@ -224,6 +252,15 @@ for gname, gbw, gsm, gcol, gls, glw in gpu_cards:
     print(f"{gname:<12s} {gbw:>6.1f} {gsm:>4d} {Tk:>7.1f} {bc:>7.1f} "
           f"{S_r_model(8,bc):>6.3f} {S_r_overlap(8,gsm):>8.3f} {S_r_overlap(72,gsm):>9.3f}")
 
+# --- A100 SXM4: fitted curves (separate CPU baseline) ---
+sr_a100 = np.array([S_r_a100_serial(r) for r in r_range])
+ax3.plot(r_range, sr_a100, color='#2ca02c', ls='-', lw=1.5,
+         label='A100 SXM4 (108 SM)')
+sr_a100_ov = np.array([S_r_a100_overlap(r) for r in r_range])
+ax3.plot(r_range, sr_a100_ov, color='#2ca02c', ls='--', lw=1.2, alpha=0.7)
+print(f"{'A100 SXM4':<12s} {_B_a100_eff:>6.1f} {108:>4d} {_Tk_a100:>7.1f} {_b_a100:>7.1f} "
+      f"{S_r_a100_serial(8):>6.3f} {S_r_a100_overlap(8):>8.3f} {S_r_a100_overlap(72):>9.3f}")
+
 # Break-even and ceiling
 ax3.axhline(1.0, color='steelblue', ls='-', lw=0.8, alpha=0.4)
 ax3.axhline(S_ceiling, color='k', ls=':', lw=1.0, alpha=0.4)
@@ -252,15 +289,22 @@ S_bench = S_r_model(r_bench, b_h100_fit)
 ax3.plot(r_bench, S_bench, 'h', color='#d62728', ms=11, zorder=5,
          markeredgecolor='k', markeredgewidth=0.8)
 
-# === Measured data points (n4 only) ===
+# === Measured data points ===
 measured_n4 = [
     ('H100', 4, 1925.750/963.683, '#d62728', 'h'),
     ('H100', 8, 1093.609/665.075, '#d62728', 'h'),
     ('A40',  4, 1924.141/1048.841, '#8c564b', 's'),
     ('A40',  8, 1094.720/748.058,  '#8c564b', 's'),
 ]
+# A100 SXM4 measured on separate node (r=4,6,8,12; r=16 excluded — oversubscription)
+measured_a100 = [
+    ('A100', 4,  1662.978/808.051,  '#2ca02c', 'D'),
+    ('A100', 6,  1236.706/657.928,  '#2ca02c', 'D'),
+    ('A100', 8,  973.973/564.584,   '#2ca02c', 'D'),
+    ('A100', 12, 739.379/481.042,   '#2ca02c', 'D'),
+]
 
-for mname, mr, ms_val, mcol, mmk in measured_n4:
+for mname, mr, ms_val, mcol, mmk in measured_n4 + measured_a100:
     ax3.plot(mr, ms_val, mmk, color=mcol, ms=10, zorder=6,
              markeredgecolor='k', markeredgewidth=1.0)
 
@@ -268,6 +312,8 @@ ax3.plot([], [], 'h', color='#d62728', ms=9, markeredgecolor='k',
          markeredgewidth=1.0, label='H100 measured')
 ax3.plot([], [], 's', color='#8c564b', ms=8, markeredgecolor='k',
          markeredgewidth=1.0, label='A40 measured')
+ax3.plot([], [], 'D', color='#2ca02c', ms=8, markeredgecolor='k',
+         markeredgewidth=1.0, label='A100 measured')
 
 ax3.fill_between(r_range, 0.3, 1.0, alpha=0.03, color='steelblue')
 ax3.text(50, 0.55, 'CPU faster', fontsize=10, color='steelblue',
@@ -280,7 +326,6 @@ ax3.set_yscale('log')
 ax3.set_xlim(1, 100)
 ax3.set_ylim(0.3, 3.5)
 # Use explicit tick values for readability on log scale
-from matplotlib.ticker import ScalarFormatter, NullFormatter, FixedLocator
 ax3.xaxis.set_major_formatter(ScalarFormatter())
 ax3.xaxis.set_minor_formatter(NullFormatter())
 ax3.yaxis.set_major_locator(FixedLocator([0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]))
@@ -291,7 +336,7 @@ ax3.text(0.03, 0.90, '(c) Speedup vs $r$',
          transform=ax3.transAxes, fontsize=13, fontweight='bold',
          va='top', ha='left')
 ax3.legend(fontsize=5.5, loc='lower left',
-           bbox_to_anchor=(0.02, 0.02), ncol=2)
+           bbox_to_anchor=(0.02, 0.02), ncol=3)
 ax3.grid(True, alpha=0.3, which='both')
 
 fig.tight_layout()
@@ -302,9 +347,13 @@ fig.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/fig_gpu_mg_model.png',
 print("\nSaved fig_gpu_mg_model.pdf/png")
 
 # === Validation ===
-print(f"\n{'Card':<6s} {'r':>3s} {'S_meas':>8s} {'S_model':>8s} {'err':>6s}")
+print(f"\n{'Card':<10s} {'r':>3s} {'S_meas':>8s} {'S_model':>8s} {'err':>6s}")
 for mname, mr, ms_val, _, _ in measured_n4:
     bv = b_h100_fit if mname == 'H100' else b_a40_fit
     sm = S_r_model(mr, bv)
     err = (sm - ms_val) / ms_val * 100
-    print(f"{mname:<6s} {mr:>3d} {ms_val:>8.3f} {sm:>8.3f} {err:>+5.1f}%")
+    print(f"{mname:<10s} {mr:>3d} {ms_val:>8.3f} {sm:>8.3f} {err:>+5.1f}%")
+for mname, mr, ms_val, _, _ in measured_a100:
+    sm = S_r_a100_serial(mr)
+    err = (sm - ms_val) / ms_val * 100
+    print(f"{mname:<10s} {mr:>3d} {ms_val:>8.3f} {sm:>8.3f} {err:>+5.1f}%")

@@ -1873,10 +1873,55 @@ $T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s).
 Separate benchmarks on A40~GPUs ($N_{\mathrm{SM}} = 84$) at $r = 4$
 and $r = 8$ confirm this scaling within $5\,\mathrm{per\,cent}$ for the
 4-rank configuration (Fig.~\ref{fig:gpu_mg_model}c, filled squares).
+
+To validate the model on a different hardware platform, we repeat
+the $r$-sweep benchmark on A100~SXM4 GPUs ($N_{\mathrm{SM}} = 108$,
+80\,GB HBM2e, PCIe Gen4).  The A100 node has a faster host CPU, so
+$T_{\mathrm{CPU}}(r)$ is recalibrated independently.  Fitting
+equations~(\ref{eq:gpu_model})--(\ref{eq:gpu_model_r}) to the A100
+data yields $a = 0.354$ (within 1.5\,per\,cent of the H100 value
+$a = 0.359$), confirming that the CPU-fixed fraction is a
+hardware-independent property of the MG algorithm.  The A100 data
+span $r = 4$--$12$ and are reproduced by the fitted curve within
+1\,per\,cent (Fig.~\ref{fig:gpu_mg_model}c, green diamonds).
+Notably, the A100 MG~AMR speedup reaches $2.06\times$ at $r = 4$,
+exceeding the H100 value of $2.00\times$, because the A100's
+HBM2e memory subsystem (2\,TB/s) provides higher effective per-SM
+throughput for the memory-intensive AMR stencil than the simple
+$1/N_{\mathrm{SM}}$ scaling from H100 predicts---the fitted kernel
+time $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ is 37\,per\,cent faster
+than the SM-count extrapolation.
+
+Table~\ref{tab:a100_rsweep} summarises the A100 $r$-sweep results.
+The GPU speedup peaks at $r = 4$ ($1.49\times$ overall, $2.06\times$
+MG~AMR) and decreases monotonically through $r = 12$ ($1.09\times$
+overall).  At $r = 16$ ($4 \times 16 = 64$ threads), CPU
+oversubscription degrades both modes, breaking the trend.
+
+\begin{table}
+\centering
+\caption{GPU $r$-sweep benchmark on A100~SXM4 (4~ranks, 3~coarse
+steps, Cosmo1024).  Speedup is GPU vs CPU-only at each~$r$.}
+\label{tab:a100_rsweep}
+\footnotesize
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+$r$ & CPU & GPU & Speedup & MG CPU & MG GPU \\
+    & (s) & (s) &         & (s)    & (s)    \\
+\midrule
+ 4 & 2424 & 1624 & $1.49\times$ & 1663 &  808 \\
+ 6 & 1924 & 1442 & $1.33\times$ & 1237 &  658 \\
+ 8 & 1623 & 1341 & $1.21\times$ &  974 &  565 \\
+12 & 1353 & 1246 & $1.09\times$ &  739 &  481 \\
+16 & 1803 & 1562 & $1.15\times$ &  962 &  573 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 Our benchmark configuration $r = 8$ yields $S = 1.70$ on H100 and
-sits on the slowly declining branch past the optimum, indicating
-that a system with a higher GPU-to-CPU ratio (fewer threads per GPU)
-would benefit more from GPU offloading.
+$S = 1.73$ on A100, both sitting on the slowly declining branch past
+the optimum, indicating that a system with a higher GPU-to-CPU ratio
+(fewer threads per GPU) would benefit more from GPU offloading.
 
 \begin{figure*}
 \centering
@@ -1890,12 +1935,13 @@ the CPU-only baseline (dashed) and the infinite-bandwidth limit
 limit of $1.95\times$ is set by the Amdahl fraction of
 CPU-bound work.
 \textit{(c)}: speedup as a function of OMP threads per GPU $r$
-(equation~\ref{eq:gpu_model_r}).  Curves for different GPU cards use
-$T_{\mathrm{GPU}}^{\mathrm{kernel}} \propto 1/N_{\mathrm{SM}}$
-(SM-count scaling, see text).  The current benchmark ($r = 8$,
-red star) sits past the optimum $r \approx 4$.  Filled markers
-show measured MG~AMR speedups on H100~NVL and A40 at $r = 4$ and $8$
-(two data points per card from 2-rank and 4-rank configurations).}
+(equation~\ref{eq:gpu_model_r}).  Solid and dashed curves show the
+serial (single-stream) and overlap (multi-stream) models,
+respectively.  Filled markers show measured MG~AMR speedups:
+hexagons for H100~NVL, squares for A40 (both on the same node),
+and diamonds for A100~SXM4 (separate node with independently
+calibrated $T_{\mathrm{CPU}}(r)$, see text).  The A100 curve
+is fitted from measurements at $r = 4$--$12$.}
 \label{fig:gpu_mg_model}
 \end{figure*}
 
@@ -1909,8 +1955,10 @@ the GPU-dispatch threshold.  A net speedup beyond ${\sim}\,2\times$
 would therefore require overlapping communication with computation
 or reducing the halo-exchange frequency.
 Nevertheless, the current hybrid approach already provides a
-worthwhile $1.7\times$ MG speedup on commodity PCIe hardware,
-reducing the total simulation time by 17\,per\,cent.
+worthwhile $1.7\times$ MG speedup on both H100 and A100 GPUs at
+$r = 8$, with the A100 reaching $2.1\times$ at $r = 4$,
+reducing the total simulation time by 17--33\,per\,cent depending
+on the GPU-to-CPU ratio.
 
 
 % ===================================================================
