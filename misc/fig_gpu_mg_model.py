@@ -264,8 +264,8 @@ print(f"{'A100 SXM4':<12s} {_B_a100_eff:>6.1f} {108:>4d} {_Tk_a100:>7.1f} {_b_a1
 # Break-even and ceiling
 ax3.axhline(1.0, color='steelblue', ls='-', lw=0.8, alpha=0.4)
 ax3.axhline(S_ceiling, color='k', ls=':', lw=1.0, alpha=0.4)
-ax3.text(1.1, S_ceiling * 1.06, f'$1/a = {S_ceiling:.2f}\\times$',
-         fontsize=8, color='k', alpha=0.6, va='bottom')
+ax3.text(1.1, S_ceiling * 0.96, f'$1/a = {S_ceiling:.2f}\\times$',
+         fontsize=8, color='k', alpha=0.6, va='top')
 
 # Legend entries for serial vs overlap
 ax3.plot([], [], 'k-', lw=1.5, label='serial (single stream)')
@@ -322,22 +322,18 @@ ax3.text(50, 0.55, 'CPU faster', fontsize=10, color='steelblue',
 ax3.set_xlabel('OMP Threads per GPU ($r$)', fontsize=13)
 ax3.set_ylabel('Speedup vs CPU-only', fontsize=13)
 ax3.set_xscale('log')
-ax3.set_yscale('log')
 ax3.set_xlim(1, 100)
-ax3.set_ylim(0.3, 3.5)
-# Use explicit tick values for readability on log scale
+ax3.set_ylim(0.3, 3.0)
 ax3.xaxis.set_major_formatter(ScalarFormatter())
 ax3.xaxis.set_minor_formatter(NullFormatter())
-ax3.yaxis.set_major_locator(FixedLocator([0.3, 0.5, 0.7, 1.0, 1.5, 2.0, 2.5, 3.0]))
-ax3.yaxis.set_major_formatter(ScalarFormatter())
-ax3.yaxis.set_minor_formatter(NullFormatter())
 ax3.tick_params(labelsize=11)
-ax3.text(0.03, 0.90, '(c) Speedup vs $r$',
+ax3.text(0.03, 0.97, '(c) Speedup vs $r$',
          transform=ax3.transAxes, fontsize=13, fontweight='bold',
          va='top', ha='left')
 ax3.legend(fontsize=5.5, loc='lower left',
-           bbox_to_anchor=(0.02, 0.02), ncol=3)
-ax3.grid(True, alpha=0.3, which='both')
+           bbox_to_anchor=(0.02, 0.02), ncol=3,
+           labelspacing=0.8, columnspacing=1.0)
+ax3.grid(True, alpha=0.3)
 
 fig.tight_layout()
 fig.savefig('/gpfs/kjhan/Hydro/CUBE_HR5/code_cube/misc/fig_gpu_mg_model.pdf',

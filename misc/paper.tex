@@ -1752,9 +1752,9 @@ dominates the remaining runtime.
 \label{sec:hybrid_mg}
 
 We extend the GPU acceleration to the multigrid (MG) Poisson solver.
-All four V-cycle kernels---red-black Gauss--Seidel smoothing,
-residual computation, restriction, and interpolation---are implemented
-as CUDA kernels, with the GPU-side data (\code{phi}, \code{f},
+All four V-cycle kernels such as red-black Gauss--Seidel smoothing,
+residual computation, restriction, and interpolation, are implemented
+as CUDA kernels with the GPU-side data (\code{phi}, \code{f},
 neighbour arrays) totalling approximately 6.4\,GB.
 A \emph{ghost-zone-only} exchange transferring only the boundary cells
 between host and device instead of the full \code{phi} array reduces
@@ -1797,8 +1797,8 @@ Speedup    & $1.21\times$ & $1.70\times$ & --- & $0.69\times$ & --- \\
 
 The multigrid Poisson solver on AMR levels is the dominant
 beneficiary of GPU offloading since the MG~AMR component drops from
-1094\,s to 643\,s, a $1.70\times$ speedup that accounts for the
-entire net improvement.  The Godunov hydrodynamics solver, by
+1094\,s to 643\,s, a substantial speedup of 1.70 times that accounts for the
+entire net improvement.  However, the Godunov hydrodynamics solver, by
 contrast, is \emph{slower} on the GPU (181\,s~$\to$~263\,s).
 The stencil gather and scatter kernels execute efficiently on the
 device, but the per-level \code{cudaMemcpy} of the full mesh
@@ -1846,7 +1846,7 @@ And the last, in the \textit{Compute-limited} ($B \gtrsim 100$\,GB/s), the speed
       ($B \approx 450$\,GB/s) reaches only $1.94\times$, indicating
       that further bandwidth improvements yield diminishing returns.
 
-However, equation~(\ref{eq:gpu_model}) was evaluated at a fixed thread count $r = 8$.  Since GPU mode dedicates one thread to device management, the effective comparison is $(r{-}1)$ CPU threads plus one GPU versus $r$ CPU threads.  Defining the total serial MG~AMR work as $C_{\mathrm{total}} = r \, T_{\mathrm{CPU}}(r)$ and the serial CPU-fixed work as $C_{\mathrm{fixed}} = (r{-}1)\, T_{\mathrm{CPU}}^{\mathrm{fixed}}$, the generalised speedup ($S(r,B)\equiv T_\mathrm{CPU}/T_\mathrm{MG}$ becomes
+However, equation~(\ref{eq:gpu_model}) was evaluated at a fixed thread count $r = 8$.  Since GPU mode dedicates one thread to device management, the effective comparison is $(r{-}1)$ CPU threads plus one GPU versus $r$ CPU threads.  Defining the total serial MG~AMR work as $C_{\mathrm{total}} = r \, T_{\mathrm{CPU}}(r)$ and the serial CPU-fixed work as $C_{\mathrm{fixed}} = (r{-}1)\, T_{\mathrm{CPU}}^{\mathrm{fixed}}$, the generalised speedup ($S(r,B)\equiv T_\mathrm{CPU}/T_\mathrm{MG}(B)$) becomes
 \begin{equation} 
 S(r, B) = \frac{C_{\mathrm{total}} / r}
   {C_{\mathrm{fixed}} / (r{-}1) \;+\; T_{\mathrm{GPU}}^{\mathrm{kernel}}
@@ -1863,7 +1863,7 @@ large $r$ the GPU overhead exceeds the kernel saving.
 The card-dependent quantity is $T_{\mathrm{GPU}}^{\mathrm{kernel}}$.
 Because the AMR multigrid stencil accesses octree data through
 irregular, pointer-chasing patterns, it does not achieve peak HBM
-streaming bandwidth; instead, the effective throughput scales with
+streaming bandwidth. Instead, the effective throughput scales with
 the number of streaming multiprocessors (SMs), which determines
 the degree of memory-level parallelism available to hide access
 latency.  Accordingly, we set
@@ -1872,23 +1872,23 @@ calibrated from the H100~NVL ($N_{\mathrm{SM}} = 132$,
 $T_{\mathrm{GPU}}^{\mathrm{kernel}} = 178$\,s).
 Separate benchmarks on A40~GPUs ($N_{\mathrm{SM}} = 84$) at $r = 4$
 and $r = 8$ confirm this scaling within $5\,\mathrm{per\,cent}$ for the
-4-rank configuration (Fig.~\ref{fig:gpu_mg_model}c, filled squares).
+4-rank configuration (check filled squares in Panel (c) of Fig.~\ref{fig:gpu_mg_model}).
 
 To validate the model on a different hardware platform, we repeat
 the $r$-sweep benchmark on A100~SXM4 GPUs ($N_{\mathrm{SM}} = 108$,
-80\,GB HBM2e, PCIe Gen4).  The A100 node has a faster host CPU, so
+80\,GB HBM2e, PCIe Gen4).  Because the A100 node has a faster host CPU, 
 $T_{\mathrm{CPU}}(r)$ is recalibrated independently.  Fitting
 equations~(\ref{eq:gpu_model})--(\ref{eq:gpu_model_r}) to the A100
 data yields $a = 0.354$ (within 1.5\,per\,cent of the H100 value
 $a = 0.359$), confirming that the CPU-fixed fraction is a
 hardware-independent property of the MG algorithm.  The A100 data
-span $r = 4$--$12$ and are reproduced by the fitted curve within
-1\,per\,cent (Fig.~\ref{fig:gpu_mg_model}c, green diamonds).
+span $r = 4$ and 12 and are reproduced by the fitted curve within
+1\,per\,cent (green diamonds in Panel (c) of Fig.~\ref{fig:gpu_mg_model}).
 Notably, the A100 MG~AMR speedup reaches $2.06\times$ at $r = 4$,
 exceeding the H100 value of $2.00\times$, because the A100's
 HBM2e memory subsystem (2\,TB/s) provides higher effective per-SM
 throughput for the memory-intensive AMR stencil than the simple
-$1/N_{\mathrm{SM}}$ scaling from H100 predicts---the fitted kernel
+$1/N_{\mathrm{SM}}$ scaling from H100 predicts so that the fitted kernel
 time $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ is 37\,per\,cent faster
 than the SM-count extrapolation.
 
@@ -1927,38 +1927,94 @@ the optimum, indicating that a system with a higher GPU-to-CPU ratio
 \centering
 \includegraphics[width=\textwidth]{fig_gpu_mg_model.pdf}
 \caption{Multigrid Poisson GPU performance model.
-\textit{(a)}: MG AMR wall time as a function of effective
+\textit{(a)}: MG AMR wall-clock time as a function of effective
 CPU--GPU bandwidth $B$ (equation~\ref{eq:gpu_model}), compared with
 the CPU-only baseline (dashed) and the infinite-bandwidth limit
 (dotted).  The red star marks the measured H100~NVL data point.
 \textit{(b)}: corresponding speedup over CPU-only.  The asymptotic
 limit of $1.95\times$ is set by the Amdahl fraction of
 CPU-bound work.
-\textit{(c)}: speedup as a function of OMP threads per GPU $r$
-(equation~\ref{eq:gpu_model_r}).  Solid and dashed curves show the
+\textit{(c)}: speedup as a function of $r$ (number of OMP threads per GPU)
+(see eq. \ref{eq:gpu_model_r}).  Solid and dashed curves show the
 serial (single-stream) and overlap (multi-stream) models,
 respectively.  Filled markers show measured MG~AMR speedups:
 hexagons for H100~NVL, squares for A40 (both on the same node),
 and diamonds for A100~SXM4 (separate node with independently
 calibrated $T_{\mathrm{CPU}}(r)$, see text).  The A100 curve
-is fitted from measurements at $r = 4$--$12$.}
+is fitted from measurements at $r = 4$ \& $12$.}
 \label{fig:gpu_mg_model}
 \end{figure*}
 
-All V-cycle arithmetic---smoothing, residual, restriction, and
-interpolation---already executes on the GPU
+All V-cycle arithmetic such as smoothing, residual, restriction, and
+interpolation, already executes on the GPU
 (Appendix~\ref{app:vcycle}).  The irreducible CPU-bound fraction
 (${\sim}\,35$\,per\,cent) is dominated by MPI halo exchanges
 ({\sc isend}/{\sc irecv} + {\sc waitall}, ${\sim}\,10$ calls per
 V-cycle iteration) and by the coarse-level solve that falls below
-the GPU-dispatch threshold.  A net speedup beyond ${\sim}\,2\times$
-would therefore require overlapping communication with computation
-or reducing the halo-exchange frequency.
-Nevertheless, the current hybrid approach already provides a
-worthwhile $1.7\times$ MG speedup on both H100 and A100 GPUs at
-$r = 8$, with the A100 reaching $2.1\times$ at $r = 4$,
-reducing the total simulation time by 17--33\,per\,cent depending
-on the GPU-to-CPU ratio.
+the GPU-dispatch threshold.  Nevertheless, the current hybrid
+approach already provides a worthwhile $1.7\times$ MG speedup on
+both H100 and A100 GPUs at $r = 8$, with the A100 reaching
+$2.1\times$ at $r = 4$, reducing the total simulation time by
+17--33\,per\,cent depending on the GPU-to-CPU ratio.
+
+\subsubsection{GH200 extrapolation}
+
+The NVIDIA GH200 Grace Hopper superchip pairs an H100 GPU
+($N_{\mathrm{SM}} = 132$) with a 72-core Grace ARM CPU via
+NVLink-C2C ($B \approx 450$\,GB/s), placing it firmly in the
+compute-limited regime of Panel (a) \& (b) of Figure \ref{fig:gpu_mg_model}.
+Panels~(a) and (b) predict that the GH200 achieves
+$1.94\times$ MG speedup at $r = 8$ (nearly the asymptotic limit
+of $1.95\times$) because the NVLink-C2C bandwidth virtually
+eliminates the PCIe transfer term
+$V_{\mathrm{PCIe}}/B$ in equation~(\ref{eq:gpu_model}).
+
+However, the GH200's default operating set is $r = 72$ (one GPU per 72~CPU cores), which lies deep on the declining branch of the $S(r)$ curve.  At such large $r$, the per-thread CPU workload $T_{\mathrm{CPU}}(r)$ is small, yet the GPU kernel time $T_{\mathrm{GPU}}^{\mathrm{kernel}}$ remains so fixed that the GPU contribution becomes a bottleneck rather than an accelerator.  The serial (single-stream) model predicts only $S(72) = 1.15\times$ for the GH200 (the purple marker in Panel (c) of Fig. \ref{fig:gpu_mg_model}), a marginal improvement.
+
+However, multi-stream pipelining recovers much of this loss.  When GPU
+kernel execution overlaps with the CPU-fixed work, the effective
+GPU time reduces from
+$a \, T_{\mathrm{CPU}} + T_{\mathrm{GPU}}^{\mathrm{kernel}}$
+to $\max(a \, T_{\mathrm{CPU}},\;
+T_{\mathrm{GPU}}^{\mathrm{kernel}})$, yielding an overlap
+speedup of $S_{\mathrm{overlap}}(72) = 2.01\times$ for the
+GH200 (dashed curve).  This illustrates that on high-$r$
+platforms such as the GH200, multi-stream overlap is not merely
+an optimization but a prerequisite for the GPU offloading to
+remain beneficial.
+
+\subsubsection{Pathway to higher GPU speedup}
+
+The performance model (equation~\ref{eq:gpu_model}) shows that
+$T_{\mathrm{CPU}}^{\mathrm{fixed}}$ sets the ultimate speedup
+ceiling at $1/a \approx 2.8\times$.  Because
+$T_{\mathrm{CPU}}^{\mathrm{fixed}}$ is dominated by MPI halo
+exchanges that traverse the host CPU (first, device-to-host copy, \mpi\
+send/recv over InfiniBand, and finally host-to-device copy) a net speedup
+beyond ${\sim}\,2\times$ requires reducing or bypassing this
+CPU-mediated communication path.
+
+GPU-Direct RDMA (GDR) and NVLink-based GPU-to-GPU interconnects
+can eliminate the host-memory staging entirely by allowing
+\mpi\ libraries (e.g.\ NCCL, NVSHMEM, or CUDA-aware \mpi) to
+transfer halo data directly between GPU memory spaces.  On
+NVLink-connected multi-GPU nodes (e.g.\ DGX~A100, GH200), the
+inter-GPU bandwidth reaches 600--900\,GB/s, two orders of magnitude
+faster than the ${\sim}\,25$\,GB/s PCIe path that currently
+dominates $T_{\mathrm{CPU}}^{\mathrm{fixed}}$.  In this regime the
+halo exchange would overlap almost completely with the GPU stencil
+computation, effectively reducing $a$ toward the coarse-level solve
+fraction alone (${\lesssim}\,10$\,per\,cent).
+
+Implementing GPU-direct halo exchange requires (i)~allocating the
+AMR grid arrays in device memory as the primary copy, (ii)~packing
+ghost-zone buffers on the GPU, and (iii)~invoking CUDA-aware \mpi\
+or NCCL collective calls that operate directly on device pointers.
+While these changes are non-trivial for an octree AMR code with
+irregular communication patterns, they represent the most promising
+path toward achieving the ${\gtrsim}\,5\times$ MG speedups that the
+compute-limited regime of Fig.~\ref{fig:gpu_mg_model}(a) suggests
+is physically attainable.
 
 
 % ===================================================================
@@ -1976,26 +2032,24 @@ OMP-RAMSES \citep{Lee2021} and RAMSES-yOMP \citep{Han2026} introduced
 \mpi+OpenMP hybrid parallelism, \curamses\ extends this to a three-level
 \mpi+OpenMP+CUDA paradigm suited to the GPU-dominated architectures of
 current and upcoming exascale supercomputers. The main contributions
-are:
-
+are summarized as,
 \begin{enumerate}
 \item \textbf{Recursive \ksec\ domain decomposition}
   (Section~\ref{sec:ksection}): hierarchical \mpi\ exchange with
-  $\Olog{\sum_l k_l}$ communications, substituting all \code{MPI\_ALLTOALL}
-  calls, with memory-weighted load balancing reducing peak-to-mean
+  $\Olog{\sum_\ell k_\ell}$ communications substituting all \code{MPI\_ALLTOALL}
+  calls with memory-weighted load balancing reducing peak-to-mean
   imbalance to $<$5\%.
 
 \item \textbf{Morton key hash table} (Section~\ref{sec:morton}):
-  $\Olog{1}$ neighbour lookup replacing the \code{nbor} array, saving
-  $>$190\,MB per rank.
+  $\Olog{1}$ neighbour lookup replacing the \code{nbor} array saving over than 190\,MB per rank.
 
 \item \textbf{Memory optimizations}: on-demand allocation saves
-  $>$1\,GB per rank (Appendix~\ref{app:memory}).
+  over than 1\,GB per rank (Appendix~\ref{app:memory}).
 
 \item \textbf{Multigrid solver optimizations}
   (Section~\ref{sec:multigrid}): merged red-black sweeps and fused
-  residual-norm reduce MG communication by 44\,per\,cent, lowering
-  the Poisson share from 50 to 40\,per\,cent.
+  residual-norm reduce MG communication by 44 \% lowering
+  the Poisson share from 50 to 40 \%.
 
 \item \textbf{FFTW3 direct Poisson solver} (Section~\ref{sec:fftw3}):
   $8.3\times$ speedup at the base level with sparse P2P exchange.
@@ -2025,19 +2079,19 @@ within roundoff.  The sole exception is the merged red-black sweep
 values at inter-sweep ghost zones, introducing a 0.5\,per\,cent shift
 in $e_{\rm cons}$ relative to the standard sequential sweep.  This shift
 is comparable to the effect of changing the domain decomposition itself
-and does not grow with integration time: the merged sweep is algebraically
+and does not grow with integration time. The merged sweep is algebraically
 equivalent to one full Gauss--Seidel iteration with a slightly different
 update ordering, and the V-cycle converges to the same residual tolerance
-regardless.  The use of a deterministic, cell-index-seeded random
-number generator ensures that star formation stochasticity is
+regardless.  We have used a deterministic, cell-index-seeded random
+number generator, which ensures that star formation stochasticity is
 independent of the \dd\ and thread scheduling.
 
 The techniques presented here --- Morton hash table, \ksec\
 decomposition, spatial binning, and auto-tuning \mpi\ backends --- are
 general and applicable to other octree AMR codes beyond \ramses.
-The FFTW3 base-level solver opens the door to modified-gravity
+The FFTW3 base-level solver opens the door to non-standard
 cosmologies (e.g.\ massive neutrinos, coupled dark energy) via
-Fourier-space transfer functions, without altering the real-space AMR
+Fourier-space transfer functions without altering the real-space AMR
 infrastructure.
 
 The GPU acceleration experiment (Section~\ref{sec:hybrid}) demonstrates
@@ -2048,24 +2102,24 @@ codes.  The MG Poisson solver benefits from GPU offloading
 \code{cudaMemcpy} of the full 23\,GB mesh negates the kernel speedup.
 The net overall improvement of $1.21\times$ is modest, and a
 generalised performance model (equation~\ref{eq:gpu_model_r}) shows
-that the speedup is sensitive to the CPU-to-GPU thread ratio $r$:
-the current benchmark ($r = 8$) sits past the optimum of $r \approx 4$.
+that the speedup is sensitive to the CPU-to-GPU thread ratio $r$.
+The current benchmark ($r = 8$) sits past the optimum of $r \approx 4$.
 Notably, the AMR stencil kernel throughput scales with the number
-of SMs rather than peak HBM bandwidth, because the irregular octree
-access pattern is latency-bound; this scaling is confirmed by
-independent A40 benchmarks within 5\,per\,cent (Fig.~\ref{fig:gpu_mg_model}c).
+of SMs of a GPU card rather than peak HBM bandwidth of it because the irregular octree
+access pattern is latency-bound. This scaling is confirmed by
+independent A40 benchmarks within 5\,per\,cent (see Panel (c) of Fig.~\ref{fig:gpu_mg_model}).
 Achieving efficient GPU utilisation for the full AMR V-cycle remains an
 open challenge requiring device-residency of the restriction,
 prolongation, and coarse-level solve operations.
 
 Strong scaling on a single 64-core node reaches $33.9\times$ speedup
-(53\,per\,cent parallel efficiency), while OpenMP thread scaling
+(53\,per\,cent parallel efficiency) while OpenMP thread scaling
 achieves $5.8\times$ with 16 threads per rank.  Multi-node strong
 scaling on the Cosmo1024 test ($3.6 \times 10^8$ grids,
 $1.15 \times 10^9$ particles) achieves $26.5\times$ speedup from 1
-to 32~nodes ($83\%$ parallel efficiency), with near-ideal scaling up
+to 32~nodes ($83\%$ parallel efficiency) with near-ideal scaling up
 to 16~nodes ($98\%$).  The variable-$\nrank$
-restart capability, supporting both HDF5 and binary formats, provides
+restart capability supporting both HDF5 and binary formats, provides
 operational flexibility for production campaigns where hardware
 availability changes between runs.
 
@@ -2647,27 +2701,46 @@ values are shown where applicable.}
 \toprule
 Parameter & Namelist block & Type & Default & Description \\
 \midrule
+\multicolumn{5}{l}{\textit{Domain decomposition \& load balancing}} \\
 \code{ordering}        & \code{\&RUN\_PARAMS}   & string  & \code{'hilbert'} & \dd\ ordering (\code{'hilbert'} or \code{'ksection'}) \\
-\code{use\_fftw}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable FFTW3 direct Poisson solver at base level \\
 \code{exchange\_method} & \code{\&RUN\_PARAMS}  & string  & \code{'auto'}    & MPI exchange backend (\code{'auto'}, \code{'p2p'}, \code{'ksection'}) \\
-\code{gpu\_hydro}      & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for hydrodynamics \\
-\code{gpu\_poisson}    & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for MG Poisson solver \\
-\code{gpu\_fft}        & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for FFT solver \\
-\code{gpu\_sink}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable GPU dispatch for sink particle routines \\
-\code{memory\_balance} & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & Enable memory-weighted load balancing \\
-\midrule
-\code{mem\_weight\_grid} & \code{\&AMR\_PARAMS} & integer & auto             & Memory cost per grid (0\,=\,auto from \code{nvar}; $>0$\,=\,override) \\
+\code{memory\_balance} & \code{\&RUN\_PARAMS}   & logical & \code{.true.}   & Enable memory-weighted load balancing \\
+\code{mem\_weight\_grid} & \code{\&AMR\_PARAMS} & integer & auto             & Memory cost per grid (0\,=\,auto; $>0$\,=\,override) \\
 \code{mem\_weight\_part} & \code{\&AMR\_PARAMS} & integer & 12               & Memory cost per particle \\
 \code{mem\_weight\_sink} & \code{\&AMR\_PARAMS} & integer & 500              & Computational cost per sink particle \\
 \code{time\_balance\_alpha} & \code{\&AMR\_PARAMS} & real & 0                & Hybrid time-weight factor for load balancing \\
 \midrule
-\code{q\_refine\_holdback} & \code{\&REFINE\_PARAMS} & logical & \code{.false.} & Enable graduated $\ell_{\max}$ (proper-distance holdback) \\
+\multicolumn{5}{l}{\textit{GPU acceleration}} \\
+\code{gpu\_hydro}      & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & GPU dispatch for hydrodynamics \\
+\code{gpu\_poisson}    & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & GPU dispatch for MG Poisson solver \\
+\code{gpu\_fft}        & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & GPU dispatch for FFT solver \\
+\code{gpu\_sink}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & GPU dispatch for sink particle routines \\
+\code{gpu\_auto\_tune} & \code{\&RUN\_PARAMS}   & logical & \code{.true.}    & Auto-tune CPU vs GPU per level (disable for benchmarks) \\
+\code{n\_cuda\_streams}& \code{\&RUN\_PARAMS}   & integer & 1                & Number of CUDA streams (max=16) \\
 \midrule
-\code{cooling\_method}  & \code{\&PHYSICS\_PARAMS} & string & \code{'implicit'} & Cooling integration method (\code{'implicit'} or \code{'exact'}) \\
+\multicolumn{5}{l}{\textit{Solvers}} \\
+\code{use\_fftw}       & \code{\&RUN\_PARAMS}   & logical & \code{.false.}   & FFTW3 direct Poisson solver at base level \\
+\midrule
+\multicolumn{5}{l}{\textit{I/O \& job control}} \\
+\code{informat}        & \code{\&OUTPUT\_PARAMS} & string & \code{'original'} & Input format (\code{'original'} or \code{'hdf5'}) \\
+\code{outformat}       & \code{\&OUTPUT\_PARAMS} & string & \code{'original'} & Output format (\code{'original'} or \code{'hdf5'}) \\
+\code{output\_mode}    & \code{\&OUTPUT\_PARAMS} & integer & 0               & Output mode (0\,=\,standard, 1\,=\,hi-res sub-box) \\
+\code{varcpu\_chunk\_nfile} & \code{\&OUTPUT\_PARAMS} & integer & 0          & Chunked variable-CPU restart (0\,=\,all-at-once) \\
+\code{dump\_pk}        & \code{\&RUN\_PARAMS}    & logical & \code{.false.}  & Write $P(k)$ at each snapshot (requires FFT solver) \\
+\code{jobcontrolfile}  & \code{\&RUN\_PARAMS}    & string  & ---             & Runtime job control file for graceful stop / extra output \\
+\code{walltime\_hrs}   & \code{\&RUN\_PARAMS}    & real    & $-1$            & Job wallclock limit [hours]; $-1$ disables timed dump \\
+\code{minutes\_dump}   & \code{\&RUN\_PARAMS}    & real    & 1               & Dump output this many minutes before walltime expires \\
+\midrule
+\multicolumn{5}{l}{\textit{Sub-grid physics}} \\
+\code{cooling\_method}  & \code{\&PHYSICS\_PARAMS} & string & \code{'original'} & Cooling method (\code{'original'}, \code{'implicit'}, \code{'exact'}) \\
 \code{grackle\_table}   & \code{\&PHYSICS\_PARAMS} & string & ---              & Path to Grackle cooling table \\
+\midrule
+\multicolumn{5}{l}{\textit{Refinement \& floors}} \\
+\code{q\_refine\_holdback} & \code{\&REFINE\_PARAMS} & logical & \code{.false.} & Graduated $\ell_{\max}$ (proper-distance holdback) \\
 \bottomrule
 \end{tabular}
 \end{table*}
+
 
 
 \label{lastpage}

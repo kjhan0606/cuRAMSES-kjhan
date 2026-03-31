@@ -128,14 +128,6 @@ def plot_panel(ax_time, ax_spd, ncpu, elapsed, data, omp, title_prefix, xlabel):
                    bbox_to_anchor=(0.0, 0.87))
     ax_spd.grid(True, alpha=0.3, which='both')
 
-    # Annotate efficiency on last point
-    eff = spd_elapsed[-1] / ideal_spd[-1] * 100
-    ax_spd.annotate(f'{spd_elapsed[-1]:.1f}x ({eff:.0f}%)',
-                    xy=(ncpu[-1], spd_elapsed[-1]),
-                    xytext=(-10, -18), textcoords='offset points',
-                    fontsize=7, color='black', fontweight='bold',
-                    arrowprops=dict(arrowstyle='->', color='black', lw=0.8))
-
 # --- Cosmo512 (top row) ---
 plot_panel(axes[0,0], axes[0,1], ncpu_512, elapsed_512, data_512,
            omp_512, '(a)', r'$N_\mathrm{rank}$')

@@ -375,7 +375,7 @@ to ksection tree routing automatically.
 \end{quote}
 
 % ------------------------------------------------------------------
-\paramheader{memory\_balance}{logical}{.false.}
+\paramheader{memory\_balance}{logical}{.true.}
 \label{param:memory_balance}
 
 \begin{quote}
@@ -599,6 +599,68 @@ gpu_hydro   = .true.
 gpu_poisson = .true.
 gpu_fft     = .true.
 \end{lstlisting}
+
+% ------------------------------------------------------------------
+\paramheader{gpu\_auto\_tune}{logical}{.true.}
+\label{param:gpu_auto_tune}
+
+\begin{quote}
+Enable automatic CPU vs GPU selection on a per-level basis.  When
+\texttt{.true.}, the code benchmarks both CPU and GPU execution for
+each AMR level during the first few steps and selects the faster path
+for subsequent steps.  Set to \texttt{.false.}\ to force the
+\texttt{gpu\_*} flags to be obeyed unconditionally (useful for
+reproducible benchmarking).
+
+\apinote{The auto-tuner records timings in the first 3 calls per level.
+On PCIe-bandwidth-limited GPUs (e.g.\ A40), it typically selects CPU
+for levels with few grids and GPU for levels with many grids.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{n\_cuda\_streams}{integer}{1}
+\label{param:n_cuda_streams}
+
+\begin{quote}
+Number of CUDA streams for overlapping GPU kernel execution with MPI
+communication.  Multiple streams allow the GPU to execute kernels on
+one batch of grids while halo exchanges proceed for another batch.
+
+Valid range: 1--16 (capped by compile-time \texttt{MAX\_CUDA\_STREAMS}).
+For most workloads, $N_s = 4$--6 provides optimal overlap.  Values
+above 6 rarely improve performance and increase GPU memory usage.
+
+\apinote{Requires \paramref{gpu_poisson}\texttt{=.true.}\ or
+\paramref{gpu_hydro}\texttt{=.true.}.  When all GPU flags are
+\texttt{.false.}, this parameter is ignored.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{walltime\_hrs}{real(dp)}{$-1$}
+\label{param:walltime_hrs}
+
+\begin{quote}
+Wallclock time limit for the job in hours.  When set to a positive
+value, the code monitors elapsed wall time and writes a checkpoint
+snapshot \paramref{minutes_dump} minutes before the limit is reached,
+then exits gracefully.  Set to $-1$ to disable timed dumps.
+
+\apinote{Useful for HPC batch jobs with strict time limits.  The code
+calls \texttt{MPI\_WTIME} and broadcasts the elapsed time from rank~0.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{minutes\_dump}{real(dp)}{1.0}
+\label{param:minutes_dump}
+
+\begin{quote}
+Safety margin in minutes before the walltime limit.  When
+\paramref{walltime_hrs} is active, a checkpoint is written when
+$t_{\text{elapsed}} > \texttt{walltime\_hrs} \times 60 -
+\texttt{minutes\_dump}$ minutes.
+
+Only effective when \paramref{walltime_hrs}~$> 0$.
+\end{quote}
 
 
 % ------------------------------------------------------------------
@@ -2411,6 +2473,401 @@ g_ext_mond   = 0d0, 0d0, 1d-9  ! external field (optional)
 
 
 %======================================================================
+\section{\texttt{\&SGS\_PARAMS} -- Sub-Grid Scale Turbulence}
+\label{sec:sgs_params}
+%======================================================================
+
+The SGS turbulence model tracks unresolved turbulent kinetic energy
+$e_{\rm sgs}$ as an additional conserved variable and feeds it back as
+turbulent pressure $P_{\rm turb} = \tfrac{2}{3}\,\rho\,e_{\rm sgs}$.
+\textbf{Requires} compilation with \texttt{NVAR=12}
+(\texttt{make HDF5=1 USE\_FFTW=1 NVAR=12}) and \paramref{use_sgs}
+\texttt{=.true.}\ in \texttt{\&RUN\_PARAMS}.
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_C\_prod}{real(dp)}{0.0}
+\label{param:sgs_C_prod}
+
+\begin{quote}
+Gravitational production coefficient.  Controls the rate at which
+resolved gravitational compression injects energy into the SGS
+reservoir: $\dot{e}_{\rm sgs,grav} = C_{\rm prod}\,\rho\,e_{\rm sgs}\,
+|\nabla\cdot\mathbf{v}|$ (compressive term only, $\nabla\cdot\mathbf{v}<0$).
+Set to 0 to disable gravitational SGS production.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_C\_diss}{real(dp)}{2.76}
+\label{param:sgs_C_diss}
+
+\begin{quote}
+Dissipation coefficient (analogous to $C_\varepsilon$ in the
+Smagorinsky--Lilly model).  Governs the analytical implicit dissipation:
+\[
+  \sigma_{\rm new} = \frac{\sigma_{\rm old}}
+  {1 + C_{\rm diss}\,\sigma_{\rm old}\,\Delta t \,/\, (3\,\Delta x)}
+\]
+where $\sigma = \sqrt{2\,e_{\rm sgs}}$.  The default 2.76 corresponds
+to $C_\varepsilon = 1.5$ in the Schmidt (2006) parameterisation.
+
+\apinote{Values significantly below 2.76 (e.g.\ 0.5) lead to weak
+dissipation and spurious SGS energy accumulation.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_C\_smag}{real(dp)}{0.10}
+\label{param:sgs_C_smag}
+
+\begin{quote}
+Smagorinsky coefficient for shear-production.  The SGS production from
+the resolved strain rate is:
+$\dot{e}_{\rm sgs,shear} = C_{\rm smag}^2\,\Delta x^2\,|S|^2\,\rho$,
+where $|S|$ is the resolved strain-rate magnitude.  Typical values
+range from 0.05 to 0.20.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_floor}{real(dp)}{$10^{-30}$}
+\label{param:sgs_floor}
+
+\begin{quote}
+Positivity floor for $e_{\rm sgs}$.  Prevents negative or zero SGS
+energy from causing floating-point errors in the $\sqrt{e_{\rm sgs}}$
+computation.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_cap}{real(dp)}{1.0}
+\label{param:sgs_cap}
+
+\begin{quote}
+Maximum allowed ratio $P_{\rm turb}/P_{\rm thermal}$.  When the SGS
+turbulent pressure exceeds this fraction of the thermal pressure, the
+SGS energy is capped to enforce
+$e_{\rm sgs} \le \tfrac{3}{2}\,\texttt{sgs\_cap}\,P_{\rm th}/\rho$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_e\_init}{real(dp)}{0.01}
+\label{param:sgs_e_init}
+
+\begin{quote}
+Initial $e_{\rm sgs}/e_{\rm thermal}$ ratio when restarting from a
+snapshot that was produced without the SGS model.  Each cell's SGS
+energy is initialised to $\texttt{sgs\_e\_init}\times e_{\rm int}$.
+Ignored when restarting from a snapshot that already contains SGS data.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{sgs\_hydro}{logical}{.false.}
+\label{param:sgs_hydro}
+
+\begin{quote}
+When \texttt{.true.}, add $P_{\rm turb}$ directly to the Riemann solver
+(full hydro coupling of SGS pressure).  When \texttt{.false.}, SGS
+feedback is applied only as a source term in the energy equation
+(source-only mode).
+
+\apinote{Full coupling (\texttt{.true.}) is physically more consistent
+but can increase numerical diffusion in regions with high
+$P_{\rm turb}/P_{\rm th}$.  Start with \texttt{.false.}\ for stability
+testing.}
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_sgs = .true.
+/
+
+&SGS_PARAMS
+sgs_C_prod  = 0.0      ! no gravitational production
+sgs_C_diss  = 2.76     ! C_epsilon = 1.5
+sgs_C_smag  = 0.10     ! Smagorinsky coefficient
+sgs_floor   = 1.0d-30
+sgs_cap     = 1.0
+sgs_e_init  = 0.01
+sgs_hydro   = .false.   ! source-only mode
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{\texttt{\&FR\_PARAMS} -- $f(R)$ Hu--Sawicki Gravity}
+\label{sec:fr_params}
+%======================================================================
+
+The $f(R)$ modified gravity module implements the Hu \& Sawicki (2007)
+model with chameleon screening.  A scalar field $f_R$ is solved on each
+AMR level via Newton--Gauss--Seidel red--black relaxation, and the
+resulting fifth force $\mathbf{F}_5 = c^2\,\nabla f_R / 2$ is added
+to the gravitational acceleration.
+
+\textbf{Mutual exclusion:} only one of \paramref{use_fR},
+\paramref{use_nDGP}, \paramref{use_mond} can be active at a time.
+
+% ------------------------------------------------------------------
+\paramheader{use\_fR}{logical}{.false.}
+\label{param:use_fR}
+
+\begin{quote}
+Enable $f(R)$ gravity.  Must be set in \texttt{\&RUN\_PARAMS}.
+When \texttt{.true.}, the code allocates the scalar field arrays
+(\texttt{scalar\_gr}, \texttt{scalar\_gr\_old}) in
+\texttt{poisson\_commons} and solves the scalar field equation at
+each Poisson step.
+
+\textbf{Requires} \paramref{poisson}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{fR0}{real(dp)}{$-10^{-6}$}
+\label{param:fR0}
+
+\begin{quote}
+Present-day $f(R)$ field amplitude $f_{R,0}$.  Must be negative.
+Common values: $-10^{-4}$ (strong), $-10^{-5}$ (intermediate),
+$-10^{-6}$ (weak, close to GR).  The Compton wavelength of the
+scalar field scales as $\lambda_C \propto \sqrt{|f_{R,0}|}$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{fR\_n}{integer}{1}
+\label{param:fR_n}
+
+\begin{quote}
+Power-law index $n$ in the Hu--Sawicki functional form:
+\[
+  f(R) = -m^2 \frac{c_1\,(R/m^2)^n}{c_2\,(R/m^2)^n + 1}
+\]
+where $m^2 = H_0^2\,\Omega_m$.  The standard choice is $n=1$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{n\_iter\_fR}{integer}{20}
+\label{param:n_iter_fR}
+
+\begin{quote}
+Maximum number of Newton--Gauss--Seidel iterations per AMR level for
+the $f_R$ scalar field solver.  Convergence is checked against
+\paramref{fR_eps} after each iteration.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{fR\_eps}{real(dp)}{$10^{-6}$}
+\label{param:fR_eps}
+
+\begin{quote}
+Convergence threshold for the $f_R$ solver.  Iteration stops when
+the relative change $|\Delta f_R|/|f_R| < \texttt{fR\_eps}$ (globally).
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_fR = .true.
+/
+
+&FR_PARAMS
+fR0       = -1.0d-5   ! intermediate strength
+fR_n      = 1          ! Hu-Sawicki n=1
+n_iter_fR = 20
+fR_eps    = 1.0d-6
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{\texttt{\&NDGP\_PARAMS} -- nDGP Braneworld Gravity}
+\label{sec:ndgp_params}
+%======================================================================
+
+The normal-branch DGP (nDGP) model implements Vainshtein screening
+via a nonlinear scalar field equation.  The fifth force is computed
+from the gradient of the scalar field using a diagonal-free
+approximation for the nonlinear term.
+
+\textbf{Mutual exclusion:} only one of \paramref{use_fR},
+\paramref{use_nDGP}, \paramref{use_mond} can be active at a time.
+
+% ------------------------------------------------------------------
+\paramheader{use\_nDGP}{logical}{.false.}
+\label{param:use_nDGP}
+
+\begin{quote}
+Enable nDGP braneworld gravity.  Must be set in \texttt{\&RUN\_PARAMS}.
+When \texttt{.true.}, the code solves for the DGP scalar field via
+Newton--Gauss--Seidel relaxation on each AMR level.
+
+\textbf{Requires} \paramref{poisson}\texttt{=.true.}\ and
+\paramref{cosmo}\texttt{=.true.}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{omega\_rc}{real(dp)}{0.25}
+\label{param:omega_rc}
+
+\begin{quote}
+Dimensionless crossover parameter $\Omega_{r_c} = 1/(4\,r_c^2\,H_0^2)$,
+where $r_c$ is the DGP crossover scale.  Smaller values correspond to
+weaker modifications of gravity.  The coupling function
+$\beta(a) = 1 + 2\,H(a)\,r_c\,(1 + \dot{H}/(3H^2))$ is computed
+internally from the Friedmann equation.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nDGP\_branch}{integer}{1}
+\label{param:nDGP_branch}
+
+\begin{quote}
+DGP branch selection:
+\begin{itemize}[nosep]
+  \item \texttt{1} --- normal branch (gravity is \emph{stronger} than GR).
+  \item \texttt{-1} --- self-accelerating branch (gravity is
+        \emph{weaker}; provides late-time acceleration without $\Lambda$).
+\end{itemize}
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{n\_iter\_nDGP}{integer}{20}
+\label{param:n_iter_nDGP}
+
+\begin{quote}
+Maximum number of Newton--Gauss--Seidel iterations per AMR level for
+the nDGP scalar field solver.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{nDGP\_eps}{real(dp)}{$10^{-6}$}
+\label{param:nDGP_eps}
+
+\begin{quote}
+Convergence threshold for the nDGP solver (same criterion as
+\paramref{fR_eps}).
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_nDGP = .true.
+/
+
+&NDGP_PARAMS
+omega_rc    = 0.25      ! crossover parameter
+nDGP_branch = 1         ! normal branch
+n_iter_nDGP = 20
+nDGP_eps    = 1.0d-6
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{\texttt{\&EDE\_PARAMS} -- Early Dark Energy}
+\label{sec:ede_params}
+%======================================================================
+
+The Early Dark Energy (EDE) model adds a non-negligible dark energy
+component at early times (before recombination), following
+Doran \& Robbers (2006).
+
+\textbf{Requires} \paramref{cosmo}\texttt{=.true.}
+
+% ------------------------------------------------------------------
+\paramheader{use\_ede}{logical}{.false.}
+\label{param:use_ede}
+
+\begin{quote}
+Enable Early Dark Energy in the Friedmann equation.  Must be set in
+\texttt{\&RUN\_PARAMS}.  When \texttt{.true.}, a constant EDE fraction
+$\Omega_{\rm ede}$ is injected around redshift \paramref{z_ede} with
+equation of state \paramref{w_ede}.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{omega\_ede}{real(dp)}{0.04}
+\label{param:omega_ede}
+
+\begin{quote}
+EDE energy density fraction $\Omega_{\rm ede}$ at the injection epoch.
+Typical constraints place this at $\lesssim 0.1$.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{z\_ede}{real(dp)}{3000}
+\label{param:z_ede}
+
+\begin{quote}
+Redshift at which EDE is injected.  The EDE component is most relevant
+around matter--radiation equality.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{w\_ede}{real(dp)}{0.333}
+\label{param:w_ede}
+
+\begin{quote}
+Equation of state $w_{\rm ede}$ of the EDE component.  A value of
+$1/3$ mimics radiation-like dilution.
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_ede = .true.
+/
+
+&EDE_PARAMS
+omega_ede = 0.04
+z_ede     = 3000.0
+w_ede     = 0.333
+/
+\end{lstlisting}
+
+
+%======================================================================
+\section{\texttt{\&COUPLED\_DE\_PARAMS} -- Coupled Dark Energy}
+\label{sec:coupled_de_params}
+%======================================================================
+
+The Coupled Dark Energy model introduces a direct coupling between
+dark matter and dark energy, modifying the DM equation of motion.
+
+\textbf{Requires} \paramref{cosmo}\texttt{=.true.}
+
+% ------------------------------------------------------------------
+\paramheader{use\_coupled\_de}{logical}{.false.}
+\label{param:use_coupled_de}
+
+\begin{quote}
+Enable dark matter--dark energy coupling.  Must be set in
+\texttt{\&RUN\_PARAMS}.  When \texttt{.true.}, the DM particles
+experience an additional fifth force proportional to
+$\beta_{\rm cde}$ times the gradient of the DE scalar field.
+\end{quote}
+
+% ------------------------------------------------------------------
+\paramheader{beta\_cde}{real(dp)}{0.1}
+\label{param:beta_cde}
+
+\begin{quote}
+DM--DE coupling constant $\beta_{\rm cde}$.  Controls the strength of
+the interaction.  Values $\gtrsim 0.3$ are typically ruled out by
+structure formation constraints.
+\end{quote}
+
+\paragraph{Example configuration.}
+\begin{lstlisting}[language=Fortran]
+&RUN_PARAMS
+use_coupled_de = .true.
+/
+
+&COUPLED_DE_PARAMS
+beta_cde = 0.1
+/
+\end{lstlisting}
+
+
+%======================================================================
 \section{Complete Example: Cosmological Zoom-In}
 \label{sec:example}
 %======================================================================
@@ -2449,6 +2906,8 @@ nparttot  = 600000000
 noutput = 10
 aout = 0.05, 0.1, 0.15, 0.2, 0.3, 0.4, 0.5, 0.7, 0.85, 1.0
 foutput = 500
+informat  = 'hdf5'
+outformat = 'hdf5'
 /
 
 &INIT_PARAMS
@@ -2501,6 +2960,22 @@ sink_AGN       = .true.
 bondi          = .true.
 Mseed          = 1.0e5
 /
+
+! --- Optional: SGS Turbulence (requires NVAR=12) ---
+! &SGS_PARAMS
+! sgs_C_diss = 2.76
+! sgs_C_smag = 0.10
+! /
+! (also set use_sgs = .true. in &RUN_PARAMS)
+
+! --- Optional: f(R) Gravity ---
+! &FR_PARAMS
+! fR0       = -1.0d-5
+! fR_n      = 1
+! n_iter_fR = 20
+! fR_eps    = 1.0d-6
+! /
+! (also set use_fR = .true. in &RUN_PARAMS)
 
 ! --- Optional: Self-Interacting Dark Matter ---
 ! &SIDM_PARAMS
@@ -2623,6 +3098,34 @@ should be set consistently.
 \texttt{use\_mond}
   & \texttt{a0\_mond}, \texttt{mond\_type}, \texttt{n\_iter\_mond}, \texttt{mond\_eps}, \texttt{g\_ext\_mond}
   & MOND requires \texttt{poisson=.true.}; parameters in \texttt{\&MOND\_PARAMS} \\
+\addlinespace
+\texttt{use\_fR}
+  & \texttt{fR0}, \texttt{fR\_n}, \texttt{n\_iter\_fR}, \texttt{fR\_eps}
+  & $f(R)$ Hu--Sawicki; mutually exclusive with \texttt{use\_nDGP}, \texttt{use\_mond} \\
+\addlinespace
+\texttt{use\_nDGP}
+  & \texttt{omega\_rc}, \texttt{nDGP\_branch}, \texttt{n\_iter\_nDGP}, \texttt{nDGP\_eps}
+  & nDGP braneworld; mutually exclusive with \texttt{use\_fR}, \texttt{use\_mond} \\
+\addlinespace
+\texttt{use\_sgs}
+  & \texttt{sgs\_C\_diss}, \texttt{sgs\_C\_smag}, \texttt{sgs\_cap}, \texttt{sgs\_hydro}
+  & SGS turbulence; requires \texttt{NVAR=12} at compile time \\
+\addlinespace
+\texttt{gpu\_auto\_tune}
+  & \texttt{gpu\_hydro}, \texttt{gpu\_poisson}, \texttt{gpu\_fft}
+  & Auto-selects CPU or GPU per level; disable for benchmarks \\
+\addlinespace
+\texttt{n\_cuda\_streams}
+  & \texttt{gpu\_poisson}, \texttt{gpu\_hydro}
+  & Multi-stream overlap; effective only with GPU flags active \\
+\addlinespace
+\texttt{walltime\_hrs}
+  & \texttt{minutes\_dump}
+  & Timed checkpoint before job wallclock expires \\
+\addlinespace
+\texttt{informat}
+  & \texttt{outformat}, \texttt{varcpu\_chunk\_nfile}
+  & HDF5 I/O; \texttt{varcpu\_chunk\_nfile} for chunked restart \\
 \end{longtable}
 
 
