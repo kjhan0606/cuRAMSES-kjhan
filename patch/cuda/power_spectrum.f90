@@ -55,6 +55,13 @@ subroutine compute_power_spectrum(ilevel, filedir, nchar)
   real(dp) :: V_box, norm_fft
   real(dp) :: shot_noise
 
+  ! xi(r) — two-point correlation function via Hankel transform
+  real(dp) :: r_min_bin, r_max_bin, dr_log
+  real(dp) :: r_bin_center(NKBIN), r_bin_edge(NKBIN+1)
+  real(dp) :: xi_val(NKBIN), xi_r
+  real(dp) :: k_damp, gauss_w, sinc_kr, dk_i
+  integer :: jbin
+
   ! Physical units
   real(dp) :: boxlen_phys
 
@@ -238,7 +245,44 @@ subroutine compute_power_spectrum(ilevel, filedir, nchar)
   end if
 
   ! ================================================================
-  ! Step 6: Write P(k) output file (rank 0 only)
+  ! Step 6: Two-point correlation xi(r) via Hankel transform
+  ! xi(r) = 1/(2pi^2) * int [P(k)-Pshot] * W(k) * k^2 * sin(kr)/(kr) dk
+  ! W(k) = exp(-(k/k_damp)^2)  Gaussian to suppress ringing
+  ! ================================================================
+  r_min_bin = boxlen_phys / dble(fft_Nx)   ! grid cell size [Mpc/h]
+  r_max_bin = boxlen_phys / 2.0d0          ! half box [Mpc/h]
+  dr_log = (log10(r_max_bin) - log10(r_min_bin)) / dble(NKBIN)
+
+  do ibin = 1, NKBIN+1
+     r_bin_edge(ibin) = 10.0d0**(log10(r_min_bin) + dble(ibin-1) * dr_log)
+  end do
+  do ibin = 1, NKBIN
+     r_bin_center(ibin) = sqrt(r_bin_edge(ibin) * r_bin_edge(ibin+1))
+  end do
+
+  k_damp = k_nyq  ! Gaussian rolls off at Nyquist
+  xi_val = 0.0d0
+
+  if(myid == 1) then
+     do jbin = 1, NKBIN
+        xi_r = r_bin_center(jbin)
+        do ibin = 1, NKBIN
+           if(pk_cnt(ibin) < 0.5d0) cycle
+           pk_val = pk_sum(ibin) / pk_cnt(ibin) - shot_noise
+           dk_i   = k_bin_edge(ibin+1) - k_bin_edge(ibin)
+           gauss_w = exp(-(k_bin_center(ibin) / k_damp)**2)
+           sinc_kr = sin(k_bin_center(ibin) * xi_r) &
+                   / (k_bin_center(ibin) * xi_r)
+           xi_val(jbin) = xi_val(jbin) &
+                + pk_val * gauss_w * k_bin_center(ibin)**2 * sinc_kr * dk_i
+        end do
+        ! 1/(2*pi^2) = 2/twopi^2
+        xi_val(jbin) = xi_val(jbin) * 2.0d0 / twopi**2
+     end do
+  end if
+
+  ! ================================================================
+  ! Step 7: Write P(k) + xi(r) output file (rank 0 only)
   ! ================================================================
   if(myid == 1) then
      pk_filename = TRIM(filedir)//'pk_'//TRIM(nchar)//'.dat'
@@ -250,13 +294,14 @@ subroutine compute_power_spectrum(ilevel, filedir, nchar)
      write(ilun, '(A,I10)')    '# N_grid = ', fft_Nx
      write(ilun, '(A,I15)')    '# N_part = ', npart_all
      write(ilun, '(A,ES15.8)') '# shot_noise (Mpc/h)^3 = ', shot_noise
-     write(ilun, '(A)') '# k [h/Mpc]    P(k) [(Mpc/h)^3]    P(k)-Pshot    Nmodes'
+     write(ilun, '(A,ES15.8)') '# k_damp (h/Mpc) = ', k_damp
+     write(ilun, '(A)') '# k [h/Mpc]    P(k) [(Mpc/h)^3]    r [Mpc/h]    xi(r)    Nmodes'
 
      do ibin = 1, NKBIN
         if(pk_cnt(ibin) > 0.5d0) then
            pk_val = pk_sum(ibin) / pk_cnt(ibin)
-           write(ilun, '(4ES16.8)') k_bin_center(ibin), pk_val, &
-                pk_val - shot_noise, pk_cnt(ibin)
+           write(ilun, '(5ES16.8)') k_bin_center(ibin), pk_val, &
+                r_bin_center(ibin), xi_val(ibin), pk_cnt(ibin)
         end if
      end do
      close(ilun)
