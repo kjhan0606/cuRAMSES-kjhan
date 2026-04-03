@@ -275,10 +275,6 @@ subroutine adaptive_loop
               mstar_glob_old=mstar_tot_glob
               t_sfr_old=t
            endif
-           ! iSIDM excited fraction diagnostic
-           if(sidm .and. sidm_inelastic) then
-              call sidm_report_excited_fraction()
-           end if
            ! FPR diagnostic: per-level dx_phys and m_refine_eff/m_refine ratio
            if(dr_proper > 0.0d0 .and. cosmo) then
               call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)
@@ -295,6 +291,10 @@ subroutine adaptive_loop
               end do
            end if
         endif
+        ! iSIDM excited fraction diagnostic (must be outside myid==1 for MPI_ALLREDUCE)
+        if(sidm .and. sidm_inelastic) then
+           call sidm_report_excited_fraction()
+        end if
         ! SGS turbulence diagnostics
         if(use_sgs .and. isgs>0) then
            ! Collect local SGS statistics over leaf cells at levelmin
