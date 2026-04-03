@@ -4817,7 +4817,7 @@ subroutine kjhan_quenching(ilevel)
       ! Save next particle     <--- Very important !!!
       next_part=nextp(ipart)
       !if(idp(ipart).gt.0.and.tp(ipart).ne.0)then
-      if(tp(ipart).ne.0)then
+      if(tp(ipart)>0)then
          npart2=npart2+1
          tot_m=tot_m+mp(ipart)
          ave_u=ave_u+mp(ipart)*vp(ipart,1)

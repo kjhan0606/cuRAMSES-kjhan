@@ -37,6 +37,7 @@ module pm_commons
   real(dp),allocatable,dimension(:)  ::tp       ! Birth epoch
   real(dp),allocatable,dimension(:,:)::weightp  ! weight of cloud parts for sink accretion only
   real(dp),allocatable,dimension(:)  ::zp       ! Birth metallicity
+  real(dp),allocatable,dimension(:)  ::edp      ! Dark internal energy (aDM)
   integer ,allocatable,dimension(:)  ::nextp    ! Next particle in list
   integer ,allocatable,dimension(:)  ::prevp    ! Previous particle in list
   integer ,allocatable,dimension(:)  ::levelp   ! Current level of particle

@@ -396,7 +396,7 @@ can be applied; these enter through the pre-factor
 where $\mathcal{S} = 1$ in standard $\Lambda$CDM.  Table~\ref{tab:solver_summary}
 summarises how each module modifies the two solver levels.
 
-\begin{table}
+\begin{table*}
 \centering
 \caption{Summary of Poisson solver modifications.  `FFT' denotes the
   base-level direct solve; `MG' denotes the multigrid V-cycle for
@@ -413,7 +413,7 @@ DE ($\cst>0$)    & Yes           & $\times\,[1+(\Ode/\Ocb)\Rde]$ & --- (FFT only
 DE (no table)    & Yes           & Helmholtz factor & --- (FFT only) \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 
 % ===================================================================
@@ -892,21 +892,34 @@ particles exist in two internal states --- ground ($g$, marked by
 \code{tp}$\,=0$) and excited ($e$, marked by \code{tp}$\,=-1$) ---
 separated by a mass splitting $\delta$ (specified in keV).
 
-Three scattering channels are possible:
+All kinematically allowed scattering channels are implemented, with
+equal probability assigned among them:
 \begin{enumerate}
-\item $g + g \to e + e$ (endothermic): requires
-  $\frac{1}{2}\mu\,\vrel^2 > 2\delta$, where
-  $\mu = m_i m_j/(m_i+m_j)$ is the reduced mass.  The post-scattering
-  relative speed decreases:
-  $|\vrel'| = \sqrt{2(\tfrac{1}{2}\mu\vrel^2 - 2\delta)/\mu}$.
+\item $g + g \to g + e$ (single up-scatter): requires
+  $\frac{1}{2}\mu\,\vrel^2 > \delta$, costs kinetic energy~$\delta$.
 
-\item $e + e \to g + g$ (exothermic): always kinematically allowed.
-  The relative speed increases:
-  $|\vrel'| = \sqrt{2(\tfrac{1}{2}\mu\vrel^2 + 2\delta)/\mu}$.
+\item $g + g \to e + e$ (double up-scatter): requires
+  $\frac{1}{2}\mu\,\vrel^2 > 2\delta$, costs~$2\delta$.
 
-\item $g + e$ or $e + g$: elastic scattering only, no state
-  transition.
+\item $e + e \to e + g$ (single down-scatter): always allowed,
+  releases~$\delta$.
+
+\item $e + e \to g + g$ (double down-scatter): always allowed,
+  releases~$2\delta$.
+
+\item $g + e \to g + g$ (mixed, exothermic): always allowed,
+  releases~$\delta$.
+
+\item $g + e \to e + e$ (mixed, endothermic): requires
+  $\frac{1}{2}\mu\,\vrel^2 > \delta$, costs~$\delta$.
 \end{enumerate}
+For each pair, the number of kinematically available inelastic
+channels $N_{\rm ch}$ is determined, and one is chosen uniformly at
+random.  The post-scattering relative speed is adjusted according to
+the net energy change:
+$|\vrel'| = \sqrt{2(E_{\rm cm} + \Delta E_{\rm inel})/\mu}$,
+where $\Delta E_{\rm inel} = \pm n\delta$ for $n = 1$ or~2
+transitions.
 
 At startup, a fraction \code{sidm\_frac\_excited} of DM particles is
 randomly assigned to the excited state.  This initialisation is
@@ -977,12 +990,16 @@ sidm_epsilon = 0.01
 sidm_inelastic = .false.
 sidm_delta = 0.0
 sidm_frac_excited = 0.0
+sidm_fdiss = 0.0
+sidm_baryon = .false.
+sidm_baryon_sigma = 1.0
+sidm_baryon_power = 0.0
 /
 \end{verbatim}
 Table~\ref{tab:sidm_params} summarises all parameters with their
 units and defaults.
 
-\begin{table}
+\begin{table*}
 \centering
 \caption{SIDM namelist parameters (\code{\&SIDM\_PARAMS}).}
 \label{tab:sidm_params}
@@ -1002,10 +1019,61 @@ Parameter & Type & Default & Description \\
 \code{sidm\_inelastic} & logical & F & Enable iSIDM \\
 \code{sidm\_delta} & real & 0.0 & Mass splitting [keV] \\
 \code{sidm\_frac\_excited} & real & 0.0 & Initial excited fraction \\
+\code{sidm\_fdiss} & real & 0.0 & Dissipation fraction per scatter \\
+\code{sidm\_baryon} & logical & F & Enable DM--baryon drag \\
+\code{sidm\_baryon\_sigma} & real & 1.0 & $\sigma_{\rm DM\text{-}b}/m_{\rm DM}$ [$\mathrm{cm^2\,g^{-1}}$] \\
+\code{sidm\_baryon\_power} & real & 0.0 & Velocity power-law index $n$ \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
+
+\subsection{Dissipative SIDM (dSIDM)}
+\label{sec:sidm_dissipative}
+
+Following \citet{Shen2021}, we implement a simple dissipative SIDM
+model in which a fraction $f_{\rm diss}$ of the centre-of-mass kinetic
+energy is lost in each scattering event.  After computing the
+post-scatter relative velocity magnitude $|\vrel'|$ (including any
+inelastic energy change), we apply
+\begin{equation}
+|\vrel'| \leftarrow |\vrel'| \sqrt{1 - f_{\rm diss}},
+\end{equation}
+controlled by the namelist parameter \code{sidm\_fdiss} $\in [0,1)$.
+The dissipated energy is tracked cumulatively and reported in the
+simulation log.  Setting $f_{\rm diss} = 0$ recovers elastic (or
+inelastic) SIDM.
+
+\subsection{DM--Baryon Drag Force (IDM)}
+\label{sec:sidm_baryon}
+
+We implement a continuous drag force between dark matter particles and
+the baryonic gas, following \citet{Nguyen2025}.  Each DM particle
+experiences a deceleration proportional to the local gas density and
+relative velocity:
+\begin{equation}
+\frac{\mathrm{d}\mathbf{v}_{\rm DM}}{\mathrm{d}t}
+= -\frac{\sigma_{\rm DM\text{-}b}}{m_{\rm DM}}
+  \,\rho_{\rm b}\,|\mathbf{v}_{\rm rel}|\,\mathbf{v}_{\rm rel},
+\label{eq:idm_drag}
+\end{equation}
+where $\mathbf{v}_{\rm rel} = \mathbf{v}_{\rm DM} -
+\mathbf{v}_{\rm gas}$ and $\sigma_{\rm DM\text{-}b}/m_{\rm DM}$ is
+the DM--baryon cross-section per DM mass.  A velocity-dependent
+cross-section $\sigma \propto v^n$ is supported via
+\code{sidm\_baryon\_power}.
+
+The velocity kick is capped at 50\% of $|\vrel|$ per timestep to
+prevent numerical overshoot.  Momentum is conserved by applying the
+opposite impulse to the gas cell:
+\begin{equation}
+\Delta(\rho\mathbf{v})_{\rm gas}
+= -\frac{m_{\rm DM}\,\Delta\mathbf{v}_{\rm DM}}{V_{\rm cell}}.
+\end{equation}
+
+The drag is applied at each AMR level after the DM--DM scattering
+sweep.  Activation requires \code{sidm=.true.},
+\code{sidm\_baryon=.true.}, and \code{hydro=.true.}.
 
 % ===================================================================
 % 6. QUMOND AND AQUAL
@@ -1326,7 +1394,7 @@ The MOND module is enabled by setting \code{use\_mond=.true.} in
 \code{\&RUN\_PARAMS} and providing the physical parameters in a
 dedicated \code{\&MOND\_PARAMS} block:
 
-\begin{table}
+\begin{table*}
 \centering
 \caption{MOND namelist parameters (\code{\&MOND\_PARAMS}).}
 \label{tab:mond_params}
@@ -1343,7 +1411,7 @@ Parameter & Type & Default & Description \\
 \code{g\_ext\_mond}   & real(3) & 0,0,0 & External field [cm\,s$^{-2}$] (EFE) \\
 \bottomrule
 \end{tabular}
-\end{table}
+\end{table*}
 
 A minimal QUMOND example:
 \begin{verbatim}

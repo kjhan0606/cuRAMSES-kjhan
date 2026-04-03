@@ -28,6 +28,8 @@ subroutine adaptive_loop
   real(dp)::sgs_loc(4),sgs_glob(4)
   real(dp)::esgs_tot,pturb_max,pth_at_max,csgs_ratio_max
   integer::icell,igrid_sgs,ind_sgs,iskip_sgs,ncell_sgs
+  ! Sink/AGN coarse-step log
+  integer::isink_log
 
 #ifndef WITHOUTMPI
   tt1=MPI_WTIME()
@@ -209,6 +211,23 @@ subroutine adaptive_loop
 
      call check_jobcontrol
 
+     ! Sink/AGN log every coarse step (append to sink_log.csv)
+     if(sink .and. nsink>0 .and. myid==1) then
+        call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)
+        open(unit=667, file='sink_log.csv', position='append', &
+             form='formatted', status='unknown')
+        do isink_log=1, nsink
+           write(667,'(I8,",",ES14.6,",",F8.4,",",I10,6(",",ES14.6))') &
+                nstep_coarse, aexp, 1d0/aexp-1d0, &
+                idsink(isink_log), &
+                msink(isink_log)*scale_d_s*scale_l_s**3/1.98892d33, &
+                xsink(isink_log,1), xsink(isink_log,2), &
+                xsink(isink_log,3), &
+                dMBH_coarse(isink_log), spinmag(isink_log)
+        end do
+        close(667)
+     end if
+
 !jhshin1 -walltime setting
 #ifndef WITHOUTMPI
      tt2=MPI_WTIME()
@@ -256,6 +275,10 @@ subroutine adaptive_loop
               mstar_glob_old=mstar_tot_glob
               t_sfr_old=t
            endif
+           ! iSIDM excited fraction diagnostic
+           if(sidm .and. sidm_inelastic) then
+              call sidm_report_excited_fraction()
+           end if
            ! FPR diagnostic: per-level dx_phys and m_refine_eff/m_refine ratio
            if(dr_proper > 0.0d0 .and. cosmo) then
               call units(scale_l_s,scale_t_s,scale_d_s,scale_v_s,scale_nH_s,scale_T2_s)

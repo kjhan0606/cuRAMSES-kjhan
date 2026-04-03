@@ -1270,6 +1270,12 @@ subroutine restore_part_hdf5()
      end if
   end if
 
+  ! Atomic Dark Matter: dark internal energy (optional dataset)
+  if(use_adm) then
+     call hdf5_read_dataset_1d_dp(grp_id, 'dark_energy_int', dbuf, npart_loc, offset_part)
+     edp(1:npart_loc) = dbuf(1:npart_loc)
+  end if
+
   npart = npart_loc
 
   deallocate(dbuf, ibuf8, ibuf, npart_per_cpu)

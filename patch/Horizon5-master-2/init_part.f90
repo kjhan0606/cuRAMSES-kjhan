@@ -106,7 +106,15 @@ subroutine init_part
         allocate(zp(npartmax))
      end if
 
+  end if
 
+  ! Atomic Dark Matter: dark internal energy per particle
+  if(use_adm) then
+     allocate(edp(npartmax))
+     ! edp: zero-initialized by mmap lazy pages
+  end if
+
+  if(star.or.sink)then
      !Read the yield table
      open(33,file=trim(yieldtablefilename),status='old', form='formatted')
      read(33,'(a8,I10)')a1,nmetal
@@ -306,7 +314,7 @@ subroutine init_part
      nDMloc=0
      if(star .or. sink) then
         do i = 1, npart2
-           if(idp(i)>0.and.tp(i)==0.) then 
+           if(idp(i)>0.and.tp(i)<=0.) then
               nDMloc=nDMloc+1
            endif
         enddo
@@ -1184,7 +1192,7 @@ subroutine restore_part_binary_varcpu
   nDMloc = 0
   if(star .or. sink) then
      do i = 1, npart
-        if(idp(i) > 0 .and. tp(i) == 0.) nDMloc = nDMloc + 1
+        if(idp(i) > 0 .and. tp(i) <= 0.) nDMloc = nDMloc + 1
      end do
   else
      nDMloc = npart

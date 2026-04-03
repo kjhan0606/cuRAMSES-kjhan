@@ -878,7 +878,10 @@ subroutine virtual_tree_fine(ilevel)
 #ifdef OUTPUT_PARTICLE_POTENTIAL
   particle_data_width=particle_data_width+1
 #endif
-  
+
+  ! Atomic Dark Matter: add edp field
+  if(use_adm) particle_data_width = particle_data_width + 1
+
   ! Allocate communication buffer in emission
   do icpu=1,ncpu
      ncache=reception(icpu,ilevel)%npart
@@ -1126,7 +1129,15 @@ subroutine fill_comm(ind_part,ind_com,ind_list,np,ilevel,icpu)
      end do
      current_property = current_property+3!+nelt
   end if
-  
+
+  ! Atomic Dark Matter: gather edp
+  if(use_adm) then
+     do i=1,np
+        reception(icpu,ilevel)%up(ind_com(i),current_property)=edp(ind_part(i))
+     end do
+     current_property = current_property+1
+  end if
+
   ! Remove particles from parent linked list
   call remove_list(ind_part,ind_list,ok,np)
   call add_free(ind_part,np)
@@ -1209,6 +1220,14 @@ subroutine empty_comm(ind_com,np,ilevel,icpu)
 !        enddo
      end do
      current_property = current_property+3!+nelt
+  end if
+
+  ! Atomic Dark Matter: scatter edp
+  if(use_adm) then
+     do i=1,np
+        edp(ind_part(i))=emission(icpu,ilevel)%up(ind_com(i),current_property)
+     end do
+     current_property = current_property+1
   end if
 
 end subroutine empty_comm

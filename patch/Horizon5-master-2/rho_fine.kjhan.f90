@@ -771,13 +771,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      else if(ilevel>cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and. ( ttt(j).ne.0d0 .or. (ttt(j).eq.0d0.and.iii(j).lt.0) ))then
+          if(ok(j).and. ( ttt(j)>0d0 .or. iii(j).lt.0 ))then
          rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
           endif
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j).ne.0d0)then
+          if(ok(j).and.ttt(j)>0d0)then
          rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
           end if
        enddo
@@ -787,13 +787,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(ilevel==cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and.(ttt(j)==0d0.and.iii(j).ge.0))then
+          if(ok(j).and.(ttt(j)<=0d0.and.iii(j).ge.0))then
          rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
           end if
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j)==0d0)then
+          if(ok(j).and.ttt(j)<=0d0)then
          rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
           end if
        end do
@@ -815,13 +815,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(mass_cut_refine>0.0)then
     if(sink)then
        do j=1,np
-          if(ttt(j)==0d0.and.iii(j).ge.0)then
+          if(ttt(j)<=0d0.and.iii(j).ge.0)then
          ok(j)=ok(j).and.mmm(j)<mass_cut_refine
           endif
        end do
     else
        do j=1,np
-          if(ttt(j)==0d0)then
+          if(ttt(j)<=0d0)then
          ok(j)=ok(j).and.mmm(j)<mass_cut_refine
           endif
        end do
@@ -832,13 +832,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      if(star)then
     if(sink)then
        do j=1,np
-          if(ttt(j).ne.0.0 .or. (ttt(j).eq.0.0.and.iii(j).lt.0))then
+          if(ttt(j)>0.0 .or. iii(j).lt.0)then
          vol2(j)=vol2(j)*mmm(j)/mass_sph
           endif
        end do
     else
        do j=1,np
-          if(ttt(j).ne.0.0)then
+          if(ttt(j)>0.0)then
          vol2(j)=vol2(j)*mmm(j)/mass_sph
           endif
        end do
@@ -855,13 +855,13 @@ subroutine cic_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      else if(ilevel>=cic_levelmax)then
     if(sink)then
        do j=1,np
-          if(ok(j).and. ( ttt(j).ne.0d0 .or. (ttt(j).eq.0d0.and.iii(j).lt.0) ))then
+          if(ok(j).and. ( ttt(j)>0d0 .or. iii(j).lt.0 ))then
          phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
           endif
        enddo
     else
        do j=1,np
-          if(ok(j).and.ttt(j).ne.0d0)then
+          if(ok(j).and.ttt(j)>0d0)then
          phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
           end if
        enddo
@@ -1864,7 +1864,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
         end do
      else if(ilevel>cic_levelmax) then
         do j=1,np
-           if(ok(j).and.(ttt(j).ne.0d0).and.(.not.abandoned(j))) then
+           if(ok(j).and.(ttt(j)>0d0).and.(.not.abandoned(j))) then
               rho(indp(j,ind))=rho(indp(j,ind))+vol2(j)
            end if
         end do
@@ -1872,7 +1872,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
 
      if(ilevel==cic_levelmax)then
         do j=1,np
-           if(ok(j).and.(ttt(j)==0d0).and.(.not.abandoned(j)))then
+           if(ok(j).and.(ttt(j)<=0d0).and.(.not.abandoned(j)))then
               rho_top(indp(j,ind))=rho_top(indp(j,ind))+vol2(j)
            end if
         end do
@@ -1896,7 +1896,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      ! Remove massive dark matter particle
      if(mass_cut_refine>0.0) then
         do j=1,np
-           if(ttt(j)==0d0.and.(.not.abandoned(j))) then
+           if(ttt(j)<=0d0.and.(.not.abandoned(j))) then
               ok(j)=ok(j).and.mmm(j)<mass_cut_refine
            endif
         end do
@@ -1905,7 +1905,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
      ! For low mass baryon particles
      if(star) then
         do j=1,np
-           if(ttt(j).ne.0.0.and.(.not.abandoned(j))) then
+           if(ttt(j)>0.0.and.(.not.abandoned(j))) then
               vol2(j)=vol2(j)*mmm(j)/mass_sph
            endif
         end do
@@ -1919,7 +1919,7 @@ subroutine tsc_amr(ind_cell,ind_part,ind_grid_part,x0,ng,np,ilevel)
         end do
      else if(ilevel>=cic_levelmax) then
         do j=1,np
-           if(ok(j).and.(ttt(j).ne.0d0).and.(.not.abandoned(j))) then
+           if(ok(j).and.(ttt(j)>0d0).and.(.not.abandoned(j))) then
               phi(indp(j,ind))=phi(indp(j,ind))+vol2(j)
            end if
         end do

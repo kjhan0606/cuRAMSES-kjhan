@@ -45,7 +45,8 @@ subroutine read_params
        & ,use_galileon &
        & ,use_coupled_de &
        & ,use_ede &
-       & ,use_sgs
+       & ,use_sgs &
+       & ,use_adm
   ! Non-standard model namelists (read only when enabled)
   namelist/cpl_params/w0,wa,cs2_de,de_table
   namelist/neutrino_params/omega_nu,neutrino_table
@@ -64,7 +65,11 @@ subroutine read_params
        & sidm_type,sidm_v0,sidm_power, &
        & sidm_courant, &
        & sidm_angular,sidm_epsilon, &
-       & sidm_inelastic,sidm_delta,sidm_frac_excited
+       & sidm_inelastic,sidm_delta,sidm_frac_excited, &
+       & sidm_fdiss, &
+       & sidm_baryon,sidm_baryon_sigma,sidm_baryon_power
+namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
+       & adm_cross_section
   namelist/mond_params/a0_mond,mond_mu_type,mond_type, &
        & n_iter_mond,mond_eps,g_ext_mond
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0
@@ -220,6 +225,12 @@ subroutine read_params
   rewind(1)
   read(1,NML=sidm_params,END=77)
 77 continue
+  ! aDM parameters
+  if(use_adm) then
+     rewind(1)
+     read(1,NML=adm_params,END=76)
+76   continue
+  end if
   rewind(1)
   read(1,NML=mond_params,END=75)
 75 continue
@@ -418,6 +429,60 @@ subroutine read_params
            write(*,'(A,ES10.3,A)') '   iSIDM: delta=', sidm_delta, ' keV'
            write(*,'(A,F6.3)')     '   frac_excited=', sidm_frac_excited
         end if
+        if(sidm_fdiss > 0.0d0) then
+           write(*,'(A,F6.3)')     '   dSIDM: fdiss=', sidm_fdiss
+        end if
+        if(sidm_baryon) then
+           write(*,'(A,ES10.3,A,F5.1)') &
+                '   IDM: sigma_DM-b/m=', sidm_baryon_sigma, &
+                ' cm^2/g  power=', sidm_baryon_power
+        end if
+     end if
+     if(sidm_fdiss < 0.0d0 .or. sidm_fdiss >= 1.0d0) then
+        if(myid==1) write(*,*) 'ERROR: sidm_fdiss must be in [0,1)'
+        call clean_stop
+     end if
+     if(sidm_baryon .and. .not.hydro) then
+        if(myid==1) write(*,*) 'ERROR: sidm_baryon requires hydro=T'
+        call clean_stop
+     end if
+     if(sidm_baryon .and. sidm_baryon_sigma <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: sidm_baryon_sigma must be > 0'
+        call clean_stop
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Atomic Dark Matter (aDM)
+  !-------------------------------------------------
+  if(use_adm) then
+     if(.not. sidm) then
+        if(myid==1) write(*,*) 'ERROR: use_adm=T requires sidm=T'
+        call clean_stop
+     end if
+     if(adm_alpha <= 0.0d0 .or. adm_alpha >= 1.0d0) then
+        if(myid==1) write(*,*) 'ERROR: adm_alpha must be in (0,1)'
+        call clean_stop
+     end if
+     if(adm_mp <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: adm_mp must be > 0'
+        call clean_stop
+     end if
+     if(adm_me_ratio <= 0.0d0 .or. adm_me_ratio >= 1.0d0) then
+        if(myid==1) write(*,*) 'ERROR: adm_me_ratio must be in (0,1)'
+        call clean_stop
+     end if
+     if(adm_xi <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: adm_xi must be > 0'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)') ' Atomic Dark Matter (aDM) enabled:'
+        write(*,'(A,ES10.3)') '   alpha_D  =', adm_alpha
+        write(*,'(A,F8.3,A)') '   m_p''     =', adm_mp, ' GeV'
+        write(*,'(A,ES10.3)') '   m_e''/m_p''=', adm_me_ratio
+        write(*,'(A,F6.3)')   '   xi       =', adm_xi
+        write(*,'(A,ES10.3,A)') '   sigma/m  =', adm_cross_section, ' cm^2/g'
      end if
   end if
 

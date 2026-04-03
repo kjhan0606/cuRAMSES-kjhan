@@ -26,6 +26,7 @@ subroutine sidm_scatter(ilevel)
   integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
   real(dp)::sidm_Pmax_level
+  real(dp)::sidm_dEdiss  ! Cumulative dissipated energy (dSIDM)
   real(dp)::R_dummy
   integer,dimension(1:ncpu,1:IRandNumSize)::allseed
   ! Per-thread seed array (deterministic, avoids localseed race)
@@ -35,6 +36,7 @@ subroutine sidm_scatter(ilevel)
   common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
   common /sidm_pmax_c/ sidm_Pmax_level
+  common /sidm_diss/ sidm_dEdiss
 !$omp threadprivate(/sidm_omp/)
 
   if(.not.sidm) return
@@ -80,6 +82,7 @@ subroutine sidm_scatter(ilevel)
   sidm_dp_max     = 0.0d0
   sidm_dEk_max    = 0.0d0
   sidm_Pmax_level = 0.0d0
+  sidm_dEdiss     = 0.0d0
 
 #if NDIM==3
   do icpu=1,ncpu
@@ -112,6 +115,7 @@ subroutine sidm_scatter(ilevel)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dp_max, 1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dEk_max,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
   call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_Pmax_level,1,MPI_DOUBLE_PRECISION,MPI_MAX,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,sidm_dEdiss,1,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
 
   ! Store P_max for timestep constraint in newdt_fine
   sidm_Pmax(ilevel) = sidm_Pmax_level
@@ -128,8 +132,12 @@ subroutine sidm_scatter(ilevel)
         write(*,'(A,ES12.4)') '   dEk_max  =', sidm_dEk_max
      end if
      if(sidm_inelastic .and. (sidm_n_up>0 .or. sidm_n_down>0)) then
-        write(*,'(A,I6,A,I6)') '   iSIDM: up-scatter=', &
-             sidm_n_up,' down-scatter=',sidm_n_down
+        write(*,'(A,I6,A,I6,A,I6)') '   iSIDM: up=', &
+             sidm_n_up,' down=',sidm_n_down, &
+             ' net=',sidm_n_up-sidm_n_down
+     end if
+     if(sidm_fdiss > 0.0d0 .and. sidm_dEdiss /= 0.0d0) then
+        write(*,'(A,ES12.4)') '   dEdiss_total=', sidm_dEdiss
      end if
   end if
 
@@ -152,9 +160,11 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   integer::sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   real(dp)::sidm_dp(3),sidm_dEk,sidm_dp_max,sidm_dEk_max
   real(dp)::sidm_Pmax_level
+  real(dp)::sidm_dEdiss
   common /sidm_diag/ sidm_n_scatter,sidm_n_pairs,sidm_n_up,sidm_n_down
   common /sidm_cons/ sidm_dp,sidm_dEk,sidm_dp_max,sidm_dEk_max
   common /sidm_pmax_c/ sidm_Pmax_level
+  common /sidm_diss/ sidm_dEdiss
 
   ! Thread ID from sidm_scatter wrapper
   integer::mythread_loc
@@ -181,6 +191,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   ! Conservation diagnostics (thread-local)
   real(dp)::dp_loc(3),dEk_loc,dp_max_loc,dEk_max_loc
   real(dp)::P_max_loc
+  real(dp)::dEdiss_loc,KE_cm_before_diss
 
   ! Anisotropic scattering variables
   real(dp)::eps2,a_ruth,b_ruth,e1_mag
@@ -189,6 +200,9 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   ! Inelastic scattering variables
   real(dp)::delta_phys,mu,KE_cm,KE_cm_new,delta_KE,v_rel_new_mag
   logical::is_excited_1,is_excited_2,do_transition
+  integer::state_change_1,state_change_2  ! -1=de-excite, 0=none, +1=excite
+  integer::n_channels,ichan
+  real(dp)::R_inel
 
   if(subnump<=0) return
 
@@ -234,6 +248,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   dEk_loc       = 0.0d0
   dp_max_loc    = 0.0d0
   dEk_max_loc   = 0.0d0
+  dEdiss_loc    = 0.0d0
   P_max_loc     = 0.0d0
 
   ! Loop over grids assigned to this thread
@@ -363,29 +378,86 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            ! Center-of-mass velocity (physical)
            v_cm(1:3) = (m1*v1(1:3) + m2*v2(1:3)) / mtot
 
-           ! --- Inelastic energy change ---
+           ! --- Inelastic energy change (multi-state iSIDM) ---
            delta_KE = 0.0d0
            do_transition = .false.
+           state_change_1 = 0
+           state_change_2 = 0
            if(sidm_inelastic .and. delta_phys > 0.0d0) then
               is_excited_1 = (tp(ind_dm(ipair))   < -0.5d0)
               is_excited_2 = (tp(ind_dm(ipair+1)) < -0.5d0)
+              mu = m1*m2/mtot
+              KE_cm = 0.5d0 * mu * v_rel_mag**2
+              call ranf(seed_loc, R_inel)
 
               if(.not.is_excited_1 .and. .not.is_excited_2) then
-                 ! g+g -> e+e (endothermic): requires KE_cm > 2*delta
-                 mu = m1*m2/mtot
-                 KE_cm = 0.5d0 * mu * v_rel_mag**2
-                 if(KE_cm > 2.0d0*delta_phys) then
-                    delta_KE = -2.0d0*delta_phys
+                 ! g+g: can -> g+e (cost delta) or e+e (cost 2*delta)
+                 n_channels = 0
+                 if(KE_cm > delta_phys)       n_channels = n_channels + 1
+                 if(KE_cm > 2.0d0*delta_phys) n_channels = n_channels + 1
+                 if(n_channels > 0) then
+                    ichan = min(int(R_inel*dble(n_channels))+1, n_channels)
+                    if(ichan==1) then
+                       ! g+g -> g+e (single up-scatter)
+                       delta_KE = -delta_phys
+                       state_change_2 = 1
+                       do_transition = .true.
+                       n_up_loc = n_up_loc + 1
+                    else
+                       ! g+g -> e+e (double up-scatter)
+                       delta_KE = -2.0d0*delta_phys
+                       state_change_1 = 1
+                       state_change_2 = 1
+                       do_transition = .true.
+                       n_up_loc = n_up_loc + 2
+                    end if
+                 end if
+
+              else if(is_excited_1 .and. is_excited_2) then
+                 ! e+e: can -> e+g (release delta) or g+g (release 2*delta)
+                 ! Both always allowed (exothermic)
+                 if(R_inel < 0.5d0) then
+                    ! e+e -> e+g (single down-scatter)
+                    delta_KE = delta_phys
+                    state_change_2 = -1
+                    do_transition = .true.
+                    n_down_loc = n_down_loc + 1
+                 else
+                    ! e+e -> g+g (double down-scatter)
+                    delta_KE = 2.0d0*delta_phys
+                    state_change_1 = -1
+                    state_change_2 = -1
+                    do_transition = .true.
+                    n_down_loc = n_down_loc + 2
+                 end if
+
+              else
+                 ! Mixed g+e: can -> g+g (release delta) or e+e (cost delta)
+                 n_channels = 1  ! g+e -> g+g always allowed
+                 if(KE_cm > delta_phys) n_channels = 2  ! g+e -> e+e
+                 ichan = min(int(R_inel*dble(n_channels))+1, n_channels)
+                 if(ichan==1) then
+                    ! g+e -> g+g (de-excite the excited one)
+                    delta_KE = delta_phys
+                    if(is_excited_1) then
+                       state_change_1 = -1
+                    else
+                       state_change_2 = -1
+                    end if
+                    do_transition = .true.
+                    n_down_loc = n_down_loc + 1
+                 else
+                    ! g+e -> e+e (excite the ground one)
+                    delta_KE = -delta_phys
+                    if(.not.is_excited_1) then
+                       state_change_1 = 1
+                    else
+                       state_change_2 = 1
+                    end if
                     do_transition = .true.
                     n_up_loc = n_up_loc + 1
                  end if
-              else if(is_excited_1 .and. is_excited_2) then
-                 ! e+e -> g+g (exothermic): always allowed
-                 delta_KE = 2.0d0*delta_phys
-                 do_transition = .true.
-                 n_down_loc = n_down_loc + 1
               end if
-              ! Mixed (g+e or e+g): elastic, no transition
            end if
 
            ! New relative velocity magnitude
@@ -396,6 +468,13 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
               KE_cm_new = 0.5d0*mu*v_rel_mag**2 + delta_KE
               if(KE_cm_new < 0.0d0) cycle  ! safety
               v_rel_new_mag = sqrt(2.0d0*KE_cm_new/mu)
+           end if
+
+           ! Dissipative SIDM: remove fraction f_diss of CM kinetic energy
+           if(sidm_fdiss > 0.0d0) then
+              KE_cm_before_diss = 0.5d0*mu*v_rel_new_mag**2
+              v_rel_new_mag = v_rel_new_mag * sqrt(1.0d0 - sidm_fdiss)
+              dEdiss_loc = dEdiss_loc + sidm_fdiss*KE_cm_before_diss
            end if
 
            ! --- Scattering angle ---
@@ -453,17 +532,12 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            v1_new(1:3) = v_cm(1:3) + (m2/mtot)*v_rel_new(1:3)
            v2_new(1:3) = v_cm(1:3) - (m1/mtot)*v_rel_new(1:3)
 
-           ! Apply state transitions (iSIDM)
+           ! Apply state transitions (multi-state iSIDM)
            if(do_transition) then
-              if(.not.is_excited_1) then
-                 ! g+g -> e+e
-                 tp(ind_dm(ipair))   = -1.0d0
-                 tp(ind_dm(ipair+1)) = -1.0d0
-              else
-                 ! e+e -> g+g
-                 tp(ind_dm(ipair))   = 0.0d0
-                 tp(ind_dm(ipair+1)) = 0.0d0
-              end if
+              if(state_change_1== 1) tp(ind_dm(ipair))   = -1.0d0
+              if(state_change_1==-1) tp(ind_dm(ipair))   =  0.0d0
+              if(state_change_2== 1) tp(ind_dm(ipair+1)) = -1.0d0
+              if(state_change_2==-1) tp(ind_dm(ipair+1)) =  0.0d0
            end if
 
            ! Conservation diagnostics (momentum: exact, energy: exact
@@ -506,6 +580,7 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   if(dp_max_loc > sidm_dp_max) sidm_dp_max = dp_max_loc
   if(dEk_max_loc > sidm_dEk_max) sidm_dEk_max = dEk_max_loc
   if(P_max_loc > sidm_Pmax_level) sidm_Pmax_level = P_max_loc
+  sidm_dEdiss = sidm_dEdiss + dEdiss_loc
   !$omp end critical
 
 end subroutine sub_sidm_scatter
@@ -618,3 +693,224 @@ integer function cell_index_from_part(ipart,igrid,ilevel)
   cell_index_from_part = 1 + ix + 2*iy + 4*iz
 
 end function cell_index_from_part
+!################################################################
+!################################################################
+! Report excited DM fraction (called from adaptive_loop)
+!################################################################
+subroutine sidm_report_excited_fraction()
+  use pm_commons
+  use amr_commons
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer::ilevel,igrid,jgrid,ipart,jpart,info
+  integer::ndm_total,ndm_excited
+  real(dp)::frac
+
+  if(.not.sidm_inelastic) return
+
+  ndm_total   = 0
+  ndm_excited = 0
+  do ilevel=levelmin,nlevelmax
+     igrid = headl(myid,ilevel)
+     do jgrid=1,numbl(myid,ilevel)
+        ipart = headp(igrid)
+        do jpart=1,numbp(igrid)
+           if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
+              ndm_total = ndm_total + 1
+              if(tp(ipart) < -0.5d0) ndm_excited = ndm_excited + 1
+           end if
+           ipart = nextp(ipart)
+        end do
+        igrid = next(igrid)
+     end do
+  end do
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,  1,MPI_INTEGER, &
+       MPI_SUM,MPI_COMM_WORLD,info)
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_excited,1,MPI_INTEGER, &
+       MPI_SUM,MPI_COMM_WORLD,info)
+
+  if(myid==1 .and. ndm_total>0) then
+     frac = dble(ndm_excited)/dble(ndm_total)
+     write(*,'(A,I10,A,I10,A,F8.5)') &
+          ' iSIDM excited: ', ndm_excited, ' / ', ndm_total, &
+          '  f_exc=', frac
+  end if
+
+end subroutine sidm_report_excited_fraction
+!################################################################
+!################################################################
+! DM-baryon drag force: continuous momentum exchange
+!
+! Physics: F/m_DM = -(sigma_db/m_DM) * rho_b * |v_rel| * v_rel
+! Velocity-dependent: sigma(v) = sigma_0 * (v/100 km/s)^n
+! Backreaction on gas conserves total momentum.
+!################################################################
+subroutine sidm_baryon_drag(ilevel)
+  use pm_commons
+  use amr_commons
+  use hydro_commons, only: uold,nvar,gamma
+  implicit none
+#ifndef WITHOUTMPI
+  include 'mpif.h'
+#endif
+  integer,intent(in)::ilevel
+
+  real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v
+  real(dp)::dx,dx_loc,scale,vol_phys,vol_code,dt_phys
+  real(dp)::rho_b_phys,sigma_eff
+  real(dp),dimension(1:3)::v_gas_phys,v_dm_phys,v_rel,dv_dm
+  real(dp)::v_rel_mag,v_rel_kms,drag_coeff
+  real(dp)::m_dm_phys,dv_max,dv_mag
+  integer::igrid,jgrid,ind,iskip,icell,nx_loc
+  integer::ipart,jpart,npart1,info
+  ! Diagnostics
+  integer::n_drag_loc,n_drag_tot
+  real(dp)::dp_drag_loc(3),dp_drag_tot(3),dv_max_loc,dv_max_tot
+
+  if(.not.sidm_baryon) return
+  if(.not.hydro) return
+  if(numbtot(1,ilevel)==0) return
+
+  call units(scale_l,scale_t,scale_d,scale_v,scale_nH,scale_T2)
+
+  dx = 0.5D0**ilevel
+  nx_loc = (icoarse_max-icoarse_min+1)
+  scale = boxlen/dble(nx_loc)
+  dx_loc = dx*scale
+  vol_code = dx_loc**3
+  vol_phys = (dx_loc*scale_l/aexp)**3
+  dt_phys  = dtnew(ilevel)*scale_t
+
+  n_drag_loc  = 0
+  dp_drag_loc = 0.0d0
+  dv_max_loc  = 0.0d0
+
+  ! Loop over local grids
+  igrid = headl(myid,ilevel)
+  do jgrid=1,numbl(myid,ilevel)
+
+     npart1 = numbp(igrid)
+     if(npart1==0) then
+        igrid = next(igrid)
+        cycle
+     end if
+
+     ! Loop over 8 subcells
+     do ind=1,twotondim
+        iskip = ncoarse+(ind-1)*ngridmax
+        icell = iskip+igrid
+
+        ! Only leaf cells with gas
+        if(son(icell)/=0) cycle
+
+        ! Gas density and velocity (code units)
+        rho_b_phys = uold(icell,1) * scale_d / aexp**3
+        if(uold(icell,1) <= 0.0d0) cycle
+
+        v_gas_phys(1) = uold(icell,2)/uold(icell,1) * scale_v / aexp
+        v_gas_phys(2) = uold(icell,3)/uold(icell,1) * scale_v / aexp
+        v_gas_phys(3) = uold(icell,4)/uold(icell,1) * scale_v / aexp
+
+        ! Loop over particles in this grid
+        ipart = headp(igrid)
+        do jpart=1,npart1
+           ! DM only (idp>0, tp<=0 for non-stars)
+           if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
+              ! Check subcell match
+              if(cell_index_from_part_inline(ipart,igrid)==ind) then
+                 ! DM velocity (physical)
+                 v_dm_phys(1) = vp(ipart,1) * scale_v / aexp
+                 v_dm_phys(2) = vp(ipart,2) * scale_v / aexp
+                 v_dm_phys(3) = vp(ipart,3) * scale_v / aexp
+
+                 ! Relative velocity
+                 v_rel(1:3) = v_dm_phys(1:3) - v_gas_phys(1:3)
+                 v_rel_mag = sqrt(v_rel(1)**2+v_rel(2)**2+v_rel(3)**2)
+                 if(v_rel_mag == 0.0d0) then
+                    ipart = nextp(ipart)
+                    cycle
+                 end if
+
+                 ! Velocity-dependent cross-section
+                 v_rel_kms = v_rel_mag * 1.0d-5
+                 if(sidm_baryon_power == 0.0d0) then
+                    sigma_eff = sidm_baryon_sigma
+                 else
+                    sigma_eff = sidm_baryon_sigma &
+                         * (v_rel_kms/100.0d0)**sidm_baryon_power
+                    sigma_eff = min(sigma_eff, 1.0d4*sidm_baryon_sigma)
+                 end if
+
+                 ! Drag: dv = -(sigma/m) * rho_b * |v_rel| * v_rel * dt
+                 drag_coeff = sigma_eff * rho_b_phys * v_rel_mag * dt_phys
+                 dv_dm(1:3) = -drag_coeff * v_rel(1:3)
+
+                 ! Limit kick to avoid overshoot (cap at 50% of v_rel)
+                 dv_mag = sqrt(dv_dm(1)**2+dv_dm(2)**2+dv_dm(3)**2)
+                 dv_max = 0.5d0 * v_rel_mag
+                 if(dv_mag > dv_max) then
+                    dv_dm(1:3) = dv_dm(1:3) * (dv_max/dv_mag)
+                    dv_mag = dv_max
+                 end if
+
+                 ! Apply to DM particle (physical -> code)
+                 vp(ipart,1) = vp(ipart,1) + dv_dm(1)*aexp/scale_v
+                 vp(ipart,2) = vp(ipart,2) + dv_dm(2)*aexp/scale_v
+                 vp(ipart,3) = vp(ipart,3) + dv_dm(3)*aexp/scale_v
+
+                 ! Backreaction on gas: dp_gas = -m_DM * dv_DM
+                 ! Update momentum density: d(rho*v) = m_DM * (-dv_DM) / V_cell
+                 m_dm_phys = mp(ipart) * scale_d * scale_l**3
+                 uold(icell,2) = uold(icell,2) &
+                      - m_dm_phys*dv_dm(1) / (vol_phys*scale_d/aexp**3) &
+                      * (aexp/scale_v)
+                 uold(icell,3) = uold(icell,3) &
+                      - m_dm_phys*dv_dm(2) / (vol_phys*scale_d/aexp**3) &
+                      * (aexp/scale_v)
+                 uold(icell,4) = uold(icell,4) &
+                      - m_dm_phys*dv_dm(3) / (vol_phys*scale_d/aexp**3) &
+                      * (aexp/scale_v)
+
+                 ! Diagnostics
+                 n_drag_loc = n_drag_loc + 1
+                 dp_drag_loc(1:3) = dp_drag_loc(1:3) + m_dm_phys*dv_dm(1:3)
+                 if(dv_mag > dv_max_loc) dv_max_loc = dv_mag
+              end if
+           end if
+           ipart = nextp(ipart)
+        end do  ! particles
+
+     end do  ! subcells
+
+     igrid = next(igrid)
+  end do  ! grids
+
+  ! MPI reduce diagnostics
+  call MPI_ALLREDUCE(n_drag_loc, n_drag_tot, 1, MPI_INTEGER, &
+       MPI_SUM, MPI_COMM_WORLD, info)
+  call MPI_ALLREDUCE(dp_drag_loc, dp_drag_tot, 3, MPI_DOUBLE_PRECISION, &
+       MPI_SUM, MPI_COMM_WORLD, info)
+  call MPI_ALLREDUCE(dv_max_loc, dv_max_tot, 1, MPI_DOUBLE_PRECISION, &
+       MPI_MAX, MPI_COMM_WORLD, info)
+
+  if(myid==1 .and. n_drag_tot>0) then
+     write(*,'(A,I2,A,I10,A,ES9.2,A)') &
+          ' IDM level ',ilevel,': n_drag=',n_drag_tot, &
+          ' dv_max=',dv_max_tot*1d-5,' km/s'
+  end if
+
+contains
+  ! Inline subcell index (avoids external function in tight loop)
+  integer function cell_index_from_part_inline(ip,ig)
+    integer,intent(in)::ip,ig
+    integer::ixx,iyy,izz
+    ixx=0; iyy=0; izz=0
+    if(xp(ip,1) > xg(ig,1)) ixx=1
+    if(xp(ip,2) > xg(ig,2)) iyy=1
+    if(xp(ip,3) > xg(ig,3)) izz=1
+    cell_index_from_part_inline = 1 + ixx + 2*iyy + 4*izz
+  end function cell_index_from_part_inline
+
+end subroutine sidm_baryon_drag

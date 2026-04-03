@@ -616,6 +616,12 @@ recursive subroutine amr_step(ilevel,icount)
         ! SIDM scattering (after velocity sync, before timestep)
         if(sidm) call sidm_scatter(ilevel)
 
+        ! DM-baryon drag force (after DM-DM scatter)
+        if(sidm_baryon) call sidm_baryon_drag(ilevel)
+
+        ! Atomic Dark Matter: dark-sector cooling
+        if(use_adm) call dark_cooling_fine(ilevel)
+
      end if
 !############################################################
 !       call getmem(real_mem)

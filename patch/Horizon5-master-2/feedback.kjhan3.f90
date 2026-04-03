@@ -149,7 +149,7 @@ subroutine sub_thermal_feedback(ilevel,icpu, kgrid,subnump,n11,n22)
            ihy=2+int(dy1*(log10(yy)-zmin))
            if (yy<yieldtab%zstar(2)) ihy=1
               
-           if( tp(ipart)/=0. .and. xx>0. .and. ihx>0 )then
+           if( tp(ipart)>0. .and. xx>0. .and. ihx>0 )then
               wxa=(xx-astarproper(ihx))  /(astarproper(ihx+1)-astarproper(ihx))
               wxb = 1.-wxa
 
@@ -222,7 +222,7 @@ subroutine sub_thermal_feedback(ilevel,icpu, kgrid,subnump,n11,n22)
               ihy=2+int(dy1*(log10(yy)-zmin))
               if (yy<yieldtab%zstar(2)) ihy=1
 
-              if( tp(ipart)/=0. .and. xx>0. .and. ihx>0 )then
+              if( tp(ipart)>0. .and. xx>0. .and. ihx>0 )then
 
                  wxa=(xx-astarproper(ihx))  /(astarproper(ihx+1)-astarproper(ihx))
                  wxb=1.-wxa
@@ -662,7 +662,7 @@ subroutine sub2_kinetic_feedback(icpu,kgrid,subnump,n11,n22,iSN,nSN_tot,xSN_tot,
               ihy=2+int(dy1*(log10(yy)-zmin))
               if (yy<yieldtab%zstar(2)) ihy=1
 
-              if( tp(ipart)/=0. .and. xx>0. .and. ihx>0 )then
+              if( tp(ipart)>0. .and. xx>0. .and. ihx>0 )then
                  wxa=(xx-astarproper(ihx))  /(astarproper(ihx+1)-astarproper(ihx))
                  wxb=1.-wxa
 
@@ -849,7 +849,7 @@ subroutine sub1_kinetic_feedback(icpu,kgrid,subnump,n11,n22,nSN_loc)
               ihy=2+int(dy1*(log10(yy)-zmin))
               if (yy<yieldtab%zstar(2)) ihy=1
 
-              if( tp(ipart)/=0. .and. xx>0. .and. ihx>0 )then
+              if( tp(ipart)>0. .and. xx>0. .and. ihx>0 )then
 
                  wxa=(xx-astarproper(ihx))  /(astarproper(ihx+1)-astarproper(ihx))
                  wxb=1.-wxa

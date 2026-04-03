@@ -1249,7 +1249,7 @@ subroutine rho_only_level(ilevel)
               next_part=nextp(ipart)
               ! Select stars younger than age_cut_clfind
               if(age_cut_clfind>0.d0 .and. star) then
-                 if((t-tp(ipart).lt.age_cut_clfind).and.(tp(ipart).ne.0.d0)) then
+                 if((t-tp(ipart).lt.age_cut_clfind).and.(tp(ipart)>0.d0)) then
                     npart2=npart2+1
                  endif
               ! All particles
@@ -1272,7 +1272,7 @@ subroutine rho_only_level(ilevel)
               next_part=nextp(ipart)
               ! Select stars younger than age_cut_clfind
               if(age_cut_clfind>0.d0 .and. star) then
-                 if((t-tp(ipart).lt.age_cut_clfind).and.(tp(ipart).ne.0.d0)) then
+                 if((t-tp(ipart).lt.age_cut_clfind).and.(tp(ipart)>0.d0)) then
                     if(ig==0)then
                        ig=1
                        ind_grid(ig)=igrid

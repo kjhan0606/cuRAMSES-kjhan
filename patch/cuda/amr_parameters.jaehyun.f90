@@ -319,6 +319,20 @@ module amr_parameters
   logical ::sidm_inelastic=.false.  ! Enable inelastic scattering
   real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV]
   real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction
+  ! Dissipative SIDM (dSIDM)
+  real(dp)::sidm_fdiss=0.0d0          ! Dissipation fraction per scatter [0,1)
+  ! DM-baryon drag (IDM)
+  logical ::sidm_baryon=.false.        ! Enable DM-baryon drag force
+  real(dp)::sidm_baryon_sigma=1.0d0    ! sigma_DM-b / m_DM [cm^2/g]
+  real(dp)::sidm_baryon_power=0.0d0    ! velocity power law: sigma ~ v^n (0=constant)
+
+  ! Atomic Dark Matter (aDM) parameters
+  logical ::use_adm=.false.           ! Enable atomic dark matter
+  real(dp)::adm_alpha=0.01d0          ! Dark fine-structure constant
+  real(dp)::adm_mp=1.0d0              ! Dark proton mass [GeV]
+  real(dp)::adm_me_ratio=0.01d0       ! m_e'/m_p' ratio
+  real(dp)::adm_xi=0.5d0              ! T_dark/T_CMB ratio at recoupling
+  real(dp)::adm_cross_section=1.0d0   ! sigma/m for aDM [cm^2/g] (Coulomb)
 
   ! MOND (Modified Newtonian Dynamics) parameters
   logical ::use_mond=.false.             ! Enable QUMOND acceleration correction

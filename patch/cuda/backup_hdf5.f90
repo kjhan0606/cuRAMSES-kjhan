@@ -615,6 +615,19 @@ subroutine backup_part_hdf5()
      end if
   end if
 
+  ! Atomic Dark Matter: dark internal energy
+  if(use_adm) then
+     ipart = 0
+     do i = 1, npartmax
+        if(levelp(i) > 0) then
+           ipart = ipart + 1
+           dbuf(ipart) = edp(i)
+        end if
+     end do
+     call hdf5_write_dataset_1d_dp(grp_id, 'dark_energy_int', &
+          dbuf, npart_loc, offset_part, npart_total)
+  end if
+
   deallocate(dbuf, ibuf8, ibuf)
   call hdf5_close_group(grp_id)
   deallocate(npart_all)
