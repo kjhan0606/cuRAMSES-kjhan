@@ -416,7 +416,7 @@ contains
       real(dp), intent(in), dimension(:) :: walls
       integer, intent(in) :: dir, lev
 
-      integer :: i, nc, lmost, rmost, tmp
+      integer :: i, nc, lmost, rmost, tmp, tmp_level
       real(dp) :: tmp_coord
       integer(i8b) :: tmp_cost
 
@@ -435,6 +435,7 @@ contains
                tmp=bisec_ind_cell(lmost); bisec_ind_cell(lmost)=bisec_ind_cell(rmost); bisec_ind_cell(rmost)=tmp
                tmp_coord=bisec_cell_coord(lmost); bisec_cell_coord(lmost)=bisec_cell_coord(rmost); bisec_cell_coord(rmost)=tmp_coord
                tmp_cost=bisec_cell_cost(lmost); bisec_cell_cost(lmost)=bisec_cell_cost(rmost); bisec_cell_cost(rmost)=tmp_cost
+               tmp_level=bisec_cell_level(lmost); bisec_cell_level(lmost)=bisec_cell_level(rmost); bisec_cell_level(rmost)=tmp_level
                rmost=rmost-1
             end if
          end do
@@ -481,15 +482,44 @@ contains
       scale=boxlen/dble(nx_loc)
       ncell=ncoarse+twotondim*ngridmax
 
-      ncell_max=ncell
+      ! --- Pass 1: count leaf cells for compact allocation ---
+      ncell = 0
+      ! Count coarse leaf cells
+      do ind=1,ncoarse
+         if(cpu_map(ind)==myid .and. son(ind)==0) ncell=ncell+1
+      end do
+      ! Count AMR leaf cells
+      do ilevel=1,nlevelmax
+         do icpu=1,ncpu
+            if(icpu==myid)then
+               ncache=active(ilevel)%ngrid
+            else
+               ncache=reception(icpu,ilevel)%ngrid
+            end if
+            do igrid=1,ncache
+               if(icpu==myid)then
+                  igrid_tmp=active(ilevel)%igrid(igrid)
+               else
+                  igrid_tmp=reception(icpu,ilevel)%igrid(igrid)
+               end if
+               do ind=1,twotondim
+                  iskip=ncoarse+(ind-1)*ngridmax
+                  icell_tmp=igrid_tmp+iskip
+                  if(cpu_map(icell_tmp)==myid .and. son(icell_tmp)==0) ncell=ncell+1
+               end do
+            end do
+         end do
+      end do
 
-      ! On-demand allocation of bisec_ind_cell, cell_level, and cache arrays
+      ncell_max = ncell  ! exact leaf cell count (not theoretical max)
+
+      ! On-demand compact allocation to exact leaf cell count
       if(.not. allocated(bisec_ind_cell))  allocate(bisec_ind_cell(1:ncell_max))
-      if(.not. allocated(cell_level))      allocate(cell_level(1:ncell_max))
+      if(.not. allocated(bisec_cell_level))allocate(bisec_cell_level(1:ncell_max))
       if(.not. allocated(bisec_cell_cost)) allocate(bisec_cell_cost(1:ncell_max))
       if(.not. allocated(bisec_cell_coord))allocate(bisec_cell_coord(1:ncell_max))
 
-      ! Init bisec_ind_cell (partitioned index space -> cell id mapping)
+      ! --- Pass 2: fill arrays with sequential indexing ---
       bisec_ind_cell=0
       ncell=0
       ncell_loc=1
@@ -502,7 +532,7 @@ contains
             ncell=ncell+1
             flag1(ncell)=ind
             bisec_ind_cell(ncell)=ind
-            cell_level(ind)=0       ! 0 for coarse levels (indexed by cell ID)
+            bisec_cell_level(ncell)=0   ! 0 for coarse levels (sequential indexing)
          end if
       end do
       end do
@@ -541,12 +571,10 @@ contains
                   ncell_loc=0
                   do i=1,ngrid
                      if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
-                        cell_level(ind_cell(i))=ilevel
-
                         ncell=ncell+1
                         ncell_loc=ncell_loc+1
+                        bisec_cell_level(ncell)=ilevel  ! sequential indexing
                         flag1(ncell)=ind_cell(i)
-                        
                         bisec_ind_cell(ncell)=ind_cell(i)
                      end if
                   end do
@@ -686,7 +714,7 @@ contains
 
       do i = 1, bisec_ncells_loc
          icell = bisec_ind_cell(i)
-         dx = 0.5d0**cell_level(icell)
+         dx = 0.5d0**bisec_cell_level(i)
 
          if (icell <= ncoarse) then
             iz = (icell - 1) / nxny

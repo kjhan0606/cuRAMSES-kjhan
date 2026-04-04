@@ -102,7 +102,7 @@ module amr_commons
   integer,allocatable,dimension(:)     ::bisec_hist_bounds  ! histogram splitting boundaries          
   integer,allocatable,dimension(:)     ::new_hist_bounds
   integer,allocatable,dimension(:)     ::bisec_ind_cell     ! histo swap id -> cell id map (big)      
-  integer,allocatable,dimension(:)     ::cell_level         ! store the level of the cells (big)      
+  integer,allocatable,dimension(:)     ::bisec_cell_level   ! store the level of leaf cells (compact)
 
   real(dp)::bisec_res                                       ! resolution parameters                   
   integer ::bisec_nres

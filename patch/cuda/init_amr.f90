@@ -99,11 +99,9 @@ subroutine init_amr
     allocate(bisec_hist(1:nbileafnodes,1:bisec_nres))
     allocate(bisec_hist_bounds(1:(nbileafnodes+1)))
     allocate(new_hist_bounds  (1:(nbileafnodes+1)))
-    allocate(bisec_ind_cell(1:ncell))    ! big array
-    allocate(cell_level    (1:ncell))    ! big array
+    ! bisec_ind_cell and bisec_cell_level: on-demand in init_bisection_histogram
     bisec_hist=0
     bisec_hist_bounds=0; new_hist_bounds=0
-    bisec_ind_cell=0; cell_level=0
 
   else if(ordering=='ksection') then
 
@@ -144,7 +142,7 @@ subroutine init_amr
     allocate(bisec_hist(1:nbileafnodes,1:bisec_nres))
     allocate(bisec_hist_bounds(1:(nbileafnodes+1)))
     allocate(new_hist_bounds  (1:(nbileafnodes+1)))
-    ! bisec_ind_cell and cell_level: on-demand in init_bisection_histogram
+    ! bisec_ind_cell and bisec_cell_level: on-demand in init_bisection_histogram
     bisec_hist=0
     bisec_hist_bounds=0; new_hist_bounds=0
   end if

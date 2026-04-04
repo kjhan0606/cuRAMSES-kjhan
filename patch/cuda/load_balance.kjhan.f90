@@ -795,7 +795,7 @@ subroutine cmp_new_cpu_map
 
   ! Free on-demand histogram arrays (no longer needed after build_bisection/ksection)
   if(allocated(bisec_ind_cell))  deallocate(bisec_ind_cell)
-  if(allocated(cell_level))      deallocate(cell_level)
+  if(allocated(bisec_cell_level))deallocate(bisec_cell_level)
   if(allocated(bisec_cell_coord))deallocate(bisec_cell_coord)
   if(allocated(bisec_cell_cost)) deallocate(bisec_cell_cost)
 

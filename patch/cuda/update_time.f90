@@ -502,12 +502,12 @@ subroutine cmpmem(outmem)
   outmem_int=outmem_int+ngridmax*twotondim ! cpu_map2
   ! hilbert_key: minimal for ksection, count only if full-size
   if(size(hilbert_key) > 1) outmem_qdp=outmem_qdp+ngridmax*twotondim
-  ! bisec_ind_cell + cell_level: on-demand, count only if allocated full-size
+  ! bisec_ind_cell + bisec_cell_level: on-demand, count actual size
   if(allocated(bisec_ind_cell)) then
-     if(size(bisec_ind_cell) > 1) outmem_int=outmem_int+ngridmax*twotondim
+     outmem_int=outmem_int+size(bisec_ind_cell)
   end if
-  if(allocated(cell_level)) then
-     if(size(cell_level) > 1) outmem_int=outmem_int+ngridmax*twotondim
+  if(allocated(bisec_cell_level)) then
+     outmem_int=outmem_int+size(bisec_cell_level)
   end if
 
   ! Add communicator variable here

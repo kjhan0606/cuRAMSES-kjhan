@@ -428,7 +428,7 @@ contains
             ! compute the dir coordinate of center of leftmost cell
             ! corresponding cell id
             icell=bisec_ind_cell(lmost)
-            dx = 0.5d0**cell_level(icell)
+            dx = 0.5d0**bisec_cell_level(icell)
             if(icell<=ncoarse) then
                ! extract ix,iy,iz for coarse cells
                iz=(icell-1)/nxny
@@ -513,7 +513,7 @@ contains
             ncell=ncell+1
             flag1(ncell)=ind
             bisec_ind_cell(ncell)=ind
-            cell_level(ncell)=0     ! 0 for coarse levels
+            bisec_cell_level(ncell)=0     ! 0 for coarse levels
          end if
       end do
       end do
@@ -552,7 +552,7 @@ contains
                   ncell_loc=0
                   do i=1,ngrid
                      if(cpu_map(ind_cell(i))==myid.and.son(ind_cell(i))==0)then
-                        cell_level(ind_cell(i))=ilevel
+                        bisec_cell_level(ind_cell(i))=ilevel
 
                         ncell=ncell+1
                         ncell_loc=ncell_loc+1
@@ -606,7 +606,7 @@ contains
          do i=bisec_hist_bounds(ibicell),bisec_hist_bounds(ibicell+1)-1
             ! corresponding cell id
             icell=bisec_ind_cell(i)
-            dx = 0.5d0**cell_level(icell)
+            dx = 0.5d0**bisec_cell_level(icell)
 
             if(icell<=ncoarse) then
                ! extract ix,iy,iz for coarse cells
@@ -635,7 +635,7 @@ contains
 
             ! NOTE : CELL COST FIXED TO 1
             cell_cost = 1
-            ! cell_cost = 2**(cell_level(icell)-1)
+            ! cell_cost = 2**(bisec_cell_level(icell)-1)
             ! stack up the cell in the histogram
             bisec_hist(ibicell,cell_slot) = bisec_hist(ibicell,cell_slot)+cell_cost
          end do

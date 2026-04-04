@@ -169,7 +169,7 @@ contains
       real(dp), intent(in), dimension(:,:) :: all_walls  ! (nc, 1:kfac-1)
 
       integer :: i, nc, lmost, rmost, tmp
-      integer :: part
+      integer :: part, tmp_level
       real(dp) :: tmp_coord
       integer(i8b) :: tmp_cost
 
@@ -202,6 +202,9 @@ contains
                   tmp_cost = bisec_cell_cost(lmost)
                   bisec_cell_cost(lmost) = bisec_cell_cost(rmost)
                   bisec_cell_cost(rmost) = tmp_cost
+                  tmp_level = bisec_cell_level(lmost)
+                  bisec_cell_level(lmost) = bisec_cell_level(rmost)
+                  bisec_cell_level(rmost) = tmp_level
                   rmost = rmost - 1
                end if
             end do
