@@ -35,6 +35,11 @@ subroutine init_poisson
      allocate(scalar_gr_old(1:ncell))
      ! scalar_gr: recomputed by MG solver. Mmap provides zero pages.
   end if
+  if(use_fdm) then
+     allocate(psi_re(1:ncell))
+     allocate(psi_im(1:ncell))
+     ! psi: mmap provides zero pages; initialized by fdm_init_psi or restore
+  end if
   if(cic_levelmax>0)then
      allocate(rho_top(1:ncell))
      ! rho_top: set by rho_fine. Mmap provides zero pages.

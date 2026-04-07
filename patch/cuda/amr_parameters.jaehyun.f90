@@ -317,8 +317,17 @@ module amr_parameters
   real(dp)::sidm_epsilon=0.01d0     ! Rutherford regularization (small=forward-peaked)
   ! Inelastic scattering (iSIDM)
   logical ::sidm_inelastic=.false.  ! Enable inelastic scattering
-  real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV]
-  real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction
+  real(dp)::sidm_delta=0.0d0        ! Mass splitting delta [keV] (2-state shortcut)
+  real(dp)::sidm_frac_excited=0.0d0 ! Initial excited DM fraction (2-state shortcut)
+  ! Multi-state iSIDM (N>2): energy levels E_0=0 < E_1 < E_2 < ... [keV]
+  integer ::sidm_nstates=2           ! Number of DM states (>=2)
+  real(dp),dimension(0:9)::sidm_energy=0.0d0   ! State energies [keV]
+  real(dp),dimension(0:9)::sidm_frac_init=0.0d0 ! Initial population fractions
+  ! Dark phase transition: sigma(v,a) = sigma(v) * g(a)
+  character(len=16)::sidm_a_type='none'   ! 'none','step','sigmoid'
+  real(dp)::sidm_a_transition=0.5d0       ! Scale factor of transition
+  real(dp)::sidm_sigma_ratio=10.0d0       ! sigma_after / sigma_before
+  real(dp)::sidm_a_width=0.05d0           ! Sigmoid transition width
   ! Dissipative SIDM (dSIDM)
   real(dp)::sidm_fdiss=0.0d0          ! Dissipation fraction per scatter [0,1)
   ! DM-baryon drag (IDM)
@@ -333,6 +342,13 @@ module amr_parameters
   real(dp)::adm_me_ratio=0.01d0       ! m_e'/m_p' ratio
   real(dp)::adm_xi=0.5d0              ! T_dark/T_CMB ratio at recoupling
   real(dp)::adm_cross_section=1.0d0   ! sigma/m for aDM [cm^2/g] (Coulomb)
+
+  ! Fuzzy Dark Matter (FDM) Schrödinger-Poisson parameters
+  logical ::use_fdm=.false.           ! Enable FDM (Schrödinger-Poisson)
+  real(dp)::m_axion=1.0d-22           ! Axion mass [eV]
+  real(dp)::fdm_courant=0.5d0         ! CFL factor for SP kinetic step
+  integer ::fdm_nrefine_dB=4          ! Min cells per de Broglie wavelength
+  logical ::fdm_hybrid=.false.        ! Hybrid: FDM + N-body particles (stars/sinks)
 
   ! MOND (Modified Newtonian Dynamics) parameters
   logical ::use_mond=.false.             ! Enable QUMOND acceleration correction

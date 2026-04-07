@@ -1127,6 +1127,37 @@ subroutine restore_poisson_hdf5()
            end do
         end do
 
+        ! Read FDM psi if enabled
+        if(use_fdm) then
+           block
+              logical :: dset_exists
+              integer :: h5err_dset
+              call h5lexists_f(lvl_grp_id, 'psi_re', dset_exists, h5err_dset)
+              if(dset_exists) then
+                 call hdf5_read_dataset_1d_dp(lvl_grp_id, 'psi_re', &
+                      pbuf, ngrid_loc * twotondim, offset_cells)
+                 igrid = headl(myid, ilevel)
+                 do i = 1, ngrid_loc
+                    do ind = 1, twotondim
+                       iskip = ncoarse + (ind - 1) * ngridmax
+                       psi_re(igrid + iskip) = pbuf((i-1)*twotondim + ind)
+                    end do
+                    igrid = next(igrid)
+                 end do
+                 call hdf5_read_dataset_1d_dp(lvl_grp_id, 'psi_im', &
+                      pbuf, ngrid_loc * twotondim, offset_cells)
+                 igrid = headl(myid, ilevel)
+                 do i = 1, ngrid_loc
+                    do ind = 1, twotondim
+                       iskip = ncoarse + (ind - 1) * ngridmax
+                       psi_im(igrid + iskip) = pbuf((i-1)*twotondim + ind)
+                    end do
+                    igrid = next(igrid)
+                 end do
+              end if
+           end block
+        end if
+
         deallocate(pbuf)
         call hdf5_close_group(lvl_grp_id)
      end do
@@ -1144,6 +1175,10 @@ subroutine restore_poisson_hdf5()
      do idim = 1, ndim
         call make_virtual_fine_dp(f(1,idim), ilevel)
      end do
+     if(use_fdm) then
+        call make_virtual_fine_dp(psi_re(1), ilevel)
+        call make_virtual_fine_dp(psi_im(1), ilevel)
+     end if
   end do
 
   if(myid==1) write(*,*) 'HDF5 poisson restore done.'

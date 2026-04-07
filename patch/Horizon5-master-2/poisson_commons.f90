@@ -51,6 +51,10 @@ module poisson_commons
   real(dp),allocatable,dimension(:)  ::scalar_gr       ! Scalar field
   real(dp),allocatable,dimension(:)  ::scalar_gr_old   ! Previous step (initial guess)
 
+  ! Fuzzy Dark Matter (FDM) wavefunction
+  real(dp),allocatable,dimension(:)  ::psi_re          ! Re(psi)
+  real(dp),allocatable,dimension(:)  ::psi_im          ! Im(psi)
+
   ! Multipole coefficients
   real(dp),dimension(1:ndim+1)::multipole
 

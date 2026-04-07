@@ -152,6 +152,18 @@ subroutine rho_fine(ilevel,icount)
   if(pic)then
      call rho_from_current_level(ilevel)
   end if
+  ! FDM density contribution: rho_fdm = |psi|^2
+  if(use_fdm)then
+     do ind=1,twotondim
+        iskip=ncoarse+(ind-1)*ngridmax
+        do i=1,active(ilevel)%ngrid
+           rho(active(ilevel)%igrid(i)+iskip) = &
+                rho(active(ilevel)%igrid(i)+iskip) &
+                + psi_re(active(ilevel)%igrid(i)+iskip)**2 &
+                + psi_im(active(ilevel)%igrid(i)+iskip)**2
+        end do
+     end do
+  end if
   ! Update boudaries
   call make_virtual_reverse_dp(rho(1),ilevel)
   call make_virtual_fine_dp   (rho(1),ilevel)

@@ -67,10 +67,11 @@ supermassive black hole (SMBH) growth and active galactic nucleus
 we perform matched zoom-in simulations of Milky Way--mass haloes
 ($\Mhalo \sim 10^{12}\,\Msun$) with constant cross-sections
 $\sigmam = 0$~(CDM), 1, 5, and 10~$\mathrm{cm^2\,g^{-1}}$, as well
-as velocity-dependent (Yukawa) models.  All runs include identical
-sub-grid physics: metal-dependent cooling, star formation with a
-polytropic equation of state, and dual-mode (thermal plus kinetic) AGN
-feedback from sink-particle SMBHs.
+as dissipative (dSIDM), inelastic (iSIDM), and DM--baryon
+interacting (IDM) variants.  All runs include identical sub-grid
+physics: metal-dependent cooling, star formation with a polytropic
+equation of state, and dual-mode (thermal plus kinetic) AGN feedback
+from sink-particle SMBHs.
 
 We find a rich, nonlinear interplay between SIDM thermodynamics and
 AGN feedback.  In the SIDM \emph{core-expansion} phase ($z \gtrsim
@@ -290,11 +291,12 @@ machine precision.
 
 The code also supports inelastic scattering (iSIDM) with a mass
 splitting $\delta$ between ground and excited states
-\citep{Schutz2015}, and dissipative scattering (dSIDM) in which a
+\citep{Schutz2015}, dissipative scattering (dSIDM) in which a
 fraction $f_{\rm diss}$ of the centre-of-mass kinetic energy is
-radiated away per scatter event \citep{Shen2021}.  While we do not
-employ these extensions in the present work, they enable future
-exploration of richer dark-sector phenomenology.
+radiated away per scatter event \citep{Shen2021}, and a continuous
+DM--baryon drag force (IDM).  These extensions are employed in the
+\code{dSIDM}, \code{iSIDM}, \code{iSIDM-endo}, and \code{IDM} runs
+of our simulation suite (Section~\ref{sec:sims}).
 
 
 % ===================================================================
@@ -324,8 +326,8 @@ $\ell_{\rm max} = 17$, giving a spatial resolution of $\Delta x \sim
 
 \subsection{Run Matrix}
 
-We perform six simulations from identical initial conditions, varying
-only the dark matter self-interaction cross-section:
+We perform eight simulations from identical initial conditions, varying
+the dark matter self-interaction model:
 
 \begin{table}[h]
 \centering
@@ -340,16 +342,25 @@ Label & $\sigmam$ [$\mathrm{cm^2\,g^{-1}}$] & Type & Notes \\
 \code{S1}    & 1   & constant & Conservative \\
 \code{S5}    & 5   & constant & Fiducial \\
 \code{S10}   & 10  & constant & Strong scattering \\
-\code{Y5}    & 5   & Yukawa   & $v_0 = 100\kms$ \\
-\code{Y10}   & 10  & Yukawa   & $v_0 = 100\kms$ \\
+\code{dSIDM} & 1   & constant & Dissipative, $f_{\rm diss} = 0.5$ \\
+\code{IDM}   & 1   & constant & DM--baryon drag, $\sigma_{\rm db}/m = 0.01$ \\
+\code{iSIDM} & 1   & constant & Inelastic (exo), $\delta = 100\,\mathrm{keV}$, $f_{\rm exc,0} = 0.3$ \\
+\code{iSIDM-endo} & 1 & constant & Inelastic (endo), $\delta = 100\,\mathrm{keV}$, $f_{\rm exc,0} = 0$ \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The constant cross-section runs bracket the observationally allowed
-range for Milky Way--mass haloes \citep{Kaplinghat2016,Sagunski2021},
-while the Yukawa runs probe velocity-dependent physics motivated by
-light-mediator models.
+The constant cross-section runs (\code{S1}--\code{S10}) bracket the
+observationally allowed range for Milky Way--mass haloes
+\citep{Kaplinghat2016,Sagunski2021}.  Beyond elastic scattering, we
+include three classes of non-standard dark matter interactions:
+dissipative SIDM (\code{dSIDM}), in which a fraction $f_{\rm diss}$ of
+the centre-of-mass kinetic energy is lost per scatter
+\citep{Shen2021}; DM--baryon momentum exchange (\code{IDM}), where a
+continuous drag force couples the dark matter and baryonic fluids; and
+two-state inelastic scattering (\code{iSIDM}), with an exothermic
+variant ($f_{\rm exc,0} = 0.3$) and an endothermic variant ($f_{\rm
+  exc,0} = 0$) \citep{Schutz2015,Vogelsberger2019}.
 
 \subsection{Halo Finding and Profile Measurement}
 
@@ -720,7 +731,7 @@ inseparable: the dark matter microphysics sets the stage for black
 hole accretion, while the black hole's feedback regulates the dark
 matter profile.  Future work will extend this study to a statistical
 sample of haloes spanning $10^{10}$--$10^{14}\,\Msun$, incorporate
-inelastic and dissipative SIDM variants, and compare directly with
+velocity-dependent (Yukawa) cross-sections, and compare directly with
 JWST observations of high-redshift AGN.
 
 

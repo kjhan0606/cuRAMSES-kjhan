@@ -198,11 +198,14 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   real(dp),dimension(1:3)::v_hat,e1,e2
 
   ! Inelastic scattering variables
-  real(dp)::delta_phys,mu,KE_cm,KE_cm_new,delta_KE,v_rel_new_mag
-  logical::is_excited_1,is_excited_2,do_transition
-  integer::state_change_1,state_change_2  ! -1=de-excite, 0=none, +1=excite
-  integer::n_channels,ichan
-  real(dp)::R_inel
+  real(dp)::mu,KE_cm,KE_cm_new,delta_KE,v_rel_new_mag
+  logical::do_transition
+  integer::istate_1,istate_2,new_state_1,new_state_2
+  integer::n_channels,ichan,j1,j2
+  real(dp)::R_inel,Ei_1,Ei_2,dE
+  ! Multi-state channel arrays (max N*(N+1)/2 = 55 for N=10)
+  integer::chan_j1(55),chan_j2(55)
+  real(dp)::chan_dE(55)
 
   if(subnump<=0) return
 
@@ -223,12 +226,8 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
   ! Physical timestep [s]
   dt_phys = dtnew(ilevel)*scale_t
 
-  ! Inelastic mass splitting [erg] (1 keV = 1.602e-9 erg)
-  if(sidm_inelastic) then
-     delta_phys = sidm_delta * 1.602d-9
-  else
-     delta_phys = 0.0d0
-  end if
+  ! (Multi-state energies are accessed directly as sidm_energy(:) [keV]
+  !  and converted to erg inline: E [erg] = E [keV] * 1.602d-9)
 
   ! Precompute Rutherford parameters
   if(trim(sidm_angular) == 'rutherford') then
@@ -347,6 +346,20 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
               sigma_over_m = sidm_cross_section
            end select
 
+           ! --- Dark phase transition: sigma(v,a) = sigma(v) * g(a) ---
+           select case(trim(sidm_a_type))
+           case('step')
+              if(aexp > sidm_a_transition) then
+                 sigma_over_m = sigma_over_m * sidm_sigma_ratio
+              end if
+           case('sigmoid')
+              sigma_over_m = sigma_over_m * (1.0d0 + &
+                   (sidm_sigma_ratio - 1.0d0) * 0.5d0 * &
+                   (1.0d0 + tanh((aexp - sidm_a_transition)/sidm_a_width)))
+           case default  ! 'none'
+              ! no modification
+           end select
+
            ! Scattering probability
            ! P = (sigma/m) * m_p * v_rel * dt / V_cell * (N_dm - 1)
            mp_phys = 0.5d0*(m1+m2)  ! representative particle mass
@@ -381,82 +394,49 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
            ! --- Inelastic energy change (multi-state iSIDM) ---
            delta_KE = 0.0d0
            do_transition = .false.
-           state_change_1 = 0
-           state_change_2 = 0
-           if(sidm_inelastic .and. delta_phys > 0.0d0) then
-              is_excited_1 = (tp(ind_dm(ipair))   < -0.5d0)
-              is_excited_2 = (tp(ind_dm(ipair+1)) < -0.5d0)
+           new_state_1 = 0
+           new_state_2 = 0
+           if(sidm_inelastic) then
+              ! Current states: tp=0 -> state 0, tp=-1 -> state 1, tp=-2 -> state 2, etc.
+              istate_1 = nint(-tp(ind_dm(ipair)))
+              istate_2 = nint(-tp(ind_dm(ipair+1)))
+              istate_1 = max(0, min(istate_1, sidm_nstates-1))
+              istate_2 = max(0, min(istate_2, sidm_nstates-1))
+              Ei_1 = sidm_energy(istate_1) * 1.602d-9  ! keV -> erg
+              Ei_2 = sidm_energy(istate_2) * 1.602d-9
               mu = m1*m2/mtot
               KE_cm = 0.5d0 * mu * v_rel_mag**2
-              call ranf(seed_loc, R_inel)
 
-              if(.not.is_excited_1 .and. .not.is_excited_2) then
-                 ! g+g: can -> g+e (cost delta) or e+e (cost 2*delta)
-                 n_channels = 0
-                 if(KE_cm > delta_phys)       n_channels = n_channels + 1
-                 if(KE_cm > 2.0d0*delta_phys) n_channels = n_channels + 1
-                 if(n_channels > 0) then
-                    ichan = min(int(R_inel*dble(n_channels))+1, n_channels)
-                    if(ichan==1) then
-                       ! g+g -> g+e (single up-scatter)
-                       delta_KE = -delta_phys
-                       state_change_2 = 1
-                       do_transition = .true.
-                       n_up_loc = n_up_loc + 1
-                    else
-                       ! g+g -> e+e (double up-scatter)
-                       delta_KE = -2.0d0*delta_phys
-                       state_change_1 = 1
-                       state_change_2 = 1
-                       do_transition = .true.
-                       n_up_loc = n_up_loc + 2
-                    end if
-                 end if
+              ! Enumerate all energetically accessible final channels
+              n_channels = 0
+              do j1=0,sidm_nstates-1
+                 do j2=j1,sidm_nstates-1
+                    ! Energy change: dE = (E_j1+E_j2) - (E_i1+E_i2)
+                    ! dE>0 = endothermic (costs KE), dE<0 = exothermic (releases KE)
+                    dE = (sidm_energy(j1)+sidm_energy(j2) &
+                         -sidm_energy(istate_1)-sidm_energy(istate_2)) * 1.602d-9
+                    if(j1==istate_1 .and. j2==istate_2) cycle  ! skip elastic
+                    if(j1==istate_2 .and. j2==istate_1) cycle  ! skip trivial swap
+                    if(dE > 0.0d0 .and. KE_cm < dE) cycle     ! not enough energy
+                    n_channels = n_channels + 1
+                    chan_j1(n_channels) = j1
+                    chan_j2(n_channels) = j2
+                    chan_dE(n_channels) = dE
+                 end do
+              end do
 
-              else if(is_excited_1 .and. is_excited_2) then
-                 ! e+e: can -> e+g (release delta) or g+g (release 2*delta)
-                 ! Both always allowed (exothermic)
-                 if(R_inel < 0.5d0) then
-                    ! e+e -> e+g (single down-scatter)
-                    delta_KE = delta_phys
-                    state_change_2 = -1
-                    do_transition = .true.
-                    n_down_loc = n_down_loc + 1
-                 else
-                    ! e+e -> g+g (double down-scatter)
-                    delta_KE = 2.0d0*delta_phys
-                    state_change_1 = -1
-                    state_change_2 = -1
-                    do_transition = .true.
-                    n_down_loc = n_down_loc + 2
-                 end if
-
-              else
-                 ! Mixed g+e: can -> g+g (release delta) or e+e (cost delta)
-                 n_channels = 1  ! g+e -> g+g always allowed
-                 if(KE_cm > delta_phys) n_channels = 2  ! g+e -> e+e
+              if(n_channels > 0) then
+                 call ranf(seed_loc, R_inel)
                  ichan = min(int(R_inel*dble(n_channels))+1, n_channels)
-                 if(ichan==1) then
-                    ! g+e -> g+g (de-excite the excited one)
-                    delta_KE = delta_phys
-                    if(is_excited_1) then
-                       state_change_1 = -1
-                    else
-                       state_change_2 = -1
-                    end if
-                    do_transition = .true.
-                    n_down_loc = n_down_loc + 1
-                 else
-                    ! g+e -> e+e (excite the ground one)
-                    delta_KE = -delta_phys
-                    if(.not.is_excited_1) then
-                       state_change_1 = 1
-                    else
-                       state_change_2 = 1
-                    end if
-                    do_transition = .true.
-                    n_up_loc = n_up_loc + 1
-                 end if
+                 new_state_1 = chan_j1(ichan)
+                 new_state_2 = chan_j2(ichan)
+                 delta_KE = -chan_dE(ichan)  ! negative dE = KE gained
+                 do_transition = .true.
+                 ! Count up/down transitions
+                 if(new_state_1 > istate_1) n_up_loc = n_up_loc + 1
+                 if(new_state_1 < istate_1) n_down_loc = n_down_loc + 1
+                 if(new_state_2 > istate_2) n_up_loc = n_up_loc + 1
+                 if(new_state_2 < istate_2) n_down_loc = n_down_loc + 1
               end if
            end if
 
@@ -534,10 +514,8 @@ subroutine sub_sidm_scatter(ilevel,icpu,kgrid,subnump,thread_seeds)
 
            ! Apply state transitions (multi-state iSIDM)
            if(do_transition) then
-              if(state_change_1== 1) tp(ind_dm(ipair))   = -1.0d0
-              if(state_change_1==-1) tp(ind_dm(ipair))   =  0.0d0
-              if(state_change_2== 1) tp(ind_dm(ipair+1)) = -1.0d0
-              if(state_change_2==-1) tp(ind_dm(ipair+1)) =  0.0d0
+              tp(ind_dm(ipair))   = -dble(new_state_1)
+              tp(ind_dm(ipair+1)) = -dble(new_state_2)
            end if
 
            ! Conservation diagnostics (momentum: exact, energy: exact
@@ -597,13 +575,26 @@ subroutine sidm_init_excited()
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
-  integer::ilevel,icpu,igrid,jgrid,ipart,jpart,npart1
-  integer::ndm_total,ndm_excited,ndm_existing,info
+  integer::ilevel,icpu,igrid,jgrid,ipart,jpart,npart1,is
+  integer::ndm_total,ndm_existing,info
+  integer,dimension(0:9)::ndm_state
   integer,dimension(1:ncpu,1:IRandNumSize)::allseed
   integer,dimension(1:IRandNumSize)::seed_init
-  real(dp)::R1
+  real(dp)::R1,cum_frac
+  real(dp),dimension(0:9)::cum_prob  ! Cumulative probability for N states
 
-  if(sidm_frac_excited <= 0.0d0) return
+  ! Check if any non-ground population is requested
+  if(sum(sidm_frac_init(1:sidm_nstates-1)) <= 0.0d0) return
+
+  ! Build cumulative probability
+  cum_prob(0) = sidm_frac_init(0)
+  do is=1,sidm_nstates-1
+     cum_prob(is) = cum_prob(is-1) + sidm_frac_init(is)
+  end do
+  ! Normalize (in case fractions don't sum to 1)
+  if(cum_prob(sidm_nstates-1) > 0.0d0) then
+     cum_prob = cum_prob / cum_prob(sidm_nstates-1)
+  end if
 
   ! Check if already initialized (restart case: some DM have tp<0)
   ndm_existing = 0
@@ -625,7 +616,7 @@ subroutine sidm_init_excited()
   if(ndm_existing > 0) then
      if(myid==1) write(*,'(A,I10,A)') &
           ' iSIDM: found ', ndm_existing, &
-          ' pre-excited DM particles (skipping init)'
+          ' pre-existing excited DM (skipping init)'
      return
   end if
 
@@ -634,22 +625,26 @@ subroutine sidm_init_excited()
   seed_init = allseed(myid,1:IRandNumSize)
 
   ndm_total = 0
-  ndm_excited = 0
+  ndm_state = 0
 
-  ! Loop over own grids and randomly excite DM particles
+  ! Loop over own grids and randomly assign states
   do ilevel=levelmin,nlevelmax
      igrid = headl(myid,ilevel)
      do jgrid=1,numbl(myid,ilevel)
         ipart = headp(igrid)
         do jpart=1,numbp(igrid)
-           ! DM: idp>0, tp==0 (ground state)
+           ! DM: idp>0, tp==0 (ground state, not yet assigned)
            if(idp(ipart)>0 .and. tp(ipart)==0.0d0) then
               ndm_total = ndm_total + 1
               call ranf(seed_init, R1)
-              if(R1 < sidm_frac_excited) then
-                 tp(ipart) = -1.0d0
-                 ndm_excited = ndm_excited + 1
-              end if
+              ! Assign state by cumulative probability
+              do is=0,sidm_nstates-1
+                 if(R1 < cum_prob(is)) then
+                    tp(ipart) = -dble(is)  ! state 0 -> tp=0, state 1 -> tp=-1, etc.
+                    ndm_state(is) = ndm_state(is) + 1
+                    exit
+                 end if
+              end do
            end if
            ipart = nextp(ipart)
         end do
@@ -658,15 +653,18 @@ subroutine sidm_init_excited()
   end do
 
   ! Report
-  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,  1,MPI_INTEGER, &
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,1,MPI_INTEGER, &
        MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_excited,1,MPI_INTEGER, &
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_state,sidm_nstates,MPI_INTEGER, &
        MPI_SUM,MPI_COMM_WORLD,info)
   if(myid==1) then
-     write(*,'(A,I10,A,I10,A,F6.3,A)') &
-          ' iSIDM: excited ', ndm_excited, ' of ', ndm_total, &
-          ' DM particles (frac=', &
-          dble(ndm_excited)/dble(max(1,ndm_total)), ')'
+     write(*,'(A,I10,A,I3,A)') &
+          ' iSIDM: initialized ', ndm_total, ' DM into ', sidm_nstates, ' states:'
+     do is=0,sidm_nstates-1
+        write(*,'(A,I2,A,I10,A,F7.4)') &
+             '   state ', is, ': N=', ndm_state(is), &
+             '  frac=', dble(ndm_state(is))/dble(max(1,ndm_total))
+     end do
   end if
 
 end subroutine sidm_init_excited
@@ -704,14 +702,14 @@ subroutine sidm_report_excited_fraction()
 #ifndef WITHOUTMPI
   include 'mpif.h'
 #endif
-  integer::ilevel,igrid,jgrid,ipart,jpart,info
-  integer::ndm_total,ndm_excited
-  real(dp)::frac
+  integer::ilevel,igrid,jgrid,ipart,jpart,info,is,istate
+  integer::ndm_total
+  integer,dimension(0:9)::ndm_state
 
   if(.not.sidm_inelastic) return
 
-  ndm_total   = 0
-  ndm_excited = 0
+  ndm_total = 0
+  ndm_state = 0
   do ilevel=levelmin,nlevelmax
      igrid = headl(myid,ilevel)
      do jgrid=1,numbl(myid,ilevel)
@@ -719,23 +717,35 @@ subroutine sidm_report_excited_fraction()
         do jpart=1,numbp(igrid)
            if(idp(ipart)>0 .and. tp(ipart)<=0.0d0) then
               ndm_total = ndm_total + 1
-              if(tp(ipart) < -0.5d0) ndm_excited = ndm_excited + 1
+              istate = nint(-tp(ipart))
+              istate = max(0, min(istate, 9))
+              ndm_state(istate) = ndm_state(istate) + 1
            end if
            ipart = nextp(ipart)
         end do
         igrid = next(igrid)
      end do
   end do
-  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,  1,MPI_INTEGER, &
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_total,1,MPI_INTEGER, &
        MPI_SUM,MPI_COMM_WORLD,info)
-  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_excited,1,MPI_INTEGER, &
+  call MPI_ALLREDUCE(MPI_IN_PLACE,ndm_state,sidm_nstates,MPI_INTEGER, &
        MPI_SUM,MPI_COMM_WORLD,info)
 
   if(myid==1 .and. ndm_total>0) then
-     frac = dble(ndm_excited)/dble(ndm_total)
-     write(*,'(A,I10,A,I10,A,F8.5)') &
-          ' iSIDM excited: ', ndm_excited, ' / ', ndm_total, &
-          '  f_exc=', frac
+     if(sidm_nstates==2) then
+        ! Compact format for 2-state (backward compatible output)
+        write(*,'(A,I10,A,I10,A,F8.5)') &
+             ' iSIDM excited: ', ndm_state(1), ' / ', ndm_total, &
+             '  f_exc=', dble(ndm_state(1))/dble(ndm_total)
+     else
+        write(*,'(A,I10,A,I3,A)') &
+             ' iSIDM populations: N_DM=', ndm_total, '  (', sidm_nstates, ' states)'
+        do is=0,sidm_nstates-1
+           write(*,'(A,I2,A,I10,A,F7.4)') &
+                '   state ', is, ': ', ndm_state(is), &
+                '  f=', dble(ndm_state(is))/dble(ndm_total)
+        end do
+     end if
   end if
 
 end subroutine sidm_report_excited_fraction

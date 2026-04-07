@@ -3,6 +3,7 @@ subroutine newdt_fine(ilevel)
   use amr_commons
   use hydro_commons
   use poisson_commons, ONLY: gravity_type
+  use fdm_commons, ONLY: hbar_code
 #ifdef RT
   use rt_parameters, ONLY: rt_advect, rt_nsubcycle
 #endif
@@ -65,6 +66,12 @@ subroutine newdt_fine(ilevel)
   end if
   if(cosmo)then
      dtnew(ilevel)=MIN(dtnew(ilevel),0.1/hexp)
+  end if
+  ! FDM kinetic CFL: dt < fdm_courant * dx^2 * a^2 / (6 * hbar_code)
+  if(use_fdm .and. hbar_code > 0.0d0)then
+     dtnew(ilevel)=MIN(dtnew(ilevel), &
+          fdm_courant * (0.5d0**ilevel*boxlen/dble(icoarse_max-icoarse_min+1))**2 &
+          * aexp**2 / (6.0d0 * hbar_code))
   end if
 
 #ifdef ATON

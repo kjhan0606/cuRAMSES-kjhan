@@ -464,6 +464,31 @@ subroutine backup_poisson_hdf5()
              pbuf, ngrid_loc * twotondim, offset_cells, ncells_total)
      end do
 
+     ! Write FDM psi fields if enabled
+     if(use_fdm) then
+        igrid = headl(myid, ilevel)
+        do i = 1, ngrid_loc
+           do ind = 1, twotondim
+              iskip = ncoarse + (ind - 1) * ngridmax
+              pbuf((i-1)*twotondim + ind) = psi_re(igrid + iskip)
+           end do
+           igrid = next(igrid)
+        end do
+        call hdf5_write_dataset_1d_dp(lvl_grp_id, 'psi_re', &
+             pbuf, ngrid_loc * twotondim, offset_cells, ncells_total)
+
+        igrid = headl(myid, ilevel)
+        do i = 1, ngrid_loc
+           do ind = 1, twotondim
+              iskip = ncoarse + (ind - 1) * ngridmax
+              pbuf((i-1)*twotondim + ind) = psi_im(igrid + iskip)
+           end do
+           igrid = next(igrid)
+        end do
+        call hdf5_write_dataset_1d_dp(lvl_grp_id, 'psi_im', &
+             pbuf, ngrid_loc * twotondim, offset_cells, ncells_total)
+     end if
+
      deallocate(pbuf)
      call hdf5_close_group(lvl_grp_id)
   end do

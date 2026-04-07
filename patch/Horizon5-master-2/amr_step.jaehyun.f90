@@ -153,6 +153,8 @@ recursive subroutine amr_step(ilevel,icount)
            ! Refine grids
            !--------------------------
            call refine_fine(i)
+           ! Prolong FDM psi to newly created cells
+           if(use_fdm) call fdm_prolong(i)
         end do
      end if
   end if
@@ -612,6 +614,9 @@ recursive subroutine amr_step(ilevel,icount)
         call synchro_fine(ilevel)
         call system_clock(pt_t2)
         pt_synchro = pt_synchro + dble(pt_t2-pt_t1)/dble(pt_rate)
+
+        ! FDM Schrödinger-Poisson step (after Poisson solve, using latest Phi)
+        if(use_fdm) call fdm_step(ilevel)
 
         ! SIDM scattering (after velocity sync, before timestep)
         if(sidm) call sidm_scatter(ilevel)

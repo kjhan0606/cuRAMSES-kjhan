@@ -66,10 +66,13 @@ subroutine read_params
        & sidm_courant, &
        & sidm_angular,sidm_epsilon, &
        & sidm_inelastic,sidm_delta,sidm_frac_excited, &
+       & sidm_nstates,sidm_energy,sidm_frac_init, &
+       & sidm_a_type,sidm_a_transition,sidm_sigma_ratio,sidm_a_width, &
        & sidm_fdiss, &
        & sidm_baryon,sidm_baryon_sigma,sidm_baryon_power
 namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
        & adm_cross_section
+  namelist/fdm_params/m_axion,fdm_courant,fdm_nrefine_dB,fdm_hybrid
   namelist/mond_params/a0_mond,mond_mu_type,mond_type, &
        & n_iter_mond,mond_eps,g_ext_mond
   namelist/cosmo_params/omega_b,omega_m,omega_l,h0
@@ -230,6 +233,12 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
      rewind(1)
      read(1,NML=adm_params,END=76)
 76   continue
+  end if
+  ! FDM parameters
+  if(use_fdm) then
+     rewind(1)
+     read(1,NML=fdm_params,END=176)
+176  continue
   end if
   rewind(1)
   read(1,NML=mond_params,END=75)
@@ -408,9 +417,22 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
         if(myid==1) write(*,*) 'ERROR: sidm=T but sidm_cross_section<=0'
         call clean_stop
      end if
-     if(sidm_inelastic .and. sidm_delta <= 0.0d0) then
-        if(myid==1) write(*,*) 'ERROR: sidm_inelastic=T but sidm_delta<=0'
+     if(sidm_inelastic .and. sidm_delta <= 0.0d0 &
+          .and. sidm_energy(1) <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: sidm_inelastic=T but no energy splitting set'
         call clean_stop
+     end if
+     ! Auto-populate multi-state arrays from 2-state shortcut
+     if(sidm_inelastic .and. sidm_nstates==2 &
+          .and. sidm_energy(1)==0.0d0 .and. sidm_delta>0.0d0) then
+        sidm_energy(0) = 0.0d0
+        sidm_energy(1) = sidm_delta
+     end if
+     if(sidm_inelastic .and. sidm_nstates==2 &
+          .and. sidm_frac_init(0)==0.0d0 .and. sidm_frac_init(1)==0.0d0 &
+          .and. sidm_frac_excited>0.0d0) then
+        sidm_frac_init(0) = 1.0d0 - sidm_frac_excited
+        sidm_frac_init(1) = sidm_frac_excited
      end if
      if(myid==1) then
         write(*,'(A,ES10.3,A)') ' SIDM enabled: sigma/m=', sidm_cross_section, ' cm^2/g'
@@ -426,8 +448,18 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
         if(trim(sidm_angular) == 'rutherford') &
              write(*,'(A,ES10.3)') '   epsilon=', sidm_epsilon
         if(sidm_inelastic) then
-           write(*,'(A,ES10.3,A)') '   iSIDM: delta=', sidm_delta, ' keV'
-           write(*,'(A,F6.3)')     '   frac_excited=', sidm_frac_excited
+           write(*,'(A,I3)')       '   iSIDM: nstates=', sidm_nstates
+           write(*,'(A,10ES10.3)') '   energies [keV]=', &
+                sidm_energy(0:sidm_nstates-1)
+           write(*,'(A,10F7.3)')   '   frac_init=', &
+                sidm_frac_init(0:sidm_nstates-1)
+        end if
+        if(trim(sidm_a_type) /= 'none') then
+           write(*,'(A,A)')         '   Phase transition type: ', trim(sidm_a_type)
+           write(*,'(A,F8.4)')      '   a_transition=', sidm_a_transition
+           write(*,'(A,F8.2)')      '   sigma_ratio=', sidm_sigma_ratio
+           if(trim(sidm_a_type) == 'sigmoid') &
+                write(*,'(A,F8.4)') '   a_width=', sidm_a_width
         end if
         if(sidm_fdiss > 0.0d0) then
            write(*,'(A,F6.3)')     '   dSIDM: fdiss=', sidm_fdiss
@@ -483,6 +515,31 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
         write(*,'(A,ES10.3)') '   m_e''/m_p''=', adm_me_ratio
         write(*,'(A,F6.3)')   '   xi       =', adm_xi
         write(*,'(A,ES10.3,A)') '   sigma/m  =', adm_cross_section, ' cm^2/g'
+     end if
+  end if
+
+  !-------------------------------------------------
+  ! Fuzzy Dark Matter (FDM)
+  !-------------------------------------------------
+  if(use_fdm) then
+     if(.not. poisson) then
+        if(myid==1) write(*,*) 'ERROR: use_fdm=T requires poisson=T'
+        call clean_stop
+     end if
+     if(m_axion <= 0.0d0) then
+        if(myid==1) write(*,*) 'ERROR: m_axion must be > 0'
+        call clean_stop
+     end if
+     if(sidm) then
+        if(myid==1) write(*,*) 'ERROR: FDM and SIDM are mutually exclusive'
+        call clean_stop
+     end if
+     if(myid==1) then
+        write(*,'(A)')         ' Fuzzy Dark Matter (FDM) enabled:'
+        write(*,'(A,ES10.3,A)') '   m_axion  =', m_axion, ' eV'
+        write(*,'(A,F5.2)')    '   courant  =', fdm_courant
+        write(*,'(A,I3)')      '   nrefine_dB=', fdm_nrefine_dB
+        write(*,'(A,L1)')      '   hybrid   =', fdm_hybrid
      end if
   end if
 

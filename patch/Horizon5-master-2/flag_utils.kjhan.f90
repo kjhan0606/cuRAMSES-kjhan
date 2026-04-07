@@ -540,6 +540,9 @@ subroutine userflag_fine(ilevel)
   if(rt)call rt_hydro_flag(ilevel)
 #endif
 
+  ! FDM de Broglie wavelength refinement
+  if(use_fdm) call fdm_refine_flag(ilevel)
+
   ! Update boundaries
   call make_virtual_fine_int(flag1(1),ilevel)
   if(simple_boundary)call make_boundary_flag(ilevel)
