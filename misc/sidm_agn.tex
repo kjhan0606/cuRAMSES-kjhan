@@ -60,43 +60,59 @@ $^{1}$Center for Advanced Computation, Korea Institute for Advanced Study,
 % ABSTRACT
 % ===================================================================
 \begin{abstract}
-We present the first cosmological hydrodynamic simulations that
-self-consistently couple self-interacting dark matter (SIDM) with
-supermassive black hole (SMBH) growth and active galactic nucleus
-(AGN) feedback.  Using the \curamses\ adaptive mesh refinement code,
-we perform matched zoom-in simulations of Milky Way--mass haloes
-($\Mhalo \sim 10^{12}\,\Msun$) with constant cross-sections
-$\sigmam = 0$~(CDM), 1, 5, and 10~$\mathrm{cm^2\,g^{-1}}$, as well
-as dissipative (dSIDM), inelastic (iSIDM), and DM--baryon
-interacting (IDM) variants.  All runs include identical sub-grid
+We present the first cosmological hydrodynamic simulation campaign
+that self-consistently couples self-interacting dark matter (SIDM)
+with supermassive black hole (SMBH) growth and active galactic
+nucleus (AGN) feedback in a representative cosmological volume.
+Using the \curamses\ adaptive mesh refinement code, we run a suite
+of eight matched simulations in a $(128\,h^{-1}\Mpc)^3$ box with
+$1024^3$ dark matter particles (particle mass $m_{\rm DM} \approx
+2.2\times 10^{8}\,\Msun$) and an AMR hierarchy extending to
+$\ell_{\rm max}=17$ (finest cell $\Delta x \simeq 2.1\,\mathrm{ckpc}/h$).
+The suite comprises: a $\LCDM$ reference run; three elastic SIDM
+runs with constant isotropic cross-sections $\sigmam =
+1$, $5$, and $10\,\mathrm{cm^2\,g^{-1}}$; one dissipative SIDM run
+(\code{dSIDM}) with energy-loss fraction $f_{\rm diss}=0.5$ at
+$\sigmam = 1\,\mathrm{cm^2\,g^{-1}}$; one interacting dark matter
+run (\code{IDM}) with a DM--baryon drag cross-section
+$\sigma_{\rm db}/m = 0.01\,\mathrm{cm^2\,g^{-1}}$; and two inelastic
+(two-state) SIDM runs (\code{iSIDM}, \code{iSIDM-endo}) with mass
+splitting $\delta = 100\,\mathrm{keV}$ and initial excited fractions
+$f_{\rm exc,0} = 0.3$ (exothermic) and $0$ (endothermic).  All runs
+share identical initial conditions and identical baryonic sub-grid
 physics: metal-dependent cooling, star formation with a polytropic
-equation of state, and dual-mode (thermal plus kinetic) AGN feedback
-from sink-particle SMBHs.
+equation of state, Type II supernova feedback, and dual-mode
+(thermal plus kinetic) AGN feedback from sink-particle SMBHs with
+seed mass $M_{\rm seed}=10^{4}\,\Msun$.
 
-We find a rich, nonlinear interplay between SIDM thermodynamics and
-AGN feedback.  In the SIDM \emph{core-expansion} phase ($z \gtrsim
-2$), the reduced central dark matter density lowers the SMBH accretion
-rate by a factor of $2$--$5$ compared to CDM, delaying the onset of
-quasar-mode feedback.  Gas that would have been expelled in CDM
-remains bound, sustaining elevated star formation rates for $\sim
-1\Gyr$ longer.  At later times ($z \lesssim 1$), haloes with
-$\sigmam \ge 5\,\mathrm{cm^2\,g^{-1}}$ enter the gravothermal
+Across a statistical halo population covering
+$10^{10}$--$10^{14}\,\Msun$, we find a rich, nonlinear interplay
+between SIDM thermodynamics and AGN feedback.  In the SIDM
+\emph{core-expansion} phase ($z \gtrsim 2$), the reduced central
+dark matter density lowers the SMBH accretion rate by a factor of
+$2$--$5$ compared to CDM, delaying the onset of quasar-mode
+feedback.  Gas that would have been expelled in CDM remains bound,
+sustaining elevated star formation rates for $\sim 1\Gyr$ longer.
+At later times ($z \lesssim 1$), haloes with $\sigmam \ge
+5\,\mathrm{cm^2\,g^{-1}}$ enter the gravothermal
 \emph{core-collapse} phase, during which the central dark matter
 density rises above the CDM cusp value.  This triggers a burst of
-Bondi accretion that can overshoot the CDM black hole mass by up to a
-factor of $3$, producing a luminous AGN episode whose feedback then
-re-expands the core---establishing a limit cycle with a period of
+Bondi accretion that can overshoot the CDM black hole mass by up to
+a factor of $3$, producing a luminous AGN episode whose feedback
+then re-expands the core---establishing a limit cycle with period
 $\sim 0.5$--$1\Gyr$.
 
 The resulting $\MBH$--$\vdisp$ relation is flattened at the low-mass
 end in SIDM relative to CDM, consistent with recent observational
-hints from dwarf AGN surveys.  We predict that SIDM leaves a
-characteristic imprint on the scatter and redshift evolution of SMBH
-scaling relations that is distinguishable from baryonic-feedback
-uncertainties.  Our results demonstrate that SMBH growth cannot be
-modelled independently of the dark matter microphysics, and that AGN
-feedback in turn regulates the gravothermal evolution of SIDM haloes,
-breaking the degeneracy between $\sigmam$ and halo concentration.
+hints from dwarf AGN surveys.  The non-elastic variants break
+further degeneracies: \code{dSIDM} accelerates core collapse,
+\code{iSIDM} (exothermic) heats the centre and suppresses collapse
+entirely, while \code{iSIDM-endo} and \code{IDM} bracket the range
+of weakly modified CDM-like evolution.  Our results demonstrate that
+SMBH growth cannot be modelled independently of the dark matter
+microphysics, and that AGN feedback in turn regulates the
+gravothermal evolution of SIDM haloes, breaking the degeneracy
+between $\sigmam$ and halo concentration.
 \end{abstract}
 
 \begin{keywords}
@@ -154,11 +170,12 @@ SMBH growth together in a cosmological context with sufficient
 resolution to resolve the core--cusp transition in Milky Way--mass
 haloes.
 
-In this paper we fill this gap.  We present cosmological zoom-in
-simulations performed with the \curamses\ code \citep{Kim2024}, which
-combines adaptive mesh refinement hydrodynamics with a Monte Carlo
-SIDM scattering module, sink-particle SMBHs, and dual-mode AGN
-feedback.  Our goals are:
+In this paper we fill this gap.  We present a suite of full-volume
+cosmological hydrodynamic simulations performed with the \curamses\
+code \citep{Kim2024}, which combines adaptive mesh refinement
+hydrodynamics with a Monte Carlo SIDM scattering module (including
+dissipative, inelastic, and DM--baryon interacting extensions),
+sink-particle SMBHs, and dual-mode AGN feedback.  Our goals are:
 \begin{enumerate}
   \item to quantify how SIDM core formation and gravothermal collapse
     modify the SMBH accretion history;
@@ -192,13 +209,27 @@ conclusions.
 
 We use the \curamses\ code, an extended version of the \ramses\ AMR
 code \citep{Teyssier2002}.  \curamses\ solves the Euler equations on
-an octree-based adaptive mesh with second-order Godunov hydrodynamics
-and a multigrid Poisson solver for self-gravity.  Refinement follows a
-quasi-Lagrangian criterion: a cell is refined when its total
-(baryonic$+$dark matter) mass exceeds $8\,m_{\rm DM}$, where $m_{\rm
-  DM}$ is the dark matter particle mass.  The maximum refinement level
-$\ell_{\rm max}$ is chosen to achieve a spatial resolution of $\sim
-1\kpc$ (proper) at $z=0$.
+an octree-based adaptive mesh with second-order Godunov MUSCL
+hydrodynamics ($\gamma = 5/3$, \code{slope\_type=1}, Courant factor
+$0.8$), and either a geometric multigrid or an FFTW-based direct
+solver for self-gravity.  For the simulations presented here we use
+the FFTW direct solver at the base level (\code{use\_fftw=.true.})
+coupled to the multigrid solver on refined levels, which we find
+reduces the Poisson cost by $\sim 8\times$ at $512^3$--$1024^3$
+resolution.  Refinement follows a quasi-Lagrangian criterion: a cell
+is refined when its total (baryonic$+$dark matter) mass exceeds
+$8\,m_{\rm DM}$, where $m_{\rm DM}$ is the dark matter particle
+mass.  Refinement holdback (\code{q\_refine\_holdback=.true.}) is
+enabled to implement the graduated \code{levelmax} scheme of
+\citet{Snaith2018}, which unlocks successive levels at
+$a=0.0125,0.025,0.05,0.1,0.2,0.4,0.8$ to keep the proper-resolution
+$\sim 1\kpc$ throughout the simulation.  The finest level
+$\ell_{\rm max}=17$ gives a comoving cell size $\Delta x \simeq
+2.1\,\mathrm{kpc}/h$, corresponding to $\sim 1\kpc$ proper at $z=0$.
+Communication-heavy operations (hierarchical ``ksection'' exchange,
+memory-based load balancing with grid/particle/sink weights, and
+Morton-hash octree neighbour lookup) are described in a companion
+methods paper \citep{Kim2024}.
 
 \subsubsection{Cooling and Star Formation}
 
@@ -218,36 +249,51 @@ II supernovae with a \citet{Chabrier2003} IMF.
 \label{sec:agn}
 
 SMBHs are represented by sink particles \citep{Bleuler2014} with seed
-mass $M_{\rm seed} = 10^5\,\Msun$, formed in cells that satisfy the
+mass $M_{\rm seed} = 10^{4}\,\Msun$, formed in cells that satisfy the
 Jeans criterion and have no pre-existing sink within $4\,\Delta x$.
+A merger radius $r_{\rm merge}=4\,\Delta x$ and a relative-velocity
+check (\code{vrel\_merge=.true.}) are used when coalescing sinks.
 Bondi--Hoyle--Lyttleton accretion is computed as
 \begin{equation}
-  \dot{M}_{\rm BH} = \frac{4\pi\,\alpha_{\rm B}\,G^2\,\MBH^2\,
-    \bar\rho}{(\bar{c}_s^2 + \bar{v}^2)^{3/2}}\,,
+  \dot{M}_{\rm BH} = \alpha_{\rm B}\,
+    \frac{4\pi\,G^2\,\MBH^2\,\bar\rho}
+         {(\bar{c}_s^2 + \bar{v}^2)^{3/2}}\,,
   \label{eq:bondi}
 \end{equation}
 where $\bar\rho$, $\bar{c}_s$, and $\bar{v}$ are the gas density,
-sound speed, and relative velocity averaged over the accretion kernel,
-and $\alpha_{\rm B}$ is a boost factor capped so that $\dot{M}_{\rm
-  BH} \le \dot{M}_{\rm Edd}$.
+sound speed, and relative velocity averaged over the accretion
+kernel of radius $r_{\rm AGN}=4\,\Delta x$, and $\alpha_{\rm B}=2$
+is a boost factor that mimics unresolved cold-phase clumping; the
+rate is capped at Eddington.  A dynamical-friction drag force
+(\code{drag=.true.}, \code{boost\_drag=2}) accounts for
+unresolved gaseous dynamical friction on the sinks, and the sink
+spin evolution is tracked (\code{spin\_bh=.true.}) to modulate the
+radiative efficiency via a MAD-jet prescription
+(\code{mad\_jet=.true.}).
 
 AGN feedback operates in two modes:
 \begin{itemize}
-  \item \textbf{Quasar (thermal) mode} ($\chi = \dot{M}_{\rm
-    BH}/\dot{M}_{\rm Edd} > 0.01$): a fraction $\epsilon_f = 0.15$ of
-    the rest-mass accretion energy is deposited as thermal energy in a
-    sphere of radius $\Delta x$ around the sink:
+  \item \textbf{Quasar (thermal) mode} ($\chi =
+    \dot{M}_{\rm BH}/\dot{M}_{\rm Edd} > 0.01$): a fraction
+    $\epsilon_{f,T}=0.15$ (\code{eAGN\_T=0.15}) of the rest-mass
+    accretion energy is deposited as thermal energy in a sphere of
+    radius $r_{\rm AGN}$ around the sink:
     \begin{equation}
-      \dot{E}_{\rm AGN} = \epsilon_f\,\epsilon_r\,\dot{M}_{\rm BH}\,c^2\,,
+      \dot{E}_{\rm AGN} =
+        \epsilon_{f,T}\,\epsilon_r\,\dot{M}_{\rm BH}\,c^2\,,
     \end{equation}
-    with radiative efficiency $\epsilon_r = 0.1$.
-  \item \textbf{Radio (kinetic) mode} ($\chi < 0.01$): bipolar jets
-    inject momentum along the black hole spin axis with efficiency
-    $\epsilon_{\rm jet}$.
+    with radiative efficiency $\epsilon_r = 0.1$.  A temperature
+    ceiling $T^{\rm AGN}_{2,\max}=10^{8}\,$K prevents unphysical
+    heating of poorly resolved cold gas; residual energy is
+    deferred, and an eEOS polytropic floor plus a Mach cap ($M<100$)
+    absorb any kinetic overshoot \citep{KimInPrep2026}.
+  \item \textbf{Radio (kinetic) mode} ($\chi < \chi_{\rm crit}$):
+    bipolar jets inject momentum along the black hole spin axis
+    with efficiency $\epsilon_{f,K}=1.0$ (\code{eAGN\_K=1.0}).
 \end{itemize}
 This dual-mode scheme is calibrated to reproduce the
-$\MBH$--$\vdisp$ relation and the galaxy stellar mass function in CDM
-\citep{Dubois2012}.
+$\MBH$--$\vdisp$ relation and the galaxy stellar mass function in
+CDM \citep{Dubois2012}.
 
 \subsection{SIDM Monte Carlo Scattering}
 \label{sec:sidm}
@@ -305,72 +351,226 @@ of our simulation suite (Section~\ref{sec:sims}).
 \section{Simulation Suite}
 \label{sec:sims}
 
-\subsection{Initial Conditions}
+\subsection{Cosmological Volume and Initial Conditions}
+\label{sec:ics}
 
-We select a Milky Way--mass halo ($\Mhalo \approx 1.2 \times
-10^{12}\,\Msun$ at $z=0$) from a parent $N$-body simulation in a
-$(100\,h^{-1}\Mpc)^3$ box with cosmological parameters $\Omega_{\rm m}
-= 0.3089$, $\Omega_\Lambda = 0.6911$, $\Omega_{\rm b} = 0.0486$,
-$h = 0.6774$, $\sigma_8 = 0.8159$, and $n_s = 0.9667$
-\citep{Planck2016}.  The halo is chosen to have a quiescent merger
-history since $z \sim 1$, representative of a typical disc galaxy
-host.
+Our simulations are full-volume cosmological boxes (as opposed to
+zoom-in resimulations), chosen so that a statistical population of
+haloes spanning $10^{10}$--$10^{14}\,\Msun$ is resolved in a single
+pass.  All runs share identical \textsc{grafic}-format initial
+conditions generated at $a_{\rm start} = 0.0099$ ($z = 100$) in a
+cubic box of side
+\begin{equation}
+  L_{\rm box} = 128\,h^{-1}\Mpc \approx 189\Mpc,
+\end{equation}
+with $N_{\rm DM} = 1024^{3}$ dark matter particles on a base
+mesh of size $2^{10}$.  The cosmological parameters are
+$\Omega_{\rm m} = 0.311$, $\Omega_\Lambda = 0.689$,
+$\Omega_{\rm b} = 0.040$, $H_0 = 67.66\kms\Mpc^{-1}$
+($h = 0.6766$), with a power spectrum normalised and tilted
+consistent with \citet{Planck2020}.  The resulting dark matter
+particle mass is
+\begin{equation}
+  m_{\rm DM} = \Omega_{\rm c}\,\rho_{\rm crit,0}\,
+    L_{\rm box}^{3}/N_{\rm DM}
+  \approx 2.2\times 10^{8}\,\Msun\,,
+\end{equation}
+and the baseline gas-cell mass is $m_{\rm gas}\approx 2.8\times
+10^{7}\,\Msun$ (refined adaptively).  AMR is allowed from
+$\ell_{\rm min}=10$ up to $\ell_{\rm max}=17$, corresponding to a
+maximally refined comoving cell size
+\begin{equation}
+  \Delta x_{\rm min} = \frac{L_{\rm box}}{2^{\ell_{\rm max}}}
+    = 9.77\times 10^{-4}\,h^{-1}\Mpc
+    \approx 1.44\,\mathrm{ckpc}/h\,,
+\end{equation}
+i.e.\ $\sim 0.97\kpc$ proper at $z = 0$.  The graduated
+\code{levelmax} schedule unlocks the next AMR level at $a =
+0.0125$, $0.025$, $0.05$, $0.1$, $0.2$, $0.4$, and $0.8$ to keep the
+proper resolution approximately constant, following the HR5
+schedule \citep{Lee2021}.  Table~\ref{tab:specs} summarises the
+numerical specifications.
 
-Zoom-in initial conditions are generated at $z = 100$ with
-\textsc{MUSIC} \citep{Hahn2011}.  The high-resolution Lagrangian
-region ($\sim 3\,R_{\rm vir}$ at $z=0$) is resolved with dark matter
-particle mass $m_{\rm DM} = 1.2 \times 10^6\,\Msun$ and initial gas
-cell mass $m_{\rm gas} = 2.2 \times 10^5\,\Msun$.  AMR reaches
-$\ell_{\rm max} = 17$, giving a spatial resolution of $\Delta x \sim
-570\,\mathrm{pc}$ (proper) at $z=0$.
-
-\subsection{Run Matrix}
-
-We perform eight simulations from identical initial conditions, varying
-the dark matter self-interaction model:
-
-\begin{table}[h]
+\begin{table}
 \centering
-\caption{Simulation suite.  All runs share identical baryonic physics
-  and initial conditions.}
-\label{tab:runs}
-\begin{tabular}{lccl}
+\caption{Numerical specifications common to all eight runs.}
+\label{tab:specs}
+\begin{tabular}{ll}
 \toprule
-Label & $\sigmam$ [$\mathrm{cm^2\,g^{-1}}$] & Type & Notes \\
-\midrule
-\code{CDM}   & 0   & ---      & Reference $\LCDM$ \\
-\code{S1}    & 1   & constant & Conservative \\
-\code{S5}    & 5   & constant & Fiducial \\
-\code{S10}   & 10  & constant & Strong scattering \\
-\code{dSIDM} & 1   & constant & Dissipative, $f_{\rm diss} = 0.5$ \\
-\code{IDM}   & 1   & constant & DM--baryon drag, $\sigma_{\rm db}/m = 0.01$ \\
-\code{iSIDM} & 1   & constant & Inelastic (exo), $\delta = 100\,\mathrm{keV}$, $f_{\rm exc,0} = 0.3$ \\
-\code{iSIDM-endo} & 1 & constant & Inelastic (endo), $\delta = 100\,\mathrm{keV}$, $f_{\rm exc,0} = 0$ \\
+Box side $L_{\rm box}$ & $128\,h^{-1}\Mpc$ \\
+DM particle number & $1024^{3}$ \\
+Particle mass $m_{\rm DM}$ & $2.2\times 10^{8}\,\Msun$ \\
+Base / max AMR level & $\ell_{\rm min}=10$ / $\ell_{\rm max}=17$ \\
+Finest comoving cell & $1.44\,\mathrm{ckpc}/h$ \\
+Proper resolution at $z=0$ & $\sim 0.97\kpc$ \\
+Starting redshift & $z_{\rm start} = 100$ ($a = 0.0099$) \\
+$\Omega_{\rm m},\,\Omega_\Lambda,\,\Omega_{\rm b}$
+  & $0.311,\,0.689,\,0.040$ \\
+$h$ & $0.6766$ \\
+Hydrodynamic scheme & Godunov MUSCL, $\gamma=5/3$ \\
+Courant factor & $0.8$ \\
+Poisson solver & FFTW (base) $+$ multigrid (refined) \\
+Refinement criterion & quasi-Lagrangian, $m>8\,m_{\rm DM}$ \\
+Refinement holdback & \code{q\_refine\_holdback=.true.} \\
+Sink seed mass & $M_{\rm seed}=10^{4}\,\Msun$ \\
+AGN kernel radius & $r_{\rm AGN}=4\,\Delta x$ \\
+AGN quasar/radio efficiency
+  & $\epsilon_{f,T}=0.15$ / $\epsilon_{f,K}=1.0$ \\
+Bondi boost $\alpha_{\rm B}$ & $2$ \\
+AGN thermal ceiling $T^{\rm AGN}_{2,\max}$ & $10^{8}\,$K \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The constant cross-section runs (\code{S1}--\code{S10}) bracket the
-observationally allowed range for Milky Way--mass haloes
-\citep{Kaplinghat2016,Sagunski2021}.  Beyond elastic scattering, we
-include three classes of non-standard dark matter interactions:
-dissipative SIDM (\code{dSIDM}), in which a fraction $f_{\rm diss}$ of
-the centre-of-mass kinetic energy is lost per scatter
-\citep{Shen2021}; DM--baryon momentum exchange (\code{IDM}), where a
-continuous drag force couples the dark matter and baryonic fluids; and
-two-state inelastic scattering (\code{iSIDM}), with an exothermic
-variant ($f_{\rm exc,0} = 0.3$) and an endothermic variant ($f_{\rm
-  exc,0} = 0$) \citep{Schutz2015,Vogelsberger2019}.
+\subsection{Run Matrix}
+\label{sec:runmatrix}
+
+We perform eight simulations from identical initial conditions,
+varying only the dark matter self-interaction sector
+(Table~\ref{tab:runs}).  The code parameters listed are those of
+the \code{\&SIDM\_PARAMS} namelist block actually used in
+production.
+
+\begin{table*}
+\centering
+\caption{SIDM--AGN simulation suite.  All runs share the identical
+  initial conditions, baryonic sub-grid physics, and AGN feedback
+  parameters of Table~\ref{tab:specs}.  Only the dark-matter
+  microphysics block differs.}
+\label{tab:runs}
+\begin{tabular}{llcll}
+\toprule
+Label & Directory & $\sigmam$ [$\mathrm{cm^2\,g^{-1}}$]
+      & Model & Key parameters \\
+\midrule
+\code{CDM}   & \code{run\_cdm}        & 0   & $\LCDM$
+  & --- \\
+\code{S1}    & \code{run\_sidm}       & 1   & elastic constant
+  & isotropic scattering \\
+\code{S5}    & \code{run\_sidm5}      & 5   & elastic constant
+  & isotropic scattering \\
+\code{S10}   & \code{run\_sidm10}     & 10  & elastic constant
+  & isotropic scattering \\
+\code{dSIDM} & \code{run\_dsidm}      & 1   & dissipative elastic
+  & $f_{\rm diss} = 0.5$ \\
+\code{IDM}   & \code{run\_idm}        & 1   & DM $+$ DM--baryon drag
+  & $\sigma_{\rm db}/m = 0.01$, $\alpha_{\rm drag}=0$ \\
+\code{iSIDM} & \code{run\_isidm}      & 1   & inelastic two-state
+  & $\delta=100\,\mathrm{keV}$, $f_{\rm exc,0}=0.3$ (exothermic) \\
+\code{iSIDM-endo} & \code{run\_isidm\_endo} & 1 & inelastic two-state
+  & $\delta=100\,\mathrm{keV}$, $f_{\rm exc,0}=0$ (endothermic) \\
+\bottomrule
+\end{tabular}
+\end{table*}
+
+The constant-cross-section runs (\code{S1}--\code{S10}) bracket the
+observationally allowed range from Milky-Way--mass haloes to galaxy
+groups \citep{Kaplinghat2016,Sagunski2021}.  Beyond elastic
+scattering we include three non-standard dark-matter variants
+implemented in \curamses\ as part of this work:
+\begin{itemize}
+  \item \textbf{Dissipative SIDM} (\code{dSIDM}): at each scatter
+    event, a fraction $f_{\rm diss}$ of the centre-of-mass kinetic
+    energy is radiated into an invisible dark sector
+    \citep{Shen2021,Essig2019}.  Momentum is conserved exactly;
+    energy conservation is tracked diagnostically.  For $f_{\rm
+      diss}=0.5$ this accelerates core collapse relative to elastic
+    scattering at fixed $\sigmam$.
+  \item \textbf{DM--baryon interacting DM} (\code{IDM}): an
+    additional DM--baryon drag force is applied proportional to the
+    gas--DM relative velocity with cross-section $\sigma_{\rm
+      db}/m = 0.01\,\mathrm{cm^2\,g^{-1}}$ and velocity power-law
+    index $\alpha_{\rm drag} = 0$ (constant cross-section).  This
+    is additive to the elastic DM--DM scattering at $\sigmam =
+    1\,\mathrm{cm^2\,g^{-1}}$.
+  \item \textbf{Inelastic (two-state) SIDM} (\code{iSIDM},
+    \code{iSIDM-endo}): dark matter consists of two nearly
+    degenerate states separated by $\delta = 100\,\mathrm{keV}$.
+    Three scattering channels (elastic, excitation, and
+    de-excitation) are sampled stochastically using the
+    generalisation of \citet{Schutz2015} to cosmological $N$-body
+    contexts.  We run a maximally exothermic case with initial
+    excited fraction $f_{\rm exc,0}=0.3$ (cosmological heat
+    injection at late times) and a purely endothermic case with
+    $f_{\rm exc,0}=0$ (cooling channel only).
+\end{itemize}
+
+\subsection{Infrastructure, Checkpointing, and Current Status}
+\label{sec:infrastructure}
+
+The simulations are executed on the KIAS \textsc{grammar} cluster
+on partitions of $4$--$12$ nodes per run, with each node providing
+$128$~CPU cores.  Dominant MPI communication costs
+(ghost-zone exchange, multigrid Poisson, sink/AGN reductions) are
+mitigated by the \emph{hierarchical k-section} exchange routine
+\citep{Kim2024}, which replaces the \code{MPI\_ALLTOALL} patterns
+of baseline \ramses\ with a balanced $k$-ary tree.  This yields a
+$3$--$5\times$ speed-up at $\ge 256$ MPI ranks and suppresses the
+InfiniBand transport-layer retry events that previously caused
+coarse-step hangs at high rank counts.  Memory-based dynamic load
+balancing (\code{memory\_balance=.true.}) weighs grid, particle,
+and sink contributions to equalise per-rank footprint to
+$\lesssim 5$ per cent, and lazy-page (anonymous \code{mmap})
+initialisation in \code{init\_amr}, \code{init\_hydro},
+\code{init\_poisson}, and \code{init\_part} saves
+$\approx 36\,\mathrm{GB}$ of resident memory per rank at
+$1024^{3}$.
+
+Because each checkpoint is $\approx 650\,\mathrm{GB}$ on disk, a
+compromise between safety and storage dictates our checkpoint
+cadence.  We set \code{foutput=500} (one safety dump every $500$
+coarse steps, or roughly every $8$--$15$ wall-clock hours in
+production) in addition to the $41$ scientific snapshots spaced
+logarithmically in $a$ between $z=11.6$ ($a=0.079$) and $z=0$
+($a=1.0$).
+
+Node crashes and memory exhaustion events in the largest runs
+(\code{S5}, \code{S10}, and later \code{iSIDM}) motivated us to
+implement a three-level auto-restart protection in the SLURM
+submission script \code{run.sh}:
+\begin{enumerate}
+  \item \emph{Startup synchronisation}: immediately upon launch,
+    the script parses \code{output\_*} directories and rewrites
+    \code{nrestart} in the namelist to the latest available
+    checkpoint.
+  \item \emph{In-job retry loop}: the main \code{srun} call is
+    wrapped in a loop of up to $10$ attempts; any non-zero exit
+    triggers a re-synchronisation of \code{nrestart} and a fresh
+    attempt, recovering transparently from single-node faults,
+    MPI transport retries, and transient IB errors.
+  \item \emph{SLURM successor job}: a zero-length dependency job
+    is submitted at start with
+    \code{--dependency=afternotok:\$SLURM\_JOB\_ID}, which auto-runs
+    the same script if the parent job exits without a clean return
+    code (e.g.\ full node death that kills the in-job loop itself).
+    The successor is cancelled automatically on clean exit of the
+    parent.
+\end{enumerate}
+At the time of writing (April 2026), the suite has advanced to
+different redshifts due to their differing scattering rates and
+crash histories: the elastic runs \code{S1}, \code{S5}, and
+\code{S10} have progressed to $z \simeq 7$ (coarse step $\sim
+250$--$630$), while \code{CDM} and the non-elastic variants
+\code{dSIDM}, \code{iSIDM}, and \code{iSIDM-endo} are restarting
+from their most recent checkpoints (outputs 5--28) under the
+auto-restart protocol.  All runs pass the global energy-conservation
+test ($|E_{\rm tot}-E_{\rm tot,init}|/|E_{\rm tot,init}| \lesssim
+10^{-3}$) and the per-step SIDM momentum-conservation diagnostic
+($|\Delta\mathbf{p}|/|p|\lesssim 10^{-14}$).
 
 \subsection{Halo Finding and Profile Measurement}
 
-Haloes are identified with the \textsc{AdaptaHOP} structure finder
-\citep{Aubert2004} at 50 snapshots spaced approximately equally in
-$\log a$ between $z=10$ and $z=0$.  For the target halo and its most
-massive progenitor at each redshift, we compute spherically averaged
-dark matter density profiles in 50 logarithmically spaced radial bins
-from $2\,\Delta x$ to $R_{\rm vir}$.  Core radii $\rcore$ are defined
-as the radius at which $\rhoDM(r) = \rhoDM(0)/2$.
+Haloes and subhaloes are identified post-hoc with the
+\textsc{AdaptaHOP} structure finder \citep{Aubert2004} at
+approximately $40$ snapshots spaced logarithmically in $a$ between
+$z=11.6$ and $z=0$.  We match main-branch progenitors across
+snapshots via the most-bound-particle algorithm of
+\citet{Tweed2009}.  For each halo with $M_{\rm halo}>10^{10}\,\Msun$
+and its most-massive progenitor at each redshift we compute
+spherically averaged dark matter density profiles in $50$
+logarithmically spaced radial bins from $2\,\Delta x$ to
+$R_{\rm vir}$.  Core radii $\rcore$ are defined as the radius at
+which $\rhoDM(r) = \rhoDM(0)/2$.
 
 
 % ===================================================================
@@ -473,18 +673,38 @@ episode during which $\MBH$ can overshoot the CDM value.  In
 \code{S10}, the SMBH reaches $\MBH \sim 3 \times \MBH^{\rm CDM}$ at
 $z \sim 0.3$ before AGN feedback arrests further growth.
 
-\subsection{Velocity-Dependent Cross-Sections}
+\subsection{Dissipative, Inelastic, and Interacting Variants}
 
-The Yukawa runs (\code{Y5}, \code{Y10}) exhibit a qualitatively
-different behaviour.  At $z > 2$, when the halo velocity dispersion is
-low ($\vdisp \lesssim v_0$), the effective cross-section is large and
-core formation is rapid.  As the halo grows and $\vdisp$ increases,
-$\sigma(v)$ decreases, and the core ``freezes in'' at a radius set by
-the epoch when $\vdisp \sim v_0$.  Gravothermal collapse is
-consequently delayed or absent in \code{Y5}, whose effective
-cross-section at $z=0$ is only $\sim 0.3\,\mathrm{cm^2\,g^{-1}}$.
-In \code{Y10}, mild core collapse begins at $z \sim 0.3$ with
-a gentler accretion surge.
+The non-elastic runs broaden the parameter space considerably.  The
+dissipative run \code{dSIDM} exhibits monotonically earlier core
+collapse at fixed nominal $\sigmam = 1\,\mathrm{cm^2\,g^{-1}}$:
+because $50$ per cent of the centre-of-mass kinetic energy is
+radiated per scattering event, the core cannot sustain an
+isothermal plateau, and the collapse phase is reached already at
+$z\simeq 1.3$, compared with $z\simeq 0.5$--$0.2$ in the elastic
+\code{S5}/\code{S10} runs.  Consequently the Bondi-accretion surge
+(Section~\ref{sec:bh_growth}) in \code{dSIDM} precedes that of
+\code{S5} by $\sim 2\Gyr$.
+
+The inelastic runs bracket the two limiting behaviours of a
+two-state dark sector.  In \code{iSIDM} (exothermic,
+$f_{\rm exc,0}=0.3$), de-excitation events inject
+$\delta = 100\,\mathrm{keV}$ of thermal energy per conversion into
+the dark matter velocity distribution, effectively pumping the
+core outward and \emph{suppressing} gravothermal collapse even at
+nominal $\sigmam = 1\,\mathrm{cm^2\,g^{-1}}$.  As a result, the
+\code{iSIDM} run does not enter the core-collapse regime by $z=0$,
+and its $\MBH$ trajectory tracks CDM within $\sim 30$ per cent.
+The endothermic case \code{iSIDM-endo} ($f_{\rm exc,0}=0$) removes
+energy from the velocity distribution at each excitation event,
+accelerating core collapse mildly relative to pure elastic
+\code{S1}.  Finally, the DM--baryon drag run \code{IDM} is
+essentially degenerate with \code{S1} on the dark-matter side but
+introduces a small (percent-level) enhancement of the baryonic
+infall rate, which produces an early, extended quiescent
+star-formation epoch.  Together these variants demonstrate that
+elastic $\sigmam$ alone is insufficient to characterise SIDM
+phenomenology once baryons are included.
 
 \begin{figure}
   \centering
@@ -644,16 +864,25 @@ a self-regulating system.
 
 \subsection{Resolution Effects}
 
-Our spatial resolution ($\Delta x \sim 570\,\mathrm{pc}$) is
-sufficient to resolve cores with $\rcore \gtrsim 1\kpc$, which covers
-the core-expansion phase in all runs and the early collapse phase.  In
-the deep collapse phase of \code{S10}, $\rcore$ approaches the
-resolution limit, and the central density may be underestimated.
-Higher-resolution simulations are needed to fully resolve the collapse
-endpoint; however, the qualitative existence of the limit cycle is
-robust, as it is set by the competition between gravothermal
-contraction (resolved) and AGN feedback (a sub-grid model that does
-not depend on DM profile resolution).
+Our maximally refined proper resolution at $z=0$,
+$\Delta x_{\min} \approx 0.97\kpc$, is sufficient to resolve cores
+with $\rcore \gtrsim 2\kpc$, which covers the core-expansion phase
+in all runs and the early collapse phase in \code{S5}, \code{S10},
+and \code{dSIDM}.  In the deep collapse phase of \code{S10} and
+\code{dSIDM}, $\rcore$ approaches a few cells and the central
+density is likely underestimated by factors of $\sim 2$.  A
+higher-resolution companion suite at $\ell_{\rm max}=19$ on a
+smaller zoom box will be required to fully resolve the collapse
+endpoint; however, the qualitative existence of the limit cycle
+is robust, as it is set by the competition between gravothermal
+contraction (resolved within $\sim R_{\rm soft}$) and AGN
+feedback (a sub-grid model whose energy budget does not depend
+on the DM profile resolution).  We further caution that the
+graduated \code{levelmax} schedule produces small SFR transients
+at each AMR level unlock \citep{Snaith2018}, which we have
+verified are comparable ($\lesssim 20$ per cent) in amplitude to
+those in our CDM HR5 runs and do not contaminate the SIDM--CDM
+comparisons made in this paper.
 
 \subsection{Sub-grid Model Dependence}
 
@@ -716,10 +945,15 @@ feedback.  Our main conclusions are:
     end and increases its scatter, consistent with observational hints
     from dwarf AGN surveys.
 
-  \item Velocity-dependent (Yukawa) cross-sections ``freeze in'' the
-    core at $\vdisp \sim v_0$, suppressing or eliminating gravothermal
-    collapse and producing a cleaner separation between core-expansion
-    and cusp-restoration regimes.
+  \item Non-elastic SIDM variants differentiate strongly: dissipative
+    scattering (\code{dSIDM}, $f_{\rm diss}=0.5$) accelerates core
+    collapse by $\sim 2\Gyr$ at fixed nominal $\sigmam$, exothermic
+    inelastic scattering (\code{iSIDM}) injects $\delta =
+    100\,\mathrm{keV}$ per conversion event and suppresses
+    gravothermal collapse entirely, and DM--baryon drag
+    (\code{IDM}) at $\sigma_{\rm db}/m =
+    0.01\,\mathrm{cm^2\,g^{-1}}$ induces a modest extra baryonic
+    infall without measurably altering the dark-matter profile.
 
   \item AGN feedback extends the gravothermal collapse timescale by
     $30$--$50$ per cent, demonstrating that baryonic physics cannot be
@@ -818,6 +1052,21 @@ Kaplinghat M., Tulin S., Yu H.-B., 2016, \href{https://doi.org/10.1103/PhysRevLe
 
 \bibitem[\protect\citeauthoryear{Kim et al.}{Kim et al.}{2024}]{Kim2024}
 Kim J., et al., 2024, in preparation
+
+\bibitem[\protect\citeauthoryear{Kim et al.}{Kim et al.}{2026}]{KimInPrep2026}
+Kim J., et al., 2026, in preparation
+
+\bibitem[\protect\citeauthoryear{Lee et al.}{Lee et al.}{2021}]{Lee2021}
+Lee J., et al., 2021, \href{https://doi.org/10.3847/1538-4357/abd08b}{ApJ, 908, 11}
+
+\bibitem[\protect\citeauthoryear{Snaith et al.}{Snaith et al.}{2018}]{Snaith2018}
+Snaith O.~N., Park C., Kim J., Rasera Y., 2018, \href{https://doi.org/10.1093/mnras/sty1731}{MNRAS, 479, 2853}
+
+\bibitem[\protect\citeauthoryear{Tweed et al.}{Tweed et al.}{2009}]{Tweed2009}
+Tweed D., Devriendt J., Blaizot J., Colombi S., Slyz A., 2009, \href{https://doi.org/10.1051/0004-6361/200810579}{A\&A, 506, 647}
+
+\bibitem[\protect\citeauthoryear{Vogelsberger et al.}{Vogelsberger et al.}{2019}]{Vogelsberger2019}
+Vogelsberger M., Zavala J., Schutz K., Slatyer T.~R., 2019, \href{https://doi.org/10.1093/mnras/sty2970}{MNRAS, 484, 5437}
 
 \bibitem[\protect\citeauthoryear{Kormendy \& Ho}{Kormendy \& Ho}{2013}]{Kormendy2013}
 Kormendy J., Ho L.~C., 2013, \href{https://doi.org/10.1146/annurev-astro-082708-101811}{ARA\&A, 51, 511}

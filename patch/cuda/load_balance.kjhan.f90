@@ -12,6 +12,7 @@ subroutine load_balance
   use poisson_commons, ONLY: phi, f
   use bisection
   use ksection
+  use iso_c_binding, only: c_int, c_size_t
   implicit none
 #ifndef WITHOUTMPI
   include 'mpif.h'
@@ -403,6 +404,12 @@ subroutine load_balance
      write(*,'(A,F8.3,A)') '     refine:                 ', ts_refine, ' s'
      write(*,'(A,F8.3,A)') '     build_comm:             ', ts_bcomm, ' s'
   end if
+
+  ! Release grow-only buffers after rebalancing (comm patterns changed)
+  call ksection_trim_buffers()
+
+  ! Return freed heap pages to OS (reduces RSS after bulk dealloc/realloc)
+  call fortran_malloc_trim()
 
   if(verbose)then
      write(*,*)'Output mesh structure'
@@ -1768,3 +1775,19 @@ end subroutine defrag
 !#########################################################################
 !#########################################################################
 !#########################################################################
+!#########################################################################
+! Wrapper to call glibc malloc_trim(0) from Fortran.
+! Returns freed heap pages to OS, reducing RSS after bulk dealloc cycles.
+!#########################################################################
+subroutine fortran_malloc_trim()
+  use iso_c_binding, only: c_int, c_size_t
+  implicit none
+  interface
+     integer(c_int) function malloc_trim(pad) bind(C, name='malloc_trim')
+       import :: c_int, c_size_t
+       integer(c_size_t), value :: pad
+     end function malloc_trim
+  end interface
+  integer(c_int) :: rc
+  rc = malloc_trim(0_c_size_t)
+end subroutine fortran_malloc_trim

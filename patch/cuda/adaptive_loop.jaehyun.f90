@@ -4,6 +4,7 @@ subroutine adaptive_loop
   use pm_commons
   use poisson_commons
   use cooling_module
+  use ksection, only: ksection_trim_done
 #ifdef RT
   use rt_hydro_commons
 #endif
@@ -152,6 +153,8 @@ subroutine adaptive_loop
            end if
            if(ilevel<levelmin)call refine_fine(ilevel)
         end do
+        ! Clear trim flag after exchange routines have processed it
+        call ksection_trim_done()
      endif
 
      ! Call base level

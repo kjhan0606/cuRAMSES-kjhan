@@ -55,6 +55,16 @@ contains
     buf%capacity = new_cap
   end subroutine scatter_buf_grow
 
+  ! Shrink buffer to target capacity if oversized (>4x target)
+  subroutine scatter_buf_trim(buf, target_cap, nv)
+    type(scatter_buf_t), intent(inout) :: buf
+    integer, intent(in) :: target_cap, nv
+    if(buf%capacity > 4 * target_cap .and. allocated(buf%icell)) then
+       deallocate(buf%icell, buf%dunew, buf%ddivu, buf%denew)
+       call scatter_buf_init(buf, target_cap, nv)
+    end if
+  end subroutine scatter_buf_trim
+
 end module hydro_scatter_commons
 #ifdef HYDRO_CUDA
 !###########################################################

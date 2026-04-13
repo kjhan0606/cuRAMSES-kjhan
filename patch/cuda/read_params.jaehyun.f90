@@ -340,9 +340,17 @@ namelist/adm_params/adm_alpha,adm_mp,adm_me_ratio,adm_xi, &
 
   !-------------------------------------------------
   ! Auto-compute mem_weight_grid from nvar if sentinel (0)
+  ! Per cell (×twotondim per grid):
+  !   Hydro:   2*nvar*8 (uold+unew)
+  !   Topo:    5*4 (son,flag1,flag2,cpu_map,cpu_map2) + 8 (hilbert_key)
+  !   PFix:    2*8 (enew,divu)  [pressure_fix, default for cosmo]
+  !   Poisson: 7*8 (rho,rho_star,phi,phi_old,f*3)
+  ! Per grid:
+  !   AMR:  3*8+3*4+6*4 (xg,father/next/prev,nbor) = 48
+  !   Part: 3*4 (headp,tailp,numbp) = 12
   !-------------------------------------------------
   if(memory_balance .and. mem_weight_grid <= 0) then
-     mem_weight_grid = twotondim * (2*nvar*8 + 52) + 48
+     mem_weight_grid = twotondim * (2*nvar*8 + 28 + 16 + 56) + 48 + 12
      if(myid==1) write(*,'(A,I6,A,I3,A)') &
           ' Memory balance: mem_weight_grid=',mem_weight_grid,' (nvar=',nvar,')'
   end if

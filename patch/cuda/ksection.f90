@@ -12,6 +12,9 @@ module ksection
 
    implicit none
 
+   ! Flag: when .true., exchange routines release their saved buffers on next call
+   logical :: ksec_trim_requested = .false.
+
 contains
 
    !================================================================
@@ -999,6 +1002,13 @@ contains
       integer :: isend_offset, irecv_total, irecv_offset
       integer :: i, idx, ierr
 
+      ! Release saved buffers if trim requested (after load rebalancing)
+      if(ksec_trim_requested) then
+         if(allocated(peer_recv_data)) deallocate(peer_recv_data)
+         if(allocated(peer_recv_dest)) deallocate(peer_recv_dest)
+         prv_cap = 0; prv_np = 0
+      end if
+
       ! Ensure per-level arrays are allocated to ksec_kmax
       if(ksec_kmax > kmax_alloc) then
          kmax_alloc = ksec_kmax
@@ -1257,6 +1267,12 @@ contains
       integer :: nextra, nwrap_dims, nsubsets, mask, bit, d
       integer :: wrap_d(1:3)
       real(dp) :: wrap_shift(1:3)
+
+      ! Release saved buffers if trim requested (after load rebalancing)
+      if(ksec_trim_requested) then
+         if(allocated(recv_buf)) deallocate(recv_buf)
+         rv_cap = 0; rv_np = 0
+      end if
 
       ! Ensure per-level arrays are allocated to ksec_kmax
       if(ksec_kmax > kmax_alloc) then
@@ -1746,5 +1762,20 @@ contains
 
    end subroutine test_ksection_exchange
 
+
+   !---------------------------------------------------------------
+   ! Request release of grow-only exchange buffers.
+   ! Actual deallocation happens on next exchange call.
+   ! Call after load rebalancing (nremap) when comm patterns change.
+   !---------------------------------------------------------------
+   subroutine ksection_trim_buffers()
+      implicit none
+      ksec_trim_requested = .true.
+   end subroutine ksection_trim_buffers
+
+   subroutine ksection_trim_done()
+      implicit none
+      ksec_trim_requested = .false.
+   end subroutine ksection_trim_done
 
 end module ksection
