@@ -12,6 +12,8 @@ subroutine move_fine(ilevel)
   ! for CIC interpolation. Otherwise, use coarse grid (ilevel-1) force.
   !----------------------------------------------------------------------
   integer::igrid,jgrid,ipart,jpart,next_part,ig,ip,npart1,info,isink
+  integer::npack,ip_buf,idim
+  real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
 
 #ifndef _OPENMP
   integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
@@ -105,8 +107,21 @@ subroutine move_fine(ilevel)
   if(sink)then
      if(nsink>0)then
 #ifndef WITHOUTMPI
-        call MPI_ALLREDUCE(oksink_new,oksink_all,nsinkmax     ,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
-        call MPI_ALLREDUCE(vsink_new ,vsink_all ,nsinkmax*ndim,MPI_DOUBLE_PRECISION,MPI_SUM,MPI_COMM_WORLD,info)
+        npack = (1+ndim)*nsink
+        allocate(sink_sbuf(1:npack), sink_rbuf(1:npack))
+        ip_buf = 0
+        sink_sbuf(ip_buf+1:ip_buf+nsink) = oksink_new(1:nsink); ip_buf = ip_buf + nsink
+        do idim=1,ndim
+           sink_sbuf(ip_buf+1:ip_buf+nsink) = vsink_new(1:nsink,idim); ip_buf = ip_buf + nsink
+        end do
+        call MPI_ALLREDUCE(sink_sbuf, sink_rbuf, npack, MPI_DOUBLE_PRECISION, MPI_SUM, MPI_COMM_WORLD, info)
+        ip_buf = 0
+        oksink_all=0d0; vsink_all=0d0
+        oksink_all(1:nsink) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+        do idim=1,ndim
+           vsink_all(1:nsink,idim) = sink_rbuf(ip_buf+1:ip_buf+nsink); ip_buf = ip_buf + nsink
+        end do
+        deallocate(sink_sbuf, sink_rbuf)
 #else
         oksink_all=oksink_new
         vsink_all=vsink_new
@@ -495,19 +510,24 @@ subroutine move1(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
            r2=(xp(ind_part(j),3)-xsink(ksink,3))**2+r2
 #endif
            if(r2<(1d-15*dx_min_loc)**2d0)then
+              !$omp critical(sink_vel_update)
               vsink_new(ksink,1:ndim)=vp(ind_part(j),1:ndim)
               oksink_new(ksink)=1.0
+              !$omp end critical(sink_vel_update)
            end if
+           !$omp atomic update
            sink_stat(ksink,ilevel,ndim*2+1)=sink_stat(ksink,ilevel,ndim*2+1)+1d0
            do idim=1,ndim
-              xx=xp(ind_part(j),idim)+vp(ind_part(j),idim)*dtnew(ilevel)-xsink(ksink,idim)              
+              xx=xp(ind_part(j),idim)+vp(ind_part(j),idim)*dtnew(ilevel)-xsink(ksink,idim)
               if(xx>scale*xbound(idim)/2.0)then
                  xx=xx-scale*xbound(idim)
               endif
               if(xx<-scale*xbound(idim)/2.0)then
                  xx=xx+scale*xbound(idim)
               endif
+              !$omp atomic update
               sink_stat(ksink,ilevel,idim     )=sink_stat(ksink,ilevel,idim     )+xsink(ksink,idim)+xx
+              !$omp atomic update
               sink_stat(ksink,ilevel,idim+ndim)=sink_stat(ksink,ilevel,idim+ndim)+vp(ind_part(j),idim)
            enddo
        endif

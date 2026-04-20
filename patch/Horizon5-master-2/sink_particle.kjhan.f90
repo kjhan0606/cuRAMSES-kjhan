@@ -2966,7 +2966,7 @@ subroutine grow_bondi(ilevel)
   integer::npack,ip_buf
   real(dp),allocatable,dimension(:)::sink_sbuf,sink_rbuf
   real(dp),dimension(1:3)::velocity
-  integer,dimension(1:nvector),save::ind_grid,ind_part,ind_grid_part
+  integer,dimension(1:nvector)::ind_grid,ind_part,ind_grid_part
   real(dp)::r2,density,volume
   real(dp)::scale_nH,scale_T2,scale_l,scale_d,scale_t,scale_v,scale_m
   integer::ind,ivar,iskip
@@ -2975,10 +2975,17 @@ subroutine grow_bondi(ilevel)
   real(dp),dimension(1:3)::xdum,vdum,jdum
   real(dp)::dmaccdum,cdum,vvdum,dmEdddum,mbhdum,ddum,fourpi,prefact
   integer:: mythread, nthreads,npart3
+  integer,allocatable,dimension(:)::nparticles_omp,ptrhead_omp
 
   call MPI_BARRIER(MPI_COMM_WORLD,info)
 
   if(numbtot(1,ilevel)==0)return
+
+  !$omp parallel shared(nthreads)
+     mythread = omp_get_thread_num()
+     if(mythread==0) nthreads = omp_get_num_threads()
+  !$omp end parallel
+  allocate(nparticles_omp(0:nthreads-1), ptrhead_omp(0:nthreads-1))
   if(verbose)write(*,111)ilevel
 
   ! Conversion factor from user units to cgs units
@@ -2998,12 +3005,13 @@ subroutine grow_bondi(ilevel)
 
   ! Set unew to uold for myid cells
   ! Need unew to get initial density before Bondi accreting mass
+  !$omp parallel do private(ind,iskip,ivar,i)
   do ind=1,twotondim
      iskip=ncoarse+(ind-1)*ngridmax
      do ivar=1,nvar
-   do i=1,active(ilevel)%ngrid
-      unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
-   enddo
+        do i=1,active(ilevel)%ngrid
+           unew(active(ilevel)%igrid(i)+iskip,ivar) = uold(active(ilevel)%igrid(i)+iskip,ivar)
+        enddo
      enddo
   enddo
 
@@ -3076,65 +3084,72 @@ subroutine grow_bondi(ilevel)
   ! Loop over cpus
   do icpu=1,ncpu
      if(numbl(icpu,ilevel).le.0) goto 102
-     igrid=headl(icpu,ilevel)
-     npart3 = numbl(icpu,ilevel)
+     call pthreadLinkedList(headl(icpu,ilevel), numbl(icpu,ilevel), &
+          nthreads, nparticles_omp, ptrhead_omp, next)
+     !$omp parallel private(mythread,npart3,igrid,jgrid,npart1,npart2, &
+     !$omp    ipart,jpart,next_part,ig,ip,ind_grid,ind_part,ind_grid_part)
+        mythread = omp_get_thread_num()
+        npart3 = nparticles_omp(mythread)
+        igrid = ptrhead_omp(mythread)
 
-     ig=0
-     ip=0
-     do jgrid=1,npart3
-        npart1=numbp(igrid)  ! Number of particles in the grid
-        npart2=0
-        ! Count sink and cloud particles
-        if(npart1>0)then
-           ipart=headp(igrid)
-           ! Loop over particles
-           do jpart=1,npart1
-              ! Save next particle   <--- Very important !!!
-              next_part=nextp(ipart)
-              if(idp(ipart).lt.0 .and. idp(ipart).ge. -nsinkmax .and. tp(ipart).eq.0.d0)then
-                 npart2=npart2+1
-              endif
-              ipart=next_part  ! Go to next particle
-           end do
-        endif
+        ig=0
+        ip=0
+        do jgrid=1,npart3
+           npart1=numbp(igrid)  ! Number of particles in the grid
+           npart2=0
+           ! Count sink and cloud particles
+           if(npart1>0)then
+              ipart=headp(igrid)
+              ! Loop over particles
+              do jpart=1,npart1
+                 ! Save next particle   <--- Very important !!!
+                 next_part=nextp(ipart)
+                 if(idp(ipart).lt.0 .and. idp(ipart).ge. -nsinkmax .and. tp(ipart).eq.0.d0)then
+                    npart2=npart2+1
+                 endif
+                 ipart=next_part  ! Go to next particle
+              end do
+           endif
 
-        ! Gather sink and cloud particles
-        if(npart2>0)then
-           ig=ig+1
-           ind_grid(ig)=igrid
-           ipart=headp(igrid)
-           ! Loop over particles
-           do jpart=1,npart1
-              ! Save next particle   <--- Very important !!!
-              next_part=nextp(ipart)
-              ! Select only sink particles
-              if(idp(ipart).lt.0 .and. idp(ipart).ge. -nsinkmax .and. tp(ipart).eq.0.d0)then
-                 if(ig==0)then
-                    ig=1
-                    ind_grid(ig)=igrid
+           ! Gather sink and cloud particles
+           if(npart2>0)then
+              ig=ig+1
+              ind_grid(ig)=igrid
+              ipart=headp(igrid)
+              ! Loop over particles
+              do jpart=1,npart1
+                 ! Save next particle   <--- Very important !!!
+                 next_part=nextp(ipart)
+                 ! Select only sink particles
+                 if(idp(ipart).lt.0 .and. idp(ipart).ge. -nsinkmax .and. tp(ipart).eq.0.d0)then
+                    if(ig==0)then
+                       ig=1
+                       ind_grid(ig)=igrid
+                    end if
+                    ip=ip+1
+                    ind_part(ip)=ipart
+                    ind_grid_part(ip)=ig
+                 endif
+                 if(ip==nvector)then
+                    call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+                    ip=0
+                    ig=0
                  end if
-                 ip=ip+1
-                 ind_part(ip)=ipart
-                 ind_grid_part(ip)=ig
-              endif
-              if(ip==nvector)then
-                 call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
-                 ip=0
-                 ig=0
-              end if
-              ipart=next_part  ! Go to next particle
-           end do
-           ! End loop over particles
-        end if
+                 ipart=next_part  ! Go to next particle
+              end do
+              ! End loop over particles
+           end if
 
-        igrid=next(igrid)   ! Go to next grid
-     end do
-     ! End loop over grids
-     if(ip>0) then
-        call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
-     endif
+           igrid=next(igrid)   ! Go to next grid
+        end do
+        ! End loop over grids
+        if(ip>0) then
+           call accrete_bondi(ind_grid,ind_part,ind_grid_part,ig,ip,ilevel)
+        endif
+     !$omp end parallel
 102  end do
   ! End loop over cpus
+  deallocate(nparticles_omp, ptrhead_omp)
 
   if(nsink>0)then
 #ifndef WITHOUTMPI
@@ -3402,8 +3417,9 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
   end do
 
   ! Remove mass from hydro cells
-!!$omp flush
-!!$omp critical (accrete_bondi_kjhan)
+  ! Critical section protects uold R-M-W against cross-grid cell races
+  ! (cloud particles from different grids can NGP-map to the same cell)
+!$omp critical (accrete_bondi_kjhan)
   do j=1,np
      if(ok(j))then
         ksink=-idp(ind_part(j))
@@ -3502,7 +3518,7 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
            v=uold(indp(j),3)/d
            w=uold(indp(j),4)/d
            ekk=0.5d0*d*(u*u+v*v+w*w)
-           e=uold(indp(j),ndim+2)-ekk  
+           e=uold(indp(j),ndim+2)-ekk
 #ifdef SOLVERmhd
            e=e-0.125d0*((bx1+bx2)**2+(by1+by2)**2+(bz1+bz2)**2)
 #endif
@@ -3525,7 +3541,7 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
               dvdrag=fdrag(idim)*dtnew(ilevel)
               dpdrag(idim)=mp(ind_part(j))*dvdrag
               vp(ind_part(j),idim)=vp(ind_part(j),idim)+dvdrag
-              vsink_new(ksink,idim)=vsink_new(ksink,idim)+dvdrag*mp(ind_part(j))!/msink(isink)
+              vsink_new(ksink,idim)=vsink_new(ksink,idim)+dvdrag*mp(ind_part(j))
            enddo
 
            ekk=0.0d0
@@ -3545,8 +3561,7 @@ subroutine accrete_bondi(ind_grid,ind_part,ind_grid_part,ng,np,ilevel)
      endif
 
   end do
-!!$omp flush
-!!$omp end critical (accrete_bondi_kjhan)
+!$omp end critical (accrete_bondi_kjhan)
 
 end subroutine accrete_bondi
 !################################################################

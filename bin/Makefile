@@ -133,7 +133,7 @@ AMROBJ = read_params.jaehyun.o init_amr.o init_time.o init_refine.o adaptive_loo
 		 output_sphere_hydro.o output_sphere_part.o output_sphere_sink.o \
          morton_init.o $(HDF5_OBJS)
 # Particle-Mesh objects
-PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fine.o newdt_fine.kjhan.o particle_tree.kjhan.o \
+PMOBJ = init_part.o output_part.o rho_fine.kjhan.o synchro_fine.kjhan.o move_fine.kjhan.o newdt_fine.kjhan.o particle_tree.kjhan.o \
         add_list.o remove_list.o star_formation.kjhan.o sink_particle.kjhan.o feedback.kjhan3.o \
 		clump_finder.o clump_merger.o \
         flag_formation_sites.o init_sink.o output_sink.o
