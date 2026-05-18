@@ -549,45 +549,263 @@ contains
   end subroutine hdf5_write_dataset_serial_int
 
   subroutine hdf5_read_dataset_all_dp(grp_id, name, data, n)
-    ! All ranks read the entire dataset (for small arrays like sinks)
+    ! Replicate dataset to ALL ranks via rank-0 streamed read + MPI_Bcast.
+    ! Was: every rank collectively re-read the full dataset → O(N²) GPFS traffic.
+    ! Now: rank 0 reads n/nproc-sized chunks sequentially, broadcasting each chunk
+    !      so the GPFS volume sees ~1× n bytes total instead of nproc × n bytes.
     implicit none
     include 'mpif.h'
     integer(HID_T), intent(in) :: grp_id
     character(len=*), intent(in) :: name
     integer, intent(in) :: n
     real(dp), intent(out) :: data(n)
-    integer(HID_T) :: dset_id, plist_id
-    integer(HSIZE_T), dimension(1) :: dims
-    integer :: ierr
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr, myrank, nproc, ichunk, nchunk, chunk_size, this_chunk, istart
 
-    dims(1) = n
+    call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
+    call MPI_Comm_size(MPI_COMM_WORLD, nproc, ierr)
+
+    if (n <= 0) return
+
+    if (n < nproc) then
+       chunk_size = n
+    else
+       chunk_size = (n + nproc - 1) / nproc
+    end if
+    nchunk = (n + chunk_size - 1) / chunk_size
+
     call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    if (myrank == 0) call h5dget_space_f(dset_id, dspace_id, ierr)
     call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
-    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_COLLECTIVE_F, ierr)
-    call h5dread_f(dset_id, H5T_NATIVE_DOUBLE, data, dims, ierr, xfer_prp=plist_id)
+    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_INDEPENDENT_F, ierr)
+
+    do ichunk = 1, nchunk
+       istart = (ichunk-1) * chunk_size + 1
+       this_chunk = min(chunk_size, n - istart + 1)
+       if (this_chunk <= 0) exit
+       if (myrank == 0) then
+          fooffset(1) = int(istart - 1, HSIZE_T)
+          count(1) = int(this_chunk, HSIZE_T)
+          call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+          ldims(1) = int(this_chunk, HSIZE_T)
+          call h5screate_simple_f(1, ldims, memspace_id, ierr)
+          call h5dread_f(dset_id, H5T_NATIVE_DOUBLE, data(istart:istart+this_chunk-1), &
+               ldims, ierr, mem_space_id=memspace_id, file_space_id=dspace_id, &
+               xfer_prp=plist_id)
+          call h5sclose_f(memspace_id, ierr)
+       end if
+       call MPI_Bcast(data(istart), this_chunk, MPI_DOUBLE_PRECISION, 0, &
+            MPI_COMM_WORLD, ierr)
+    end do
+
     call h5pclose_f(plist_id, ierr)
+    if (myrank == 0) call h5sclose_f(dspace_id, ierr)
     call h5dclose_f(dset_id, ierr)
   end subroutine hdf5_read_dataset_all_dp
 
   subroutine hdf5_read_dataset_all_int(grp_id, name, data, n)
+    ! Integer counterpart of hdf5_read_dataset_all_dp (rank-0 chunk read + Bcast).
     implicit none
     include 'mpif.h'
     integer(HID_T), intent(in) :: grp_id
     character(len=*), intent(in) :: name
     integer, intent(in) :: n
     integer, intent(out) :: data(n)
-    integer(HID_T) :: dset_id, plist_id
-    integer(HSIZE_T), dimension(1) :: dims
-    integer :: ierr
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr, myrank, nproc, ichunk, nchunk, chunk_size, this_chunk, istart
 
-    dims(1) = n
+    call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
+    call MPI_Comm_size(MPI_COMM_WORLD, nproc, ierr)
+
+    if (n <= 0) return
+
+    if (n < nproc) then
+       chunk_size = n
+    else
+       chunk_size = (n + nproc - 1) / nproc
+    end if
+    nchunk = (n + chunk_size - 1) / chunk_size
+
     call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    if (myrank == 0) call h5dget_space_f(dset_id, dspace_id, ierr)
     call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
-    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_COLLECTIVE_F, ierr)
-    call h5dread_f(dset_id, H5T_NATIVE_INTEGER, data, dims, ierr, xfer_prp=plist_id)
+    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_INDEPENDENT_F, ierr)
+
+    do ichunk = 1, nchunk
+       istart = (ichunk-1) * chunk_size + 1
+       this_chunk = min(chunk_size, n - istart + 1)
+       if (this_chunk <= 0) exit
+       if (myrank == 0) then
+          fooffset(1) = int(istart - 1, HSIZE_T)
+          count(1) = int(this_chunk, HSIZE_T)
+          call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+          ldims(1) = int(this_chunk, HSIZE_T)
+          call h5screate_simple_f(1, ldims, memspace_id, ierr)
+          call h5dread_f(dset_id, H5T_NATIVE_INTEGER, data(istart:istart+this_chunk-1), &
+               ldims, ierr, mem_space_id=memspace_id, file_space_id=dspace_id, &
+               xfer_prp=plist_id)
+          call h5sclose_f(memspace_id, ierr)
+       end if
+       call MPI_Bcast(data(istart), this_chunk, MPI_INTEGER, 0, &
+            MPI_COMM_WORLD, ierr)
+    end do
+
     call h5pclose_f(plist_id, ierr)
+    if (myrank == 0) call h5sclose_f(dspace_id, ierr)
     call h5dclose_f(dset_id, ierr)
   end subroutine hdf5_read_dataset_all_int
+
+  subroutine hdf5_read_dataset_chunk_dp(grp_id, name, data, n, offset_global)
+    ! Replicate a chunk [offset_global+1 .. offset_global+n] of dataset to all
+    ! ranks via rank-0 read + MPI_Bcast. Used by streaming varcpu restore to
+    ! cap per-rank transient buffers (vs. full-N allocation in _all variants).
+    implicit none
+    include 'mpif.h'
+    integer(HID_T), intent(in) :: grp_id
+    character(len=*), intent(in) :: name
+    integer, intent(in) :: n
+    integer(i8b), intent(in) :: offset_global
+    real(dp), intent(out) :: data(n)
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr, myrank
+
+    call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
+    if (n <= 0) return
+
+    call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    if (myrank == 0) then
+       call h5dget_space_f(dset_id, dspace_id, ierr)
+       fooffset(1) = int(offset_global, HSIZE_T)
+       count(1) = int(n, HSIZE_T)
+       call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+       ldims(1) = int(n, HSIZE_T)
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+       call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
+       call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_INDEPENDENT_F, ierr)
+       call h5dread_f(dset_id, H5T_NATIVE_DOUBLE, data, ldims, ierr, &
+            mem_space_id=memspace_id, file_space_id=dspace_id, xfer_prp=plist_id)
+       call h5pclose_f(plist_id, ierr)
+       call h5sclose_f(memspace_id, ierr)
+       call h5sclose_f(dspace_id, ierr)
+    end if
+    call h5dclose_f(dset_id, ierr)
+    call MPI_Bcast(data, n, MPI_DOUBLE_PRECISION, 0, MPI_COMM_WORLD, ierr)
+  end subroutine hdf5_read_dataset_chunk_dp
+
+  subroutine hdf5_read_dataset_chunk_int(grp_id, name, data, n, offset_global)
+    ! Integer counterpart of hdf5_read_dataset_chunk_dp.
+    implicit none
+    include 'mpif.h'
+    integer(HID_T), intent(in) :: grp_id
+    character(len=*), intent(in) :: name
+    integer, intent(in) :: n
+    integer(i8b), intent(in) :: offset_global
+    integer, intent(out) :: data(n)
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr, myrank
+
+    call MPI_Comm_rank(MPI_COMM_WORLD, myrank, ierr)
+    if (n <= 0) return
+
+    call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    if (myrank == 0) then
+       call h5dget_space_f(dset_id, dspace_id, ierr)
+       fooffset(1) = int(offset_global, HSIZE_T)
+       count(1) = int(n, HSIZE_T)
+       call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+       ldims(1) = int(n, HSIZE_T)
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+       call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
+       call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_INDEPENDENT_F, ierr)
+       call h5dread_f(dset_id, H5T_NATIVE_INTEGER, data, ldims, ierr, &
+            mem_space_id=memspace_id, file_space_id=dspace_id, xfer_prp=plist_id)
+       call h5pclose_f(plist_id, ierr)
+       call h5sclose_f(memspace_id, ierr)
+       call h5sclose_f(dspace_id, ierr)
+    end if
+    call h5dclose_f(dset_id, ierr)
+    call MPI_Bcast(data, n, MPI_INTEGER, 0, MPI_COMM_WORLD, ierr)
+  end subroutine hdf5_read_dataset_chunk_int
+
+  subroutine hdf5_read_dataset_collective_dp(grp_id, name, data, n, offset_global)
+    ! Tier 2 parallel restore primitive: each rank reads its own disjoint
+    ! hyperslab [offset_global+1 .. offset_global+n] in a single collective
+    ! H5Dread. No post-read Bcast: each rank gets only its slice.
+    ! Ranks with n==0 must still participate (H5Sselect_none) — collective.
+    implicit none
+    include 'mpif.h'
+    integer(HID_T), intent(in) :: grp_id
+    character(len=*), intent(in) :: name
+    integer, intent(in) :: n
+    integer(i8b), intent(in) :: offset_global
+    real(dp), intent(out) :: data(*)
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr
+
+    call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    call h5dget_space_f(dset_id, dspace_id, ierr)
+    if (n > 0) then
+       fooffset(1) = int(offset_global, HSIZE_T)
+       count(1) = int(n, HSIZE_T)
+       call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+       ldims(1) = int(n, HSIZE_T)
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+    else
+       call h5sselect_none_f(dspace_id, ierr)
+       ldims(1) = 0_HSIZE_T
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+       call h5sselect_none_f(memspace_id, ierr)
+    end if
+    call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
+    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_COLLECTIVE_F, ierr)
+    call h5dread_f(dset_id, H5T_NATIVE_DOUBLE, data, ldims, ierr, &
+         mem_space_id=memspace_id, file_space_id=dspace_id, xfer_prp=plist_id)
+    call h5pclose_f(plist_id, ierr)
+    call h5sclose_f(memspace_id, ierr)
+    call h5sclose_f(dspace_id, ierr)
+    call h5dclose_f(dset_id, ierr)
+  end subroutine hdf5_read_dataset_collective_dp
+
+  subroutine hdf5_read_dataset_collective_int(grp_id, name, data, n, offset_global)
+    implicit none
+    include 'mpif.h'
+    integer(HID_T), intent(in) :: grp_id
+    character(len=*), intent(in) :: name
+    integer, intent(in) :: n
+    integer(i8b), intent(in) :: offset_global
+    integer, intent(out) :: data(*)
+    integer(HID_T) :: dset_id, dspace_id, memspace_id, plist_id
+    integer(HSIZE_T), dimension(1) :: ldims, fooffset, count
+    integer :: ierr
+
+    call h5dopen_f(grp_id, trim(name), dset_id, ierr)
+    call h5dget_space_f(dset_id, dspace_id, ierr)
+    if (n > 0) then
+       fooffset(1) = int(offset_global, HSIZE_T)
+       count(1) = int(n, HSIZE_T)
+       call h5sselect_hyperslab_f(dspace_id, H5S_SELECT_SET_F, fooffset, count, ierr)
+       ldims(1) = int(n, HSIZE_T)
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+    else
+       call h5sselect_none_f(dspace_id, ierr)
+       ldims(1) = 0_HSIZE_T
+       call h5screate_simple_f(1, ldims, memspace_id, ierr)
+       call h5sselect_none_f(memspace_id, ierr)
+    end if
+    call h5pcreate_f(H5P_DATASET_XFER_F, plist_id, ierr)
+    call h5pset_dxpl_mpio_f(plist_id, H5FD_MPIO_COLLECTIVE_F, ierr)
+    call h5dread_f(dset_id, H5T_NATIVE_INTEGER, data, ldims, ierr, &
+         mem_space_id=memspace_id, file_space_id=dspace_id, xfer_prp=plist_id)
+    call h5pclose_f(plist_id, ierr)
+    call h5sclose_f(memspace_id, ierr)
+    call h5sclose_f(dspace_id, ierr)
+    call h5dclose_f(dset_id, ierr)
+  end subroutine hdf5_read_dataset_collective_int
 
   subroutine hdf5_suppress_errors()
     implicit none

@@ -58,9 +58,27 @@ subroutine restore_amr_hdf5()
 
   ! Variable-ncpu specific variables
   integer :: father_cell
-  real(dp) :: scale, dx, xx_cell(1,3), xc_off(3)
-  integer :: c_tmp(1)
+  ! cmp_cpumap expects x(nvector,ndim) and c(nvector) with explicit nvector
+  ! stride. Undersizing these buffers makes the callee read past the caller's
+  ! storage (stack OOB) and return garbage cpu ids — silent SIGSEGV downstream.
+  real(dp) :: scale, dx, xx_cell(nvector,3), xc_off(3)
+  integer :: c_tmp(nvector)
   integer :: nx_loc
+  ! Vectorized cpu_map computation buffers (twotondim cells per grid)
+  real(dp) :: xx_cells(nvector, 3)
+  integer :: c_cells(nvector)
+  integer :: ix_off, iy_off, iz_off
+  ! Streaming chunk buffers for varcpu Phase 1 (avoid full-N allocation)
+  real(dp), allocatable :: xg_chunk(:,:)
+  integer, allocatable :: son_flag_chunk(:)
+  integer :: chunk_size, this_chunk, j, i_file
+  integer(i8b) :: i_global
+  ! Tier 2 parallel restore: per-rank slice + ksection redistribution
+  integer(i8b) :: my_offset_i8, my_end_i8, my_count_i8
+  integer(i8b) :: chunk_off_i8, global_off_i8
+  integer :: nchunk_local, nchunk_global, ichunk, nprops_pack, nrecv
+  real(dp), allocatable :: sendbuf(:,:), recvbuf(:,:)
+  integer,  allocatable :: dest_cpu_arr(:)
 
   call title(nrestart, nchar)
   h5filename = 'output_'//trim(nchar)//'/data_'//trim(nchar)//'.h5'
@@ -379,123 +397,226 @@ subroutine restore_amr_hdf5()
            cycle
         end if
 
-        ! ALL ranks read ALL grids' data at this level (temporary buffer)
-        allocate(xg_all(ngrid_all_int, ndim))
-        allocate(son_flag_buf(ngrid_all_int * twotondim))
-
-        ! Read ALL grid positions
-        do idim = 1, ndim
-           write(lvl_str, '(I0)') idim
-           call hdf5_read_dataset_all_dp(lvl_grp_id, 'xg_'//trim(lvl_str), &
-                xg_all(:, idim), ngrid_all_int)
-        end do
-
-        ! Read ALL son flags (for flag1)
-        call hdf5_read_dataset_all_int(lvl_grp_id, 'son_flag', &
-             son_flag_buf, ngrid_all_int * twotondim)
-
-        ! Initialize hash table for this level (sized for local grids)
+        ! Initialize hash table for this level.
+        ! Cross-ordering (ksection→hilbert etc.) can deliver up to several×
+        ! the average grid count to a single rank; oversize by 16× the
+        ! average load to avoid the O(N) rehash cascade when imbalance is large.
         call morton_hash_init(mort_table(ilevel), &
-             max(4 * (ngrid_all_int / max(ncpu, 1) + 1), 16))
+             max(16 * (ngrid_all_int / max(ncpu, 1) + 1), 16))
 
         ! Subcell offsets at this level
         dx = 0.5d0**ilevel
 
-        !--- Phase 1: Create ACTIVE grids only (cpu_map(father)==myid) ---
+        !========================================================
+        ! Tier 2 parallel restore (exascale-ready):
+        !   Stage A: each rank reads a disjoint global-index slice
+        !            in parallel via collective hyperslab.
+        !   Stage B: pack (xg, son_flag, i_file) + dest_cpu and
+        !            redistribute via recursive k-section tree.
+        !   Stage C: receiver creates grids exactly like the old
+        !            single-rank chunked path.
+        ! Sub-chunked to cap transient memory at chunk_size×96 B
+        ! (~96 MB at 1M). All ranks participate in nchunk_global
+        ! rounds (MAX across ranks) so collective ops stay aligned.
+        !========================================================
+        chunk_size = min(1048576, ngrid_all_int)
+
+        ! Uniform global-index split: rank r gets [r*N/P, (r+1)*N/P)
+        my_offset_i8 = int(myid-1, i8b) * int(ngrid_all_int, i8b) / int(ncpu, i8b)
+        my_end_i8    = int(myid,   i8b) * int(ngrid_all_int, i8b) / int(ncpu, i8b)
+        my_count_i8  = my_end_i8 - my_offset_i8
+
+        nchunk_local = int( (my_count_i8 + int(chunk_size,i8b) - 1_i8b) &
+                            / int(chunk_size,i8b) )
+#ifndef WITHOUTMPI
+        call MPI_ALLREDUCE(nchunk_local, nchunk_global, 1, MPI_INTEGER, &
+             MPI_MAX, MPI_COMM_WORLD, info)
+#else
+        nchunk_global = nchunk_local
+#endif
+        if(nchunk_global < 1) nchunk_global = 1   ! safety: at least one collective round
+
+        ! Pack layout: xg(ndim) | son_flag(twotondim) | i_file → all as dp
+        nprops_pack = ndim + twotondim + 1
+        allocate(xg_chunk(max(chunk_size,1), ndim))
+        allocate(son_flag_chunk(max(chunk_size,1) * twotondim))
+        allocate(sendbuf(nprops_pack, max(chunk_size,1)))
+        allocate(dest_cpu_arr(max(chunk_size,1)))
+
         igrid_prev_cpu = 0
-        do i = 1, ngrid_all_int
-           ! Compute father cell index
-           if(ilevel == 1) then
-              twotol = 1.0d0
-              ix = int(xg_all(i, 1) * twotol, 8)
-              iy = int(xg_all(i, 2) * twotol, 8)
-              iz = int(xg_all(i, 3) * twotol, 8)
-              father_cell = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
+        do ichunk = 0, nchunk_global - 1
+           ! My contribution to this collective round (may be 0)
+           chunk_off_i8 = int(ichunk, i8b) * int(chunk_size, i8b)
+           if(chunk_off_i8 >= my_count_i8) then
+              this_chunk = 0
+              global_off_i8 = my_offset_i8   ! n=0 path ignores offset
            else
-              twotol = 2.0d0**(ilevel-1)
-              ix = int(xg_all(i, 1) * twotol, 8)
-              iy = int(xg_all(i, 2) * twotol, 8)
-              iz = int(xg_all(i, 3) * twotol, 8)
-              ix_p = ix / 2_8
-              iy_p = iy / 2_8
-              iz_p = iz / 2_8
-              mkey = morton_encode(ix_p, iy_p, iz_p)
-              igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
-              if(igrid_father == 0) cycle  ! Father not on this rank → not active
-              ind_cell = 1 + int(mod(ix, 2_8)) + 2 * int(mod(iy, 2_8)) + 4 * int(mod(iz, 2_8))
-              father_cell = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
+              this_chunk = int(min(int(chunk_size,i8b), &
+                                   my_count_i8 - chunk_off_i8))
+              global_off_i8 = my_offset_i8 + chunk_off_i8
            end if
 
-           ! Check if this grid is active (owned by myid)
-           if(cpu_map(father_cell) /= myid) cycle
-
-           ! Allocate grid from free list
-           igrid_new = headf
-           if(igrid_new == 0) then
-              write(*,*) 'ERROR: out of free grids, myid=', myid, &
-                   ' level=', ilevel, ' grid=', i
-              call clean_stop
-           end if
-           headf = next(igrid_new)
-           if(headf > 0) prev(headf) = 0
-           numbf = numbf - 1
-
-           ! Set xg
-           xg(igrid_new, 1:ndim) = xg_all(i, 1:ndim)
-
-           ! Set son_flag → flag1, and init son to 0
-           do iskip = 1, twotondim
-              ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
-              son(ind_cell) = 0
-              flag1(ind_cell) = son_flag_buf((i-1)*twotondim + iskip)
+           !--- Stage A: parallel hyperslab read (collective) ---
+           do idim = 1, ndim
+              write(lvl_str, '(I0)') idim
+              call hdf5_read_dataset_collective_dp(lvl_grp_id, &
+                   'xg_'//trim(lvl_str), xg_chunk(:, idim), this_chunk, &
+                   global_off_i8)
            end do
+           call hdf5_read_dataset_collective_int(lvl_grp_id, 'son_flag', &
+                son_flag_chunk, this_chunk * twotondim, &
+                global_off_i8 * int(twotondim, i8b))
 
-           ! Compute cpu_map for each cell via generic cmp_cpumap
-           do iskip = 1, twotondim
-              ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
-              iz = (iskip - 1) / 4
-              iy = (iskip - 1 - 4 * iz) / 2
-              ix = (iskip - 1 - 2 * iy - 4 * iz)
-              xx_cell(1,1) = (xg_all(i, 1) + (dble(ix) - 0.5d0) * dx &
-                   - dble(icoarse_min)) * scale
-              xx_cell(1,2) = (xg_all(i, 2) + (dble(iy) - 0.5d0) * dx &
-                   - dble(jcoarse_min)) * scale
-              xx_cell(1,3) = (xg_all(i, 3) + (dble(iz) - 0.5d0) * dx &
-                   - dble(kcoarse_min)) * scale
+           !--- Stage B prep: dest_cpu via cmp_cpumap + pack ---
+           do j = 1, this_chunk
+              xx_cell(1,1) = (xg_chunk(j,1) - dble(icoarse_min)) * scale
+              xx_cell(1,2) = (xg_chunk(j,2) - dble(jcoarse_min)) * scale
+              xx_cell(1,3) = (xg_chunk(j,3) - dble(kcoarse_min)) * scale
               call cmp_cpumap(xx_cell, c_tmp, 1)
-              cpu_map(ind_cell) = c_tmp(1)
-              cpu_map2(ind_cell) = c_tmp(1)
+              dest_cpu_arr(j) = c_tmp(1)
+
+              sendbuf(1:ndim, j) = xg_chunk(j, 1:ndim)
+              do iskip = 1, twotondim
+                 sendbuf(ndim + iskip, j) = &
+                      dble(son_flag_chunk((j-1)*twotondim + iskip))
+              end do
+              ! 1-based global file row index (≤ 2^31-1 in current scale,
+              ! exactly representable as dp up to 2^53)
+              sendbuf(nprops_pack, j) = dble(global_off_i8 + int(j, i8b))
            end do
 
-           ! Set father pointer
-           father(igrid_new) = father_cell
+           !--- Stage B: recursive k-section redistribution ---
+           call ksection_exchange_dp(sendbuf, this_chunk, dest_cpu_arr, &
+                nprops_pack, recvbuf, nrecv)
 
-           ! Set son in parent cell
-           son(father_cell) = igrid_new
+           !--- Stage C: create received grids (already this rank's) ---
+           do j = 1, nrecv
+              i_file = nint(recvbuf(nprops_pack, j))
 
-           ! Insert into Morton hash
-           mkey = grid_to_morton(igrid_new, ilevel)
-           call morton_hash_insert(mort_table(ilevel), mkey, igrid_new)
-           grid_level(igrid_new) = ilevel
+              if(ilevel == 1) then
+                 twotol = 1.0d0
+                 ix = int(recvbuf(1,j) * twotol, 8)
+                 iy = int(recvbuf(2,j) * twotol, 8)
+                 iz = int(recvbuf(3,j) * twotol, 8)
+                 father_cell = 1 + int(ix) + int(iy) * nx + int(iz) * nxny
+              else
+                 twotol = 2.0d0**(ilevel-1)
+                 ix = int(recvbuf(1,j) * twotol, 8)
+                 iy = int(recvbuf(2,j) * twotol, 8)
+                 iz = int(recvbuf(3,j) * twotol, 8)
+                 ix_p = ix / 2_8
+                 iy_p = iy / 2_8
+                 iz_p = iz / 2_8
+                 mkey = morton_encode(ix_p, iy_p, iz_p)
+                 igrid_father = morton_hash_lookup(mort_table(ilevel-1), mkey)
+                 if(igrid_father == 0) cycle  ! parent not on this rank
+                 ind_cell = 1 + int(mod(ix,2_8)) + 2*int(mod(iy,2_8)) + 4*int(mod(iz,2_8))
+                 father_cell = ncoarse + (ind_cell - 1) * ngridmax + igrid_father
+              end if
 
-           ! Append to linked list for myid at this level
-           if(igrid_prev_cpu == 0) then
-              headl(myid, ilevel) = igrid_new
-           else
-              next(igrid_prev_cpu) = igrid_new
-           end if
-           prev(igrid_new) = igrid_prev_cpu
-           next(igrid_new) = 0
-           taill(myid, ilevel) = igrid_new
-           numbl(myid, ilevel) = numbl(myid, ilevel) + 1
-           igrid_prev_cpu = igrid_new
+              ! Defensive: ksection routing matches cpu_map decomposition,
+              ! but skip on disagreement (e.g., float boundary cases)
+              if(cpu_map(father_cell) /= myid) cycle
 
-           ! Save file→igrid mapping for hydro/poisson restore
-           varcpu_grid_file_idx(igrid_new) = i
+              igrid_new = headf
+              if(igrid_new == 0) then
+                 write(*,*) 'ERROR: out of free grids, myid=', myid, &
+                      ' level=', ilevel, ' file_row=', i_file
+                 call clean_stop
+              end if
+              headf = next(igrid_new)
+              if(headf > 0) prev(headf) = 0
+              numbf = numbf - 1
+
+              xg(igrid_new, 1:ndim) = recvbuf(1:ndim, j)
+
+              do iskip = 1, twotondim
+                 ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
+                 son(ind_cell) = 0
+                 flag1(ind_cell) = nint(recvbuf(ndim + iskip, j))
+              end do
+
+              ! Vectorized cmp_cpumap for 8 sub-cells
+              do iskip = 1, twotondim
+                 iz_off = (iskip - 1) / 4
+                 iy_off = (iskip - 1 - 4 * iz_off) / 2
+                 ix_off = (iskip - 1 - 2 * iy_off - 4 * iz_off)
+                 xx_cells(iskip, 1) = (recvbuf(1,j) + (dble(ix_off) - 0.5d0) * dx &
+                      - dble(icoarse_min)) * scale
+                 xx_cells(iskip, 2) = (recvbuf(2,j) + (dble(iy_off) - 0.5d0) * dx &
+                      - dble(jcoarse_min)) * scale
+                 xx_cells(iskip, 3) = (recvbuf(3,j) + (dble(iz_off) - 0.5d0) * dx &
+                      - dble(kcoarse_min)) * scale
+              end do
+              call cmp_cpumap(xx_cells, c_cells, twotondim)
+              do iskip = 1, twotondim
+                 ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid_new
+                 cpu_map(ind_cell)  = c_cells(iskip)
+                 cpu_map2(ind_cell) = c_cells(iskip)
+              end do
+
+              father(igrid_new) = father_cell
+              son(father_cell)  = igrid_new
+
+              mkey = grid_to_morton(igrid_new, ilevel)
+              call morton_hash_insert(mort_table(ilevel), mkey, igrid_new)
+              grid_level(igrid_new) = ilevel
+
+              if(igrid_prev_cpu == 0) then
+                 headl(myid, ilevel) = igrid_new
+              else
+                 next(igrid_prev_cpu) = igrid_new
+              end if
+              prev(igrid_new) = igrid_prev_cpu
+              next(igrid_new) = 0
+              taill(myid, ilevel) = igrid_new
+              numbl(myid, ilevel) = numbl(myid, ilevel) + 1
+              igrid_prev_cpu = igrid_new
+
+              varcpu_grid_file_idx(igrid_new) = i_file
+           end do
+
+           if(allocated(recvbuf)) deallocate(recvbuf)
         end do
 
-        deallocate(xg_all, son_flag_buf)
+        deallocate(xg_chunk, son_flag_chunk, sendbuf, dest_cpu_arr)
         call hdf5_close_group(lvl_grp_id)
+
+        ! Tier 2: ksection exchange delivers grids in non-monotonic file-idx
+        ! order. restore_hydro/poisson walk the active list with an early-exit
+        ! "fidx > chunk_end" check that assumes ascending order. Sort the active
+        ! linked list by varcpu_grid_file_idx so subsequent restore stages see
+        ! a monotonic chain.
+        block
+           integer :: nactive, k, ig_tmp
+           integer, allocatable :: igrid_arr(:), perm(:)
+           real(dp), allocatable :: fkey(:)
+           nactive = numbl(myid, ilevel)
+           if(nactive > 1) then
+              allocate(igrid_arr(nactive), fkey(nactive), perm(nactive))
+              ig_tmp = headl(myid, ilevel)
+              k = 0
+              do while(ig_tmp > 0)
+                 k = k + 1
+                 if(k > nactive) exit  ! defensive: numbl mismatch
+                 igrid_arr(k) = ig_tmp
+                 fkey(k) = dble(varcpu_grid_file_idx(ig_tmp))
+                 ig_tmp = next(ig_tmp)
+              end do
+              if(k == nactive) then
+                 call quick_sort_dp(fkey, perm, nactive)
+                 headl(myid, ilevel) = igrid_arr(perm(1))
+                 prev(igrid_arr(perm(1))) = 0
+                 do k = 1, nactive - 1
+                    next(igrid_arr(perm(k)))   = igrid_arr(perm(k+1))
+                    prev(igrid_arr(perm(k+1))) = igrid_arr(perm(k))
+                 end do
+                 next(igrid_arr(perm(nactive))) = 0
+                 taill(myid, ilevel) = igrid_arr(perm(nactive))
+              end if
+              deallocate(igrid_arr, fkey, perm)
+           end if
+        end block
 
         !--- Phase 2: Create virtual grids via RAMSES refine mechanism ---
         ! Active grids already set son(father)>0, so refine skips those cells
@@ -510,11 +631,27 @@ subroutine restore_amr_hdf5()
         ! Build communicators for this level
         call build_comm(ilevel)
 
-        ! Exchange flag1/cpu_map/cpu_map2 from active to virtual grids
+        ! Exchange flag1/cpu_map from active to virtual grids
         ! (needed for refine_fine at next level)
         call make_virtual_fine_int(flag1(1), ilevel)
         call make_virtual_fine_int(cpu_map(1), ilevel)
-        call make_virtual_fine_int(cpu_map2(1), ilevel)
+        ! cpu_map2 == cpu_map during restore: copy locally over virtual grids
+        ! instead of a third MPI collective exchange.
+        ! Per-icpu virtual grid linked lists occupy disjoint igrid slots, so
+        ! the outer loop is OMP-safe (no write collisions across icpus).
+!$OMP PARALLEL DO PRIVATE(icpu,igrid,iskip,ind_cell) SCHEDULE(DYNAMIC)
+        do icpu = 1, ncpu
+           if(icpu == myid) cycle
+           igrid = headl(icpu, ilevel)
+           do while(igrid > 0)
+              do iskip = 1, twotondim
+                 ind_cell = ncoarse + (iskip - 1) * ngridmax + igrid
+                 cpu_map2(ind_cell) = cpu_map(ind_cell)
+              end do
+              igrid = next(igrid)
+           end do
+        end do
+!$OMP END PARALLEL DO
 
         if(myid==1) write(*,'(A,I3,A,I10,A,I10)') &
              ' HDF5 level ', ilevel, ' active: ', numbl(myid, ilevel), &
@@ -819,12 +956,17 @@ subroutine restore_hydro_hdf5()
   integer :: ngrid_loc, nvar_file, fidx
   integer, allocatable :: ngrid_all(:)
   integer(i8b) :: ncells_total, offset_cells, ngrid_total
-  real(dp), allocatable :: ubuf(:), ubuf_all(:)
+  real(dp), allocatable :: ubuf(:), ubuf_all(:), ubuf_chunk(:)
   integer(HID_T) :: grp_id, lvl_grp_id, hdr_grp_id
   character(len=200) :: h5filename
   character(len=40) :: grp_name
   character(len=10) :: lvl_str, var_str
   character(len=5) :: nchar
+  ! Streaming chunk buffers for varcpu hydro restore
+  integer :: chunk_size, this_chunk, local_idx, ngrid_file_lvl
+  integer :: n_chunk_grids, igrid_w, j
+  integer, allocatable :: chunk_igrids(:), chunk_fidx_offset(:)
+  integer(i8b) :: i_global
 
   call title(nrestart, nchar)
   h5filename = 'output_'//trim(nchar)//'/data_'//trim(nchar)//'.h5'
@@ -848,7 +990,10 @@ subroutine restore_hydro_hdf5()
 
   if(varcpu_restart) then
      !===================================================
-     ! VARIABLE NCPU PATH: ALL ranks read ALL data, scatter
+     ! VARIABLE NCPU PATH: streaming chunked read + scatter.
+     ! Active grids on each rank are in file-index order (Phase 1 added them
+     ! sequentially), so a single forward walk of headl→next suffices per
+     ! chunk: advance pointer while fidx <= chunk_end, exit at first fidx > end.
      !===================================================
      do ilevel = 1, nlevelmax
         ngrid_loc = numbl(myid, ilevel)
@@ -866,27 +1011,54 @@ subroutine restore_hydro_hdf5()
            if(h5err /= 0) cycle
         end block
 
-        ! ALL ranks read ALL hydro data for this level
-        allocate(ubuf_all(varcpu_ngrid_file(ilevel) * twotondim))
+        ngrid_file_lvl = varcpu_ngrid_file(ilevel)
+        chunk_size = min(1048576, ngrid_file_lvl)
+        allocate(ubuf_chunk(chunk_size * twotondim))
+        ! Per-chunk grid index buffers (max possible = ngrid_loc owned at this level)
+        allocate(chunk_igrids(max(ngrid_loc, 1)))
+        allocate(chunk_fidx_offset(max(ngrid_loc, 1)))
 
-        do ivar = 1, min(nvar, nvar_file)
-           write(var_str, '(I0)') ivar
-           call hdf5_read_dataset_all_dp(lvl_grp_id, 'uold_'//trim(var_str), &
-                ubuf_all, varcpu_ngrid_file(ilevel) * twotondim)
+        ! Outer chunk loop: walk linked list ONCE per chunk, read all ivars,
+        ! parallelize scatter writes over chunk_igrids (independent igrids).
+        igrid = headl(myid, ilevel)
+        i_global = 0_i8b
+        do while (i_global < int(ngrid_file_lvl, i8b))
+           this_chunk = int(min(int(chunk_size, i8b), &
+                int(ngrid_file_lvl, i8b) - i_global))
 
-           ! Scatter to active grids owned by this rank
-           igrid = headl(myid, ilevel)
+           ! Collect active grids whose fidx falls in (i_global, i_global+this_chunk]
+           n_chunk_grids = 0
            do while(igrid > 0)
               fidx = varcpu_grid_file_idx(igrid)
-              do ind = 1, twotondim
-                 iskip = ncoarse + (ind - 1) * ngridmax
-                 uold(igrid + iskip, ivar) = ubuf_all((fidx-1)*twotondim + ind)
-              end do
+              if(fidx > int(i_global) + this_chunk) exit
+              n_chunk_grids = n_chunk_grids + 1
+              chunk_igrids(n_chunk_grids) = igrid
+              chunk_fidx_offset(n_chunk_grids) = fidx - int(i_global)
               igrid = next(igrid)
            end do
+
+           do ivar = 1, min(nvar, nvar_file)
+              write(var_str, '(I0)') ivar
+              call hdf5_read_dataset_chunk_dp(lvl_grp_id, &
+                   'uold_'//trim(var_str), ubuf_chunk, &
+                   this_chunk * twotondim, i_global * int(twotondim, i8b))
+
+!$OMP PARALLEL DO PRIVATE(j,igrid_w,local_idx,ind,iskip) SCHEDULE(STATIC)
+              do j = 1, n_chunk_grids
+                 igrid_w = chunk_igrids(j)
+                 local_idx = chunk_fidx_offset(j)
+                 do ind = 1, twotondim
+                    iskip = ncoarse + (ind - 1) * ngridmax
+                    uold(igrid_w + iskip, ivar) = &
+                         ubuf_chunk((local_idx-1)*twotondim + ind)
+                 end do
+              end do
+!$OMP END PARALLEL DO
+           end do
+           i_global = i_global + int(this_chunk, i8b)
         end do
 
-        deallocate(ubuf_all)
+        deallocate(ubuf_chunk, chunk_igrids, chunk_fidx_offset)
         call hdf5_close_group(lvl_grp_id)
      end do
   else
@@ -984,12 +1156,17 @@ subroutine restore_poisson_hdf5()
   integer :: ngrid_loc
   integer, allocatable :: ngrid_all(:)
   integer(i8b) :: ncells_total, offset_cells, ngrid_total
-  real(dp), allocatable :: pbuf(:), pbuf_all(:)
+  real(dp), allocatable :: pbuf(:), pbuf_all(:), pbuf_chunk(:)
   integer(HID_T) :: lvl_grp_id
   character(len=200) :: h5filename
   character(len=40) :: grp_name
   character(len=10) :: lvl_str, dim_str
   character(len=5) :: nchar
+  ! Streaming chunk buffers for varcpu poisson restore
+  integer :: chunk_size, this_chunk, local_idx, ngrid_file_lvl
+  integer :: n_chunk_grids, igrid_w, j
+  integer, allocatable :: chunk_igrids(:), chunk_fidx_offset(:)
+  integer(i8b) :: i_global
 
   call title(nrestart, nchar)
   h5filename = 'output_'//trim(nchar)//'/data_'//trim(nchar)//'.h5'
@@ -1003,7 +1180,9 @@ subroutine restore_poisson_hdf5()
 
   if(varcpu_restart) then
      !===================================================
-     ! VARIABLE NCPU PATH: ALL ranks read ALL data, scatter
+     ! VARIABLE NCPU PATH: streaming chunked read + scatter.
+     ! Same pattern as hydro: active grids in file-index order, single
+     ! forward walk per chunk for each component (phi + ndim force comps).
      !===================================================
      do ilevel = 1, nlevelmax
         ngrid_loc = numbl(myid, ilevel)
@@ -1021,39 +1200,66 @@ subroutine restore_poisson_hdf5()
            if(h5err /= 0) cycle
         end block
 
-        ! ALL ranks read ALL data for this level
-        allocate(pbuf_all(varcpu_ngrid_file(ilevel) * twotondim))
+        ngrid_file_lvl = varcpu_ngrid_file(ilevel)
+        chunk_size = min(1048576, ngrid_file_lvl)
+        allocate(pbuf_chunk(chunk_size * twotondim))
+        allocate(chunk_igrids(max(ngrid_loc, 1)))
+        allocate(chunk_fidx_offset(max(ngrid_loc, 1)))
 
-        ! Read phi
-        call hdf5_read_dataset_all_dp(lvl_grp_id, 'phi', &
-             pbuf_all, varcpu_ngrid_file(ilevel) * twotondim)
+        ! Single chunk loop: walk linked list ONCE per chunk, then read phi
+        ! and each force component, parallel-scatter on the same igrid set.
         igrid = headl(myid, ilevel)
-        do while(igrid > 0)
-           fidx = varcpu_grid_file_idx(igrid)
-           do ind = 1, twotondim
-              iskip = ncoarse + (ind - 1) * ngridmax
-              phi(igrid + iskip) = pbuf_all((fidx-1)*twotondim + ind)
-           end do
-           igrid = next(igrid)
-        end do
+        i_global = 0_i8b
+        do while (i_global < int(ngrid_file_lvl, i8b))
+           this_chunk = int(min(int(chunk_size, i8b), &
+                int(ngrid_file_lvl, i8b) - i_global))
 
-        ! Read force
-        do idim = 1, ndim
-           write(dim_str, '(I0)') idim
-           call hdf5_read_dataset_all_dp(lvl_grp_id, 'f_'//trim(dim_str), &
-                pbuf_all, varcpu_ngrid_file(ilevel) * twotondim)
-           igrid = headl(myid, ilevel)
+           n_chunk_grids = 0
            do while(igrid > 0)
               fidx = varcpu_grid_file_idx(igrid)
-              do ind = 1, twotondim
-                 iskip = ncoarse + (ind - 1) * ngridmax
-                 f(igrid + iskip, idim) = pbuf_all((fidx-1)*twotondim + ind)
-              end do
+              if(fidx > int(i_global) + this_chunk) exit
+              n_chunk_grids = n_chunk_grids + 1
+              chunk_igrids(n_chunk_grids) = igrid
+              chunk_fidx_offset(n_chunk_grids) = fidx - int(i_global)
               igrid = next(igrid)
            end do
+
+           ! phi
+           call hdf5_read_dataset_chunk_dp(lvl_grp_id, 'phi', pbuf_chunk, &
+                this_chunk * twotondim, i_global * int(twotondim, i8b))
+!$OMP PARALLEL DO PRIVATE(j,igrid_w,local_idx,ind,iskip) SCHEDULE(STATIC)
+           do j = 1, n_chunk_grids
+              igrid_w = chunk_igrids(j)
+              local_idx = chunk_fidx_offset(j)
+              do ind = 1, twotondim
+                 iskip = ncoarse + (ind - 1) * ngridmax
+                 phi(igrid_w + iskip) = pbuf_chunk((local_idx-1)*twotondim + ind)
+              end do
+           end do
+!$OMP END PARALLEL DO
+
+           ! force components
+           do idim = 1, ndim
+              write(dim_str, '(I0)') idim
+              call hdf5_read_dataset_chunk_dp(lvl_grp_id, &
+                   'f_'//trim(dim_str), pbuf_chunk, &
+                   this_chunk * twotondim, i_global * int(twotondim, i8b))
+!$OMP PARALLEL DO PRIVATE(j,igrid_w,local_idx,ind,iskip) SCHEDULE(STATIC)
+              do j = 1, n_chunk_grids
+                 igrid_w = chunk_igrids(j)
+                 local_idx = chunk_fidx_offset(j)
+                 do ind = 1, twotondim
+                    iskip = ncoarse + (ind - 1) * ngridmax
+                    f(igrid_w + iskip, idim) = &
+                         pbuf_chunk((local_idx-1)*twotondim + ind)
+                 end do
+              end do
+!$OMP END PARALLEL DO
+           end do
+           i_global = i_global + int(this_chunk, i8b)
         end do
 
-        deallocate(pbuf_all)
+        deallocate(pbuf_chunk, chunk_igrids, chunk_fidx_offset)
         call hdf5_close_group(lvl_grp_id)
      end do
 
@@ -1294,6 +1500,10 @@ subroutine restore_part_hdf5()
   ! Read level
   call hdf5_read_dataset_1d_int(grp_id, 'levelp', ibuf, npart_loc, offset_part)
   levelp(1:npart_loc) = ibuf(1:npart_loc)
+
+  ! Read particle type (stored as int4 in HDF5 for convenience, cast to int1)
+  call hdf5_read_dataset_1d_int(grp_id, 'ptypep', ibuf, npart_loc, offset_part)
+  ptypep(1:npart_loc) = int(ibuf(1:npart_loc), kind=1)
 
   ! Read birth epoch and metallicity if star/sink
   if(star .or. sink) then

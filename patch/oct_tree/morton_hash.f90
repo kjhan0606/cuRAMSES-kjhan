@@ -110,7 +110,8 @@ contains
     integer :: slot, i
 
     ! Rehash if load factor > 0.7
-    if (table%count * 10 > table%capacity * 7) then
+    ! int8 promotion: count can exceed 2^31/10 at level >= 10 (cosmo1024)
+    if (int(table%count, 8) * 10_8 > int(table%capacity, 8) * 7_8) then
        call morton_hash_rehash(table)
     end if
 
