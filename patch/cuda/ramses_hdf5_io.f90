@@ -14,6 +14,26 @@ module ramses_hdf5_io
   integer(HID_T) :: hdf5_file_id    ! current file handle
   integer(HID_T) :: hdf5_plist_id   ! file access property list (MPI-IO)
 
+  ! ----- Phase D: file pool (LRU cache of open HDF5 file handles) -----
+  ! Future-proofing for multi-file outputs (one file per writer-group).
+  ! Single-shared-file callers (current production path) bypass the pool
+  ! entirely; nothing changes for them. Callers that want pooling use
+  !   call file_pool_init(max_open)
+  !   call file_pool_get(filename, comm, file_id)
+  !   ... (handle is owned by the pool; do not close it directly)
+  !   call file_pool_close_all()
+  integer, parameter :: FP_NAME_LEN    = 512
+  integer, parameter :: FP_MAX_DEFAULT = 8
+  integer, parameter :: FP_MAX_LIMIT   = 1024
+  integer                    :: fp_cap   = 0
+  integer                    :: fp_count = 0
+  integer(i8b)               :: fp_tick  = 0
+  character(len=FP_NAME_LEN), allocatable :: fp_name(:)
+  integer(HID_T),             allocatable :: fp_file_id(:)
+  integer(i8b),               allocatable :: fp_lru(:)
+  ! Diagnostic counters
+  integer(i8b) :: fp_hits = 0, fp_misses = 0, fp_evictions = 0
+
 contains
 
   !=========================================================================
@@ -806,6 +826,145 @@ contains
     call h5sclose_f(dspace_id, ierr)
     call h5dclose_f(dset_id, ierr)
   end subroutine hdf5_read_dataset_collective_int
+
+  !=========================================================================
+  ! Phase D: file pool (LRU cache of open HDF5 file handles)
+  !
+  ! Rationale: at exascale, restore may need to read from O(10^3-10^5)
+  ! per-writer files. Keeping all of them open exhausts file descriptors;
+  ! open/close per access wastes O(ms) HDF5 setup per dataset. An LRU pool
+  ! of size K caps open descriptors at K while amortising open overhead
+  ! over many dataset accesses to the same file.
+  !
+  ! Implementation: parallel array of (name, file_id, last_use_tick).
+  ! get() does linear search (K small, typically 8-64) → returns cached
+  ! file_id on hit; on miss opens with parallel MPI-IO, evicting the
+  ! lowest-tick slot if full. Tick is monotonically incremented on every
+  ! get() to define LRU order.
+  !=========================================================================
+  subroutine file_pool_init(max_open)
+    implicit none
+    integer, intent(in), optional :: max_open
+    integer :: cap, ierr
+    if(present(max_open)) then
+       cap = max(1, min(max_open, FP_MAX_LIMIT))
+    else
+       cap = FP_MAX_DEFAULT
+    end if
+    ! Idempotent: re-init flushes whatever was there
+    if(allocated(fp_file_id)) call file_pool_close_all()
+    fp_cap = cap
+    allocate(fp_name(cap), fp_file_id(cap), fp_lru(cap))
+    fp_name = ''
+    fp_file_id = -1_HID_T
+    fp_lru = 0_i8b
+    fp_count = 0
+    fp_tick = 0_i8b
+    fp_hits = 0_i8b
+    fp_misses = 0_i8b
+    fp_evictions = 0_i8b
+    call h5open_f(ierr)
+  end subroutine file_pool_init
+
+  subroutine file_pool_get(filename, comm, file_id)
+    implicit none
+    include 'mpif.h'
+    character(len=*), intent(in)  :: filename
+    integer,          intent(in)  :: comm
+    integer(HID_T),   intent(out) :: file_id
+    integer :: i, victim, ierr
+    integer(HID_T) :: plist_id
+
+    ! Auto-init if caller forgot (uses default capacity)
+    if(.not. allocated(fp_file_id)) call file_pool_init()
+
+    fp_tick = fp_tick + 1_i8b
+
+    ! Cache lookup
+    do i = 1, fp_count
+       if(trim(fp_name(i)) == trim(filename)) then
+          file_id = fp_file_id(i)
+          fp_lru(i) = fp_tick
+          fp_hits = fp_hits + 1_i8b
+          return
+       end if
+    end do
+
+    fp_misses = fp_misses + 1_i8b
+
+    ! Evict LRU slot if pool is full
+    if(fp_count >= fp_cap) then
+       victim = 1
+       do i = 2, fp_count
+          if(fp_lru(i) < fp_lru(victim)) victim = i
+       end do
+       call h5fclose_f(fp_file_id(victim), ierr)
+       fp_evictions = fp_evictions + 1_i8b
+       ! Compact: move the last live slot into the victim's hole
+       if(victim /= fp_count) then
+          fp_name(victim)    = fp_name(fp_count)
+          fp_file_id(victim) = fp_file_id(fp_count)
+          fp_lru(victim)     = fp_lru(fp_count)
+       end if
+       fp_name(fp_count)    = ''
+       fp_file_id(fp_count) = -1_HID_T
+       fp_lru(fp_count)     = 0_i8b
+       fp_count = fp_count - 1
+    end if
+
+    ! Open new
+    call h5pcreate_f(H5P_FILE_ACCESS_F, plist_id, ierr)
+    call h5pset_fapl_mpio_f(plist_id, comm, MPI_INFO_NULL, ierr)
+    call h5fopen_f(trim(filename), H5F_ACC_RDONLY_F, file_id, ierr, &
+         access_prp=plist_id)
+    call h5pclose_f(plist_id, ierr)
+
+    fp_count = fp_count + 1
+    fp_name(fp_count)    = trim(filename)
+    fp_file_id(fp_count) = file_id
+    fp_lru(fp_count)     = fp_tick
+  end subroutine file_pool_get
+
+  subroutine file_pool_close_all()
+    implicit none
+    integer :: i, ierr
+    if(.not. allocated(fp_file_id)) return
+    do i = 1, fp_count
+       call h5fclose_f(fp_file_id(i), ierr)
+    end do
+    deallocate(fp_name, fp_file_id, fp_lru)
+    fp_cap = 0
+    fp_count = 0
+    fp_tick = 0_i8b
+  end subroutine file_pool_close_all
+
+  subroutine file_pool_stats(n_open, n_hits, n_misses, n_evictions, cap)
+    implicit none
+    integer,      intent(out) :: n_open, cap
+    integer(i8b), intent(out) :: n_hits, n_misses, n_evictions
+    n_open      = fp_count
+    cap         = fp_cap
+    n_hits      = fp_hits
+    n_misses    = fp_misses
+    n_evictions = fp_evictions
+  end subroutine file_pool_stats
+
+  ! Convenience wrapper: open via pool AND publish handle into module's
+  ! hdf5_file_id global so callers using the single-file API keep working.
+  ! Pair with hdf5_release_pooled() (does NOT close — pool owns the handle).
+  subroutine hdf5_open_pooled(filename, comm)
+    implicit none
+    character(len=*), intent(in) :: filename
+    integer,          intent(in) :: comm
+    integer(HID_T) :: fid
+    call file_pool_get(filename, comm, fid)
+    hdf5_file_id = fid
+  end subroutine hdf5_open_pooled
+
+  subroutine hdf5_release_pooled()
+    implicit none
+    hdf5_file_id = -1_HID_T
+  end subroutine hdf5_release_pooled
 
   subroutine hdf5_suppress_errors()
     implicit none
